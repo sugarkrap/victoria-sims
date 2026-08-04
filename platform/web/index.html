@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Victoria Sims</title>
+<style>
+    html, body {
+        margin: 0;
+        height: 100%;
+        background: #0f1116;
+        color: #d8dce6;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body {
+        display: flex;
+        flex-direction: column;
+    }
+    header {
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #262a35;
+    }
+    h1 {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+    }
+    #statusLine {
+        margin-top: 0.35rem;
+        font-size: 0.8rem;
+        color: #8b93a7;
+    }
+    #statusLine.statusError {
+        color: #ff7a90;
+    }
+    #victoriaCanvas {
+        flex: 1;
+        width: 100%;
+        display: block;
+    }
+</style>
+</head>
+<body>
+<header>
+    <h1>Victoria Sims</h1>
+    <p id="statusLine">Starting WebGPU&hellip;</p>
+</header>
+<canvas id="victoriaCanvas"></canvas>
+<script src="victoriaRuntime.js"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (OpenGL ES 2.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install graphics and windowing headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libegl1-mesa-dev libgles2-mesa-dev libx11-dev
+
+      - name: Build
+        run: make linux EXTRA_FLAGS=-Werror
+
+      - name: Headless smoke test
+        run: ./build/linux/victoriaSims --check
+
+      - name: Report memory footprint
+        run: size build/linux/victoriaSims
+
+  web:
+    name: WebAssembly (WebGPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and the WebAssembly linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Build
+        run: make web EXTRA_FLAGS=-Werror
+
+      - name: Verify the module instantiates and drives the renderer
+        run: node tools/verifyWebModule.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web/
+
+  armv5:
+    name: ARMv5TE engine core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi
+
+      # Builds the portable core only: there are no cross-compiled EGL or X11
+      # libraries here, and the point is to prove the engine itself stays
+      # portable to the oldest target we support.
+      - name: Cross build
+        run: make armv5 EXTRA_FLAGS=-Werror
+
+      - name: Confirm the object format
+        run: |
+          arm-linux-gnueabi-readelf -h build/armv5/*.o | head -20
+          arm-linux-gnueabi-readelf -A build/armv5/memoryArena.o
+
+  rules:
+    name: Project rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: No dynamic allocation
+        run: make check
+
+      - name: No game assets committed
+        run: |
+          if git ls-files | grep -iE '\.(package|dds|tga|xa|far|iff)$'; then
+            echo "error: game data must never be committed" >&2
+            exit 1
+          fi
+          echo "no game data found in the tree"
