@@ -4,6 +4,11 @@
 
 #define BLOCK_IMAGE_DATA 0x1C4A276CUL
 
+/* What a LIFO holds. Its identifier is the same number the package index files
+   the resource under, which is a coincidence of the format's own making and not
+   a mistake here. */
+#define BLOCK_LEVEL_INFO 0xED534136UL
+
 /* No retail texture is anywhere near this, and a count past it is a misread
  * rather than an image. Bounded before it is looped on. */
 #define LARGEST_MIP_COUNT 32U
@@ -307,5 +312,79 @@ TextureReadResult textureReaderOpen(TextureDescription *texture, const Unsigned8
     {
         return TEXTURE_READ_TRUNCATED;
     }
+    return TEXTURE_READ_OK;
+}
+
+TextureReadResult textureReaderOpenLevel(TextureLevel *level, const Unsigned8 *bytes,
+                                         MemorySize sizeInBytes)
+{
+    ResourceCollection collection;
+    ResourceCursor cursor;
+    ResourceCollectionResult collectionResult;
+    PersistTypeInfo blockType;
+    Unsigned32 byteCount;
+
+    level->resourceName[0] = '\0';
+    level->blockVersion = 0U;
+    level->width = 0;
+    level->height = 0;
+    level->bytes = NULL_POINTER;
+    level->byteCount = 0UL;
+
+    collectionResult = resourceCollectionOpen(&collection, &cursor, bytes, sizeInBytes);
+    if (collectionResult != RESOURCE_COLLECTION_OK)
+    {
+        switch (collectionResult)
+        {
+        case RESOURCE_COLLECTION_OLDER:
+            return TEXTURE_READ_OLDER_COLLECTION;
+        case RESOURCE_COLLECTION_TRUNCATED:
+            return TEXTURE_READ_TRUNCATED;
+        default:
+            return TEXTURE_READ_NOT_A_RESOURCE;
+        }
+    }
+    if (collection.firstBlockType != (Unsigned32)BLOCK_LEVEL_INFO)
+    {
+        return TEXTURE_READ_WRONG_TYPE;
+    }
+
+    resourceCursorReadTypeInformation(&cursor, &blockType);
+    if (cursor.overran)
+    {
+        return TEXTURE_READ_TRUNCATED;
+    }
+    if (blockType.typeIdentifier != (Unsigned32)BLOCK_LEVEL_INFO)
+    {
+        return TEXTURE_READ_WRONG_TYPE;
+    }
+    level->blockVersion = blockType.version;
+
+    resourceCursorReadTypeInformation(&cursor, NULL_POINTER); /* cSGResource */
+    resourceCursorReadString(&cursor, level->resourceName, RESOURCE_NAME_LIMIT);
+
+    level->width = (Integer32)resourceCursorReadUnsigned32(&cursor);
+    level->height = (Integer32)resourceCursorReadUnsigned32(&cursor);
+    /* How many bytes one row of the level occupies. Read past rather than kept:
+       nothing here needs it, and a field skipped by name is clearer than four
+       bytes skipped by arithmetic. */
+    (void)resourceCursorReadUnsigned32(&cursor);
+    byteCount = resourceCursorReadUnsigned32(&cursor);
+    if (cursor.overran)
+    {
+        return TEXTURE_READ_TRUNCATED;
+    }
+    if (level->width <= 0 || level->height <= 0 || level->width > LARGEST_DIMENSION ||
+        level->height > LARGEST_DIMENSION)
+    {
+        return TEXTURE_READ_TRUNCATED;
+    }
+    if ((MemorySize)byteCount > sizeInBytes - cursor.position)
+    {
+        return TEXTURE_READ_TRUNCATED;
+    }
+
+    level->bytes = &bytes[cursor.position];
+    level->byteCount = (MemorySize)byteCount;
     return TEXTURE_READ_OK;
 }

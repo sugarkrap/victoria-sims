@@ -121,6 +121,82 @@ int main(void)
     checkThat(&failureCount, "one of which keeps its largest level elsewhere",
               referencedElsewhere == 1U);
 
+    printf("\n-- following a reference to the level that is elsewhere --\n");
+    {
+        /* The whole point of the reference. A face read without following it is
+           128 by 128 when the disc holds 512 by 512 — not wrong, just a quarter
+           of the resolution, and silently. */
+        char referencedName[RESOURCE_NAME_LIMIT];
+        Integer32 referencedFrom = 0;
+        TextureFormat referencedFormat = TEXTURE_FORMAT_UNKNOWN;
+        Boolean foundReference = BOOLEAN_FALSE;
+
+        referencedName[0] = '\0';
+        for (index = 0U; index < package.resourceCount && !foundReference; index++)
+        {
+            const PackageResource *resource = &package.resources[index];
+            TextureDescription texture;
+
+            if (resource->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_TXTR ||
+                textureReaderOpen(&texture, packageReaderGetResourceBytes(&package, resource),
+                                  (MemorySize)resource->sizeInBytes) != TEXTURE_READ_OK ||
+                !texture.largestIsElsewhere)
+            {
+                continue;
+            }
+            stringAppend(referencedName, sizeof(referencedName), texture.lifoName);
+            referencedFrom = texture.levelWidth;
+            referencedFormat = texture.format;
+            foundReference = BOOLEAN_TRUE;
+        }
+        checkThat(&failureCount, "the texture that refers out is found", foundReference);
+
+        if (foundReference)
+        {
+            Boolean opened = BOOLEAN_FALSE;
+
+            printf("  %s refers to %s, holding %d wide itself\n", "the texture", referencedName,
+                   (int)referencedFrom);
+            for (index = 0U; index < package.resourceCount && !opened; index++)
+            {
+                const PackageResource *resource = &package.resources[index];
+                TextureLevel level;
+                TextureDescription asTexture;
+
+                if (resource->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_LIFO)
+                {
+                    continue;
+                }
+                /* Not the same block as a texture, which is the thing worth
+                   knowing: a TXTR holds a cImageData and a LIFO holds a
+                   cLevelInfo, and the first attempt at this ran the texture
+                   reader over one and got nothing. */
+                checkThat(&failureCount, "the texture reader does not open a level",
+                          textureReaderOpen(&asTexture,
+                                            packageReaderGetResourceBytes(&package, resource),
+                                            (MemorySize)resource->sizeInBytes) !=
+                              TEXTURE_READ_OK);
+                checkThat(&failureCount, "but the level reader does",
+                          textureReaderOpenLevel(&level,
+                                                 packageReaderGetResourceBytes(&package, resource),
+                                                 (MemorySize)resource->sizeInBytes) ==
+                              TEXTURE_READ_OK);
+                printf("  it holds %dx%d in %lu bytes\n", (int)level.width, (int)level.height,
+                       (unsigned long)level.byteCount);
+                checkThat(&failureCount, "and holds a larger level than the texture did",
+                          level.width > referencedFrom);
+                /* A level carries no format of its own — the texture that named
+                   it owns that — so the size is checked against the format the
+                   texture reported, which is exactly what a caller has to do. */
+                checkThat(&failureCount, "whose byte count matches its dimensions in that format",
+                          level.byteCount == textureFormatGetLevelBytes(referencedFormat,
+                                                                       level.width, level.height));
+                opened = BOOLEAN_TRUE;
+            }
+            checkThat(&failureCount, "and the package really holds it", opened);
+        }
+    }
+
     printf("\n-- the level order, on the texture that proves it --\n");
     {
         /* brick_dxt1_no_lifo is 128 by 128 with eight levels and all of them

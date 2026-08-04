@@ -93,6 +93,30 @@ typedef struct TextureDescription
 TextureReadResult textureReaderOpen(TextureDescription *texture, const Unsigned8 *bytes,
                                     MemorySize sizeInBytes);
 
+/* One mip level on its own, out of the LIFO a texture referred to.
+ *
+ * Not the same block as a texture, which is the first thing to know about it: a
+ * TXTR holds a cImageData and a LIFO holds a cLevelInfo, and running the one
+ * reader over the other gets nowhere. The difference is not decorative — a
+ * level knows its size and its bytes and nothing else, because the format it is
+ * in belongs to the texture that named it.
+ *
+ * So a caller needs both: the description for what the pixels mean, and this
+ * for which pixels. */
+typedef struct TextureLevel
+{
+    char resourceName[RESOURCE_NAME_LIMIT];
+    Unsigned32 blockVersion;
+
+    Integer32 width;
+    Integer32 height;
+    const Unsigned8 *bytes;
+    MemorySize byteCount;
+} TextureLevel;
+
+TextureReadResult textureReaderOpenLevel(TextureLevel *level, const Unsigned8 *bytes,
+                                         MemorySize sizeInBytes);
+
 /* How many bytes a level of these dimensions occupies in this format. Zero when
    the format is not one this reader measures. */
 MemorySize textureFormatGetLevelBytes(TextureFormat format, Integer32 width, Integer32 height);

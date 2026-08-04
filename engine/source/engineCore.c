@@ -597,15 +597,19 @@ static void uploadFoundTexture(void)
     memoryArenaRewindToMarker(globalArena, marker);
 }
 
-/* Reads the texture the index pointed at, out of whichever package holds it.
- * Answers false while the bytes are still on their way. */
-static Boolean fetchIndexedTexture(const ResourceIndexEntry *found, Boolean *succeeded)
+/* Reads one indexed resource into the arena, unpacked. Answers false while the
+ * bytes are still on their way; a null result with a true answer means the read
+ * finished and failed. */
+static Boolean readIndexedResource(const ResourceIndexEntry *found, Unsigned8 **resultBytes,
+                                   MemorySize *resultSize)
 {
     Unsigned8 *bytes;
     VirtualReadResult read;
     MemorySize size = (MemorySize)found->sizeInBytes;
 
-    *succeeded = BOOLEAN_FALSE;
+    *resultBytes = NULL_POINTER;
+    *resultSize = 0UL;
+
     bytes = (Unsigned8 *)memoryArenaAllocate(globalArena, size, 8UL);
     if (bytes == NULL_POINTER)
     {
@@ -641,11 +645,144 @@ static Boolean fetchIndexedTexture(const ResourceIndexEntry *found, Boolean *suc
         size = unpackedSize;
     }
 
+    *resultBytes = bytes;
+    *resultSize = size;
+    return BOOLEAN_TRUE;
+}
+
+/* Reads the texture the index pointed at, out of whichever package holds it.
+ * Answers false while the bytes are still on their way. */
+static Boolean fetchIndexedTexture(const ResourceIndexEntry *found, Boolean *succeeded)
+{
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    *succeeded = BOOLEAN_FALSE;
+    if (!readIndexedResource(found, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (bytes == NULL_POINTER)
+    {
+        return BOOLEAN_TRUE;
+    }
     if (textureReaderOpen(&discSearch.texture, bytes, size) == TEXTURE_READ_OK)
     {
         discSearch.textureFound = BOOLEAN_TRUE;
         *succeeded = BOOLEAN_TRUE;
     }
+    return BOOLEAN_TRUE;
+}
+
+/* Follows a texture's reference to the resource holding its largest level.
+ *
+ * A TXTR stores its mip levels smallest first, and the largest is frequently
+ * not in it at all: it is a named reference to a LIFO, a resource holding that
+ * one level and nothing else. A face read without following it is a 128 by 128
+ * face when the disc holds 512 by 512 — not wrong, just the wrong quarter of
+ * the resolution, and silently.
+ *
+ * Everything needed to describe the image — its format, its full dimensions —
+ * came from the TXTR and stays. Only the bytes and the level's own size are
+ * replaced. Answers false while the bytes are on their way.
+ *
+ * The TXTR's own bytes are deliberately still allocated beneath this one, so a
+ * LIFO that will not read leaves the smaller level intact to fall back on. */
+static Boolean fetchLargestLevel(char *message, MemorySize messageCapacity)
+{
+    char wanted[RESOURCE_NAME_LIMIT];
+    const ResourceIndexEntry *found;
+    Unsigned8 *bytes;
+    MemorySize size;
+    TextureLevel largest;
+    TextureReadResult opened;
+
+    /* Both spellings. The reference is a resource name and the suffix is a
+       convention, so which of the two the disc used is not knowable from here. */
+    found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
+                                   discSearch.texture.lifoName);
+    if (found == NULL_POINTER)
+    {
+        materialBuildResourceName(wanted, sizeof(wanted), discSearch.texture.lifoName, "_lifo");
+        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
+    }
+    if (found == NULL_POINTER)
+    {
+        message[0] = '\0';
+        stringAppend(message, messageCapacity, "engine: its largest level names ");
+        stringAppend(message, messageCapacity, discSearch.texture.lifoName);
+        stringAppend(message, messageCapacity, ", which is nowhere on this disc");
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+
+    if (!readIndexedResource(found, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, messageCapacity, "engine: its largest level ");
+    if (bytes == NULL_POINTER)
+    {
+        stringAppend(message, messageCapacity, "would not read");
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+
+    opened = textureReaderOpenLevel(&largest, bytes, size);
+    if (opened != TEXTURE_READ_OK)
+    {
+        /* Said with the reason and the first bytes, because a LIFO this reader
+           cannot open is a format question, and the answer to a format question
+           is always in the bytes. */
+        stringAppend(message, messageCapacity, "would not open — ");
+        stringAppend(message, messageCapacity, textureReadResultGetName(opened));
+        stringAppend(message, messageCapacity, ", starting ");
+        appendHexadecimalBytes(message, messageCapacity, bytes, size, 0UL, 8UL);
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+    if (largest.bytes == NULL_POINTER || largest.width <= discSearch.texture.levelWidth)
+    {
+        /* No bigger than what is already in hand. Following a reference that
+           leads back to the same resolution would cost a read and change
+           nothing, and reporting it as an improvement would be a lie. */
+        stringAppend(message, messageCapacity, "is no larger than the one already read");
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+    /* A level carries no format of its own — the texture that named it owns
+       that — so the only check available is whether its length is what those
+       dimensions cost in that format. A level that fails it would decode into
+       noise, and noise on a face is harder to diagnose than a refusal. */
+    if (largest.byteCount != textureFormatGetLevelBytes(discSearch.texture.format, largest.width,
+                                                       largest.height))
+    {
+        stringAppend(message, messageCapacity, "is ");
+        appendCount(message, messageCapacity, (Unsigned32)largest.byteCount);
+        stringAppend(message, messageCapacity, " bytes, which is not what ");
+        appendCount(message, messageCapacity, (Unsigned32)largest.width);
+        stringAppend(message, messageCapacity, "x");
+        appendCount(message, messageCapacity, (Unsigned32)largest.height);
+        stringAppend(message, messageCapacity, " costs in ");
+        stringAppend(message, messageCapacity, textureFormatGetName(discSearch.texture.format));
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+
+    discSearch.texture.bytes = largest.bytes;
+    discSearch.texture.byteCount = largest.byteCount;
+    discSearch.texture.levelWidth = largest.width;
+    discSearch.texture.levelHeight = largest.height;
+    discSearch.texture.largestIsElsewhere = BOOLEAN_FALSE;
+
+    appendCount(message, messageCapacity, (Unsigned32)largest.width);
+    stringAppend(message, messageCapacity, "x");
+    appendCount(message, messageCapacity, (Unsigned32)largest.height);
+    stringAppend(message, messageCapacity, ", from ");
+    stringAppend(message, messageCapacity, discSearch.texture.lifoName);
+    platformLogMessage(message);
     return BOOLEAN_TRUE;
 }
 
@@ -772,7 +909,6 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 memoryArenaRewindToMarker(globalArena, marker);
                 return ENGINE_DISC_WORKING;
             }
-
             message[0] = '\0';
             stringAppend(message, sizeof(message), "engine: ");
             stringAppend(message, sizeof(message), wanted);
@@ -791,6 +927,18 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message), " was indexed but would not read");
             }
             platformLogMessage(message);
+            /* The level in the TXTR is the largest one it holds, which is not
+               always the largest one there is. Said after the line above, so
+               the two read as what was found and then what it led to. */
+            if (succeeded && discSearch.texture.largestIsElsewhere &&
+                discSearch.texture.lifoName[0] != '\0')
+            {
+                if (!fetchLargestLevel(message, sizeof(message)))
+                {
+                    memoryArenaRewindToMarker(globalArena, marker);
+                    return ENGINE_DISC_WORKING;
+                }
+            }
             /* The mesh before the texture. A backend binds an image to the
                pipeline the mesh created, so there is nothing to bind it to
                until the mesh has been uploaded — an ordering that held by
