@@ -30,6 +30,9 @@
 
 #define RESOURCE_INDEX_TYPE_LIMIT 8U
 
+/* Distinct resource types the census remembers. A disc uses a few dozen. */
+#define RESOURCE_INDEX_CENSUS_LIMIT 48U
+
 /* Where one resource is. Deliberately not a PackageResource: the group is
    dropped, because a lookup by hashed name does not know it and matching on it
    would fail every time. */
@@ -76,6 +79,16 @@ typedef struct ResourceIndex
     Unsigned32 countByType[RESOURCE_INDEX_TYPE_LIMIT];
     Unsigned32 entriesSeen;
 
+    /* A census of every type met, wanted or not, most common first.
+       Looking for one type and finding few of it says nothing about whether
+       the disc is unusual or the search is. A tally of what is actually there
+       answers that without another round trip. */
+    Unsigned32 censusTypes[RESOURCE_INDEX_CENSUS_LIMIT];
+    Unsigned32 censusCounts[RESOURCE_INDEX_CENSUS_LIMIT];
+    Unsigned32 censusCount;
+    /* Entries whose type did not fit in the census. */
+    Unsigned32 censusOverflow;
+
     /* Where the walk is. */
     Unsigned32 nextFileIndex;
     Boolean readingHeader;
@@ -107,5 +120,9 @@ const ResourceIndexEntry *resourceIndexFind(const ResourceIndex *index, Unsigned
 /* The same, given a name rather than a key. */
 const ResourceIndexEntry *resourceIndexFindNamed(const ResourceIndex *index,
                                                  Unsigned32 typeIdentifier, const char *name);
+
+/* The nth most common type on the disc, by count. False when there is no nth. */
+Boolean resourceIndexGetCensusRank(const ResourceIndex *index, Unsigned32 rank,
+                                   Unsigned32 *typeIdentifier, Unsigned32 *count);
 
 #endif

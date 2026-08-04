@@ -229,6 +229,52 @@ int main(void)
         store.stutters = BOOLEAN_FALSE;
     }
 
+    printf("\n-- the census of what is actually on the disc --\n");
+    {
+        Unsigned32 typeIdentifier = 0U;
+        Unsigned32 howMany = 0U;
+        Unsigned32 rank;
+        Unsigned32 tallied = 0U;
+
+        /* Six kinds between them: textures and a mip level in one, and a
+           resource node, shape, geometry node and geometry container in the
+           other. Counted off the fixtures' own indices rather than guessed —
+           the first attempt at this line said five, because the mip level was
+           forgotten while the four textures beside it were not. */
+        checkThat(&failureCount, "every entry was counted",
+                  index.entriesSeen == 5U + 4U);
+        checkThat(&failureCount, "and none overflowed the census",
+                  index.censusOverflow == 0U);
+        checkThat(&failureCount, "six distinct types across the two packages",
+                  index.censusCount == 6U);
+
+        checkThat(&failureCount, "the most common is the texture, with four",
+                  resourceIndexGetCensusRank(&index, 0U, &typeIdentifier, &howMany) &&
+                      typeIdentifier == (Unsigned32)PACKAGE_TYPE_TXTR && howMany == 4U);
+
+        /* Every rank is filled exactly once and the counts never rise, which is
+           what makes the ordering an ordering rather than an arbitrary walk. */
+        for (rank = 0U; rank < index.censusCount; rank++)
+        {
+            Unsigned32 thisType = 0U;
+            Unsigned32 thisCount = 0U;
+
+            if (!resourceIndexGetCensusRank(&index, rank, &thisType, &thisCount))
+            {
+                break;
+            }
+            if (thisCount > howMany)
+            {
+                checkThat(&failureCount, "the census never rises as rank falls", BOOLEAN_FALSE);
+            }
+            howMany = thisCount;
+            tallied += thisCount;
+        }
+        checkThat(&failureCount, "every rank is filled", tallied == index.entriesSeen);
+        checkThat(&failureCount, "and there is no rank past the last",
+                  !resourceIndexGetCensusRank(&index, index.censusCount, &typeIdentifier, &howMany));
+    }
+
     printf("\n-- an index with no room says so --\n");
     {
         ResourceIndex small;

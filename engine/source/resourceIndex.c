@@ -61,6 +61,31 @@ static Boolean endsWithPackage(const char *path)
     return BOOLEAN_TRUE;
 }
 
+/* Tallies one type. A linear scan over a few dozen entries, run once per index
+ * entry — a hundred thousand entries against forty eight types is a few million
+ * comparisons, which is nothing beside the reads that produced them. */
+static void recordInCensus(ResourceIndex *index, Unsigned32 typeIdentifier)
+{
+    Unsigned32 which;
+
+    for (which = 0U; which < index->censusCount; which++)
+    {
+        if (index->censusTypes[which] == typeIdentifier)
+        {
+            index->censusCounts[which]++;
+            return;
+        }
+    }
+    if (index->censusCount >= RESOURCE_INDEX_CENSUS_LIMIT)
+    {
+        index->censusOverflow++;
+        return;
+    }
+    index->censusTypes[index->censusCount] = typeIdentifier;
+    index->censusCounts[index->censusCount] = 1U;
+    index->censusCount++;
+}
+
 /* Which slot this type occupies, or the type count when it is not wanted. */
 static Unsigned32 wantedSlot(const ResourceIndex *index, Unsigned32 typeIdentifier)
 {
@@ -95,6 +120,8 @@ Boolean resourceIndexBegin(ResourceIndex *index, VirtualFileSystem *fileSystem, 
     index->pendingIndexOffset = 0U;
     index->pendingIndexSize = 0U;
     index->entriesSeen = 0U;
+    index->censusCount = 0U;
+    index->censusOverflow = 0U;
     index->wantedTypeCount =
         (wantedTypeCount > RESOURCE_INDEX_TYPE_LIMIT) ? RESOURCE_INDEX_TYPE_LIMIT : wantedTypeCount;
     for (which = 0U; which < index->wantedTypeCount; which++)
@@ -220,6 +247,7 @@ ResourceIndexStatus resourceIndexStep(ResourceIndex *index)
             ResourceIndexEntry *stored;
 
             index->entriesSeen++;
+            recordInCensus(index, typeIdentifier);
             if (slot >= index->wantedTypeCount)
             {
                 continue;
@@ -280,6 +308,37 @@ const ResourceIndexEntry *resourceIndexFind(const ResourceIndex *index, Unsigned
         }
     }
     return NULL_POINTER;
+}
+
+Boolean resourceIndexGetCensusRank(const ResourceIndex *index, Unsigned32 rank,
+                                   Unsigned32 *typeIdentifier, Unsigned32 *count)
+{
+    Unsigned32 which;
+
+    /* An entry's rank is simply how many entries stand ahead of it: a larger
+     * count, or an equal count and an earlier position. No sorting, so the
+     * census keeps the order it was gathered in and repeated calls agree. */
+    for (which = 0U; which < index->censusCount; which++)
+    {
+        Unsigned32 ahead = 0U;
+        Unsigned32 other;
+
+        for (other = 0U; other < index->censusCount; other++)
+        {
+            if (index->censusCounts[other] > index->censusCounts[which] ||
+                (index->censusCounts[other] == index->censusCounts[which] && other < which))
+            {
+                ahead++;
+            }
+        }
+        if (ahead == rank)
+        {
+            *typeIdentifier = index->censusTypes[which];
+            *count = index->censusCounts[which];
+            return BOOLEAN_TRUE;
+        }
+    }
+    return BOOLEAN_FALSE;
 }
 
 const ResourceIndexEntry *resourceIndexFindNamed(const ResourceIndex *index,

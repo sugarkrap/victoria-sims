@@ -309,6 +309,36 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             stringAppend(message, sizeof(message), " would not be read");
         }
         platformLogMessage(message);
+
+        /* What the disc is actually made of. Looking for one type and finding
+           little of it says nothing about whether the disc is unusual or the
+           search is; this says which, in the same run. */
+        {
+            Unsigned32 rank;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: most common —");
+            for (rank = 0U; rank < 8U; rank++)
+            {
+                Unsigned32 typeIdentifier;
+                Unsigned32 howMany;
+
+                if (!resourceIndexGetCensusRank(&textureIndex, rank, &typeIdentifier, &howMany))
+                {
+                    break;
+                }
+                stringAppend(message, sizeof(message), " ");
+                appendHexadecimal(message, sizeof(message), typeIdentifier);
+                stringAppend(message, sizeof(message), " x");
+                appendCount(message, sizeof(message), howMany);
+                stringAppend(message, sizeof(message), ";");
+            }
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), textureIndex.censusCount);
+            stringAppend(message, sizeof(message), " distinct type(s)");
+            platformLogMessage(message);
+        }
+
         discPhase = DISC_PHASE_FETCH_TEXTURE;
         return ENGINE_DISC_WORKING;
     }
