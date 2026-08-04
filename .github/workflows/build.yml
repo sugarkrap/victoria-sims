@@ -78,6 +78,27 @@ jobs:
           arm-linux-gnueabi-readelf -h build/armv5/*.o | head -20
           arm-linux-gnueabi-readelf -A build/armv5/memoryArena.o
 
+  oabi:
+    name: ARM old-ABI engine core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi
+
+      # -mabi=apcs-gnu is a GCC ARM-backend codegen flag rather than a property
+      # of one toolchain build, so the stock cross compiler produces genuine
+      # OABI. The make target verifies ELF flags 0x600 rather than trusting it:
+      # an accidentally-EABI binary looks fine until the device refuses it.
+      - name: Cross build
+        run: make oabi EXTRA_FLAGS=-Werror
+
+      - name: Show the verified ABI
+        run: arm-linux-gnueabi-readelf -h build/oabi/memoryArena.o | grep -iE 'Machine|Flags'
+
   rules:
     name: Project rules
     runs-on: ubuntu-latest

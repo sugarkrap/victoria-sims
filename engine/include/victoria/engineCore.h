@@ -4,7 +4,16 @@
 #include "victoria/coreTypes.h"
 #include "victoria/memoryArena.h"
 
-Boolean engineInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
+typedef struct EngineConfiguration
+{
+    Unsigned32 widthInPixels;
+    Unsigned32 heightInPixels;
+    /* Zero asks the backend what it has and falls back to the conservative
+       default; anything else overrides both. */
+    MemorySize graphicsMemoryLimitBytes;
+} EngineConfiguration;
+
+Boolean engineInitialize(const EngineConfiguration *configuration);
 void engineResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
 void engineShutdown(void);
 

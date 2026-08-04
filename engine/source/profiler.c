@@ -48,6 +48,10 @@ typedef struct ProfilerState
     Unsigned64 lastIntervalMicroseconds;
     Unsigned64 accumulatedIntervalMicroseconds;
     Unsigned64 intervalSampleCount;
+    /* An explicit flag rather than testing the timestamp against zero: a clock
+       whose origin really is zero, which is what performance.now() gives on a
+       fresh page, would otherwise keep looking like "no previous frame". */
+    Boolean previousFrameStartIsValid;
 
     Boolean isInitialized;
     Boolean frameIsOpen;
@@ -187,7 +191,7 @@ void profilerBeginFrame(void)
     profilerState.frameIsOpen = BOOLEAN_TRUE;
 
     /* The first frame has no predecessor, so there is no interval to record. */
-    if (profilerState.previousFrameStartMicroseconds != 0ULL)
+    if (profilerState.previousFrameStartIsValid == BOOLEAN_TRUE)
     {
         profilerState.lastIntervalMicroseconds =
             profilerState.frameStartMicroseconds - profilerState.previousFrameStartMicroseconds;
@@ -195,6 +199,7 @@ void profilerBeginFrame(void)
         profilerState.intervalSampleCount += 1ULL;
     }
     profilerState.previousFrameStartMicroseconds = profilerState.frameStartMicroseconds;
+    profilerState.previousFrameStartIsValid = BOOLEAN_TRUE;
 }
 
 void profilerEndFrame(void)
@@ -362,6 +367,7 @@ void profilerReset(void)
     profilerState.worstFrameMicroseconds = 0ULL;
     profilerState.accumulatedFrameMicroseconds = 0ULL;
     profilerState.previousFrameStartMicroseconds = 0ULL;
+    profilerState.previousFrameStartIsValid = BOOLEAN_FALSE;
     profilerState.lastIntervalMicroseconds = 0ULL;
     profilerState.accumulatedIntervalMicroseconds = 0ULL;
     profilerState.intervalSampleCount = 0ULL;

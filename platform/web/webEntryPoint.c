@@ -1,5 +1,6 @@
 #include "victoria/engineCore.h"
 #include "victoria/freestandingRuntime.h"
+#include "victoria/graphicsMemoryBudget.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
@@ -16,7 +17,10 @@ extern double hostGetMilliseconds(void);
 
 /* Declared as well as defined so the build can keep -Wmissing-prototypes on:
    these are entry points for the host page, not internal linkage. */
-Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
+Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels,
+                                 Unsigned32 graphicsMemoryLimitBytes);
+Unsigned32 victoriaWebGetGraphicsMemoryLimitBytes(void);
+Unsigned32 victoriaWebGetGraphicsMemoryUsedBytes(void);
 void victoriaWebResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
 void victoriaWebRenderFrame(Real32 elapsedSeconds);
 void victoriaWebShutdown(void);
@@ -40,9 +44,28 @@ Unsigned64 platformGetMicroseconds(void)
 }
 
 WEB_EXPORT("victoriaWebInitialize")
-Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels,
+                                 Unsigned32 graphicsMemoryLimitBytes)
 {
-    return (Unsigned32)engineInitialize(widthInPixels, heightInPixels);
+    EngineConfiguration configuration;
+
+    configuration.widthInPixels = widthInPixels;
+    configuration.heightInPixels = heightInPixels;
+    configuration.graphicsMemoryLimitBytes = (MemorySize)graphicsMemoryLimitBytes;
+
+    return (Unsigned32)engineInitialize(&configuration);
+}
+
+WEB_EXPORT("victoriaWebGetGraphicsMemoryLimitBytes")
+Unsigned32 victoriaWebGetGraphicsMemoryLimitBytes(void)
+{
+    return (Unsigned32)graphicsMemoryBudgetGetLimit();
+}
+
+WEB_EXPORT("victoriaWebGetGraphicsMemoryUsedBytes")
+Unsigned32 victoriaWebGetGraphicsMemoryUsedBytes(void)
+{
+    return (Unsigned32)graphicsMemoryBudgetGetUsedBytes();
 }
 
 WEB_EXPORT("victoriaWebResize")

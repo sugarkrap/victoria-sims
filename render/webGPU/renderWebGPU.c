@@ -1,4 +1,5 @@
 #include "victoria/freestandingRuntime.h"
+#include "victoria/graphicsMemoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
@@ -23,6 +24,22 @@ extern void hostSetTriangleTint(Real32 tint);
 
 WEB_IMPORT("submitFrame")
 extern void hostSubmitFrame(void);
+
+/* Derived from the adapter's reported limits. WebGPU deliberately does not
+   expose total video memory, so this is an informed guess made by the host,
+   and zero when it has nothing to go on. */
+WEB_IMPORT("queryGraphicsMemoryKibibytes")
+extern Unsigned32 hostQueryGraphicsMemoryKibibytes(void);
+
+/* Forces pipeline creation and a first submission to complete now rather than
+   during the first visible frame. */
+WEB_IMPORT("warmUpPipeline")
+extern void hostWarmUpPipeline(void);
+
+#define TRIANGLE_UNIFORM_BUFFER_BYTES 16UL
+
+static Unsigned32 shaderProgramCount = 0;
+static Boolean uniformBufferIsCharged = BOOLEAN_FALSE;
 
 static const char *triangleShaderSource =
     "struct VertexOutput {\n"
@@ -50,20 +67,46 @@ static const char *triangleShaderSource =
     "    return vec4<f32>(input.color, 1.0);\n"
     "}\n";
 
+MemorySize renderQueryGraphicsMemoryBytes(void)
+{
+    return (MemorySize)hostQueryGraphicsMemoryKibibytes() * 1024UL;
+}
+
 Boolean renderInitialize(MemoryArena *arena, Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
     (void)arena;
 
     hostConfigureSurface(widthInPixels, heightInPixels);
 
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_BUFFER, TRIANGLE_UNIFORM_BUFFER_BYTES) ==
+        BOOLEAN_FALSE)
+    {
+        platformLogMessage("renderer: uniform buffer refused by the graphics memory ceiling");
+        return BOOLEAN_FALSE;
+    }
+    uniformBufferIsCharged = BOOLEAN_TRUE;
+
+    VICTORIA_PROFILE_ZONE_BEGIN("renderCompileShaders");
     if (hostCreateTrianglePipeline(triangleShaderSource, (Unsigned32)stringLength(triangleShaderSource)) == 0)
     {
         platformLogMessage("renderer: WebGPU pipeline creation failed");
+        VICTORIA_PROFILE_ZONE_END();
         return BOOLEAN_FALSE;
     }
+    shaderProgramCount = 1U;
+    VICTORIA_PROFILE_ZONE_END();
+
+    VICTORIA_PROFILE_ZONE_BEGIN("renderWarmUpShaders");
+    hostWarmUpPipeline();
+    VICTORIA_PROFILE_ZONE_END();
 
     platformLogMessage("renderer: WebGPU backend ready");
     return BOOLEAN_TRUE;
+}
+
+Unsigned32 renderGetShaderProgramCount(void)
+{
+    return shaderProgramCount;
 }
 
 void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
@@ -86,4 +129,10 @@ void renderDrawFrame(Real32 elapsedSeconds)
 
 void renderShutdown(void)
 {
+    if (uniformBufferIsCharged == BOOLEAN_TRUE)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, TRIANGLE_UNIFORM_BUFFER_BYTES);
+        uniformBufferIsCharged = BOOLEAN_FALSE;
+    }
+    shaderProgramCount = 0U;
 }

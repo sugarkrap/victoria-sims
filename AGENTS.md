@@ -56,8 +56,15 @@ These two are settled. They are the minimum, not the finish line.
 
 | Target | Graphics | Notes |
 | --- | --- | --- |
-| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv5 and up. Kernels as old as 2.4. |
+| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv5 and up, EABI and OABI. Kernels as old as 2.4. |
 | WebAssembly | WebGPU, no wrapper library | `wasm32`, freestanding, no Emscripten. |
+
+The reference ARMv5 machine is the Sharp Zaurus SL-C760/C860 that
+[piko](https://github.com/sugarkrap/piko) targets: PXA255, XScale ARMv5TE,
+64 MB of RAM, and an ATI Imageon w100 with a few megabytes of its own memory.
+Note that 64 MB is *half* the engine's 128 MiB ceiling, so the engine cannot
+currently run there — ARMv5 is a compile-only portability target for now, and
+that is a deliberate decision rather than an oversight.
 
 Consequences worth internalising before writing platform code:
 
@@ -79,11 +86,20 @@ Consequences worth internalising before writing platform code:
   `WEB_COMPILER`, `ARM_COMPILER`), because targets outlive whatever is
   installed today.
 
-**Open question:** true OABI support is not yet proven. Continuous integration
-cross-builds the portable engine core with `arm-linux-gnueabi-gcc` at
-`-march=armv5te -mfloat-abi=soft`, which is ARMv5TE but *EABI*. A genuine OABI
-toolchain has to be built by hand, and nobody has done it yet. Do not claim
-OABI works until something has actually run on it.
+**OABI is settled.** `-mabi=apcs-gnu` is a GCC ARM-backend codegen flag rather
+than a property of one particular toolchain build, so the stock
+`arm-linux-gnueabi-gcc` produces genuine old-ABI objects. `make oabi` builds
+the engine core that way and verifies the result rather than assuming it: ELF
+flags must read `0x600` (EABI version 0). An accidentally-EABI binary looks
+perfectly fine right up until the device refuses to run it, so the check is not
+optional and must never be relaxed to "it compiled".
+
+This approach comes from the sibling [piko](https://github.com/sugarkrap/piko)
+project, whose `tools/build-oabi-toolchain.sh` also has a from-source
+crosstool-NG fallback for environments where no stock compiler works.
+
+Still unproven: nothing has *run* on real hardware. The objects are correct;
+that is not the same as the engine working on a device.
 
 ## Language
 
@@ -170,6 +186,58 @@ Things worth knowing before you trust a number it prints:
 The report is plain text, formatted by the engine and displayed by the
 platform: printed to the terminal on Linux, shown in an overlay on the web.
 Both show the same text because both ask the engine for it.
+
+## Graphics memory
+
+`engine/include/victoria/graphicsMemoryBudget.h`. Graphics memory is handed out
+by the driver, not by us — we cannot reserve it up front and we cannot see what
+the driver adds on top. So unlike the system arena this is a **ledger and a
+gate, not an allocator**: every resource the engine asks a backend to create is
+declared first, and a request that would cross the ceiling is refused before
+the driver is ever called.
+
+The ceiling is dynamic because the hardware is not comparable. It is
+established once at startup, in this order:
+
+1. An explicit override, if given — `--graphics-memory-mebibytes=N` on Linux,
+   `?graphicsMemoryMebibytes=N` on the web. This is how you simulate a
+   small-memory device on a machine that has plenty, and it is the only
+   practical way to exercise the refusal path.
+2. Whatever the backend will admit to. Neither OpenGL ES 2.0 nor WebGPU has a
+   portable query, so this means the `GL_NVX_gpu_memory_info` and
+   `GL_ATI_meminfo` vendor extensions, or WebGPU's `maxBufferSize` as a proxy
+   for device class. Frequently unavailable.
+3. `VICTORIA_GRAPHICS_MEMORY_DEFAULT_BYTES`, deliberately conservative.
+
+The report says which of the three it was — `detected`, `override`, or
+`assumed` — because a number the driver told us and a number we guessed deserve
+very different amounts of trust.
+
+**Declare before you create, and release what you declared.** A refusal must
+abort the resource, not be logged and ignored. Releases are clamped rather than
+trusted, so a double release cannot wrap the counter and make the ledger read
+as almost entirely free.
+
+## Shaders
+
+Compile every shader during initialisation, and then **draw with it once**.
+Compiling alone is not enough: drivers routinely defer real code generation
+until a program is first used, so eager compilation on its own moves the stall
+to frame one rather than removing it.
+
+The measured split on this project's own first shader, under llvmpipe, was
+11 ms to compile and link and a further **49 ms** that only happened on first
+draw. That second number is invisible to a compile-only approach and was four
+fifths of the cost.
+
+The warm-up draws with colour writes masked off into a one-pixel viewport, then
+calls `glFinish` — the wait is the entire point. On the web the equivalent
+draws into a one-pixel off-screen texture.
+
+Initialisation is bracketed as a profiler frame of its own, so this cost is
+attributed rather than hidden: startup shows up as frame one, and as the worst
+frame until something beats it. Zones entered outside a frame accumulate
+nothing and would have reported as zero.
 
 ## Layout
 

@@ -327,20 +327,32 @@ static int runHeadlessSelfCheck(void)
 
 int main(int argumentCount, char **argumentValues)
 {
+    EngineConfiguration configuration;
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
+    MemorySize graphicsMemoryLimitBytes = 0UL;
     int argumentIndex;
 
     windowState.profilerReportIntervalMicroseconds = PROFILER_REPORT_DEFAULT_INTERVAL_MICROSECONDS;
 
     for (argumentIndex = 1; argumentIndex < argumentCount; argumentIndex += 1)
     {
-        if (stringEquals(argumentValues[argumentIndex], "--check") == BOOLEAN_TRUE)
+        const char *argument = argumentValues[argumentIndex];
+
+        if (stringEquals(argument, "--check") == BOOLEAN_TRUE)
         {
             runHeadlessCheck = BOOLEAN_TRUE;
         }
-        else if (stringEquals(argumentValues[argumentIndex], "--quiet") == BOOLEAN_TRUE)
+        else if (stringEquals(argument, "--quiet") == BOOLEAN_TRUE)
         {
             windowState.profilerReportIntervalMicroseconds = 0ULL;
+        }
+        else if (stringStartsWith(argument, "--graphics-memory-mebibytes=") == BOOLEAN_TRUE)
+        {
+            /* Overrides whatever the driver claims, so a small-memory device
+               can be simulated on a machine that has plenty. */
+            graphicsMemoryLimitBytes =
+                (MemorySize)stringParseUnsigned(argument + stringLength("--graphics-memory-mebibytes=")) *
+                1024UL * 1024UL;
         }
     }
 
@@ -361,7 +373,11 @@ int main(int argumentCount, char **argumentValues)
         return 1;
     }
 
-    if (engineInitialize(windowState.widthInPixels, windowState.heightInPixels) == BOOLEAN_FALSE)
+    configuration.widthInPixels = windowState.widthInPixels;
+    configuration.heightInPixels = windowState.heightInPixels;
+    configuration.graphicsMemoryLimitBytes = graphicsMemoryLimitBytes;
+
+    if (engineInitialize(&configuration) == BOOLEAN_FALSE)
     {
         destroyWindowAndContext();
         return 1;

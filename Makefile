@@ -2,7 +2,8 @@
 #
 #   make linux    native OpenGL ES 2.0 executable (default)
 #   make web      freestanding wasm32 module plus its host page
-#   make armv5    ARMv5TE cross build of the portable engine core
+#   make armv5    ARMv5TE cross build of the portable engine core (EABI)
+#   make oabi     the same, built as genuine ARM OABI
 #   make check    static enforcement of the no-dynamic-allocation rule
 #   make clean
 #
@@ -29,6 +30,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/memoryBudget.c \
                   engine/source/freestandingRuntime.c \
                   engine/source/profiler.c \
+                  engine/source/graphicsMemoryBudget.c \
                   engine/source/engineCore.c
 
 LINUX_SOURCES := $(ENGINE_SOURCES) \
@@ -65,7 +67,9 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetFrameMicroseconds \
                -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
-               -Wl,--export=victoriaWebGetFrameIntervalMicroseconds
+               -Wl,--export=victoriaWebGetFrameIntervalMicroseconds \
+               -Wl,--export=victoriaWebGetGraphicsMemoryLimitBytes \
+               -Wl,--export=victoriaWebGetGraphicsMemoryUsedBytes
 
 WEB_FLAGS := --target=wasm32 -ffreestanding -nostdlib -fno-builtin \
              -DVICTORIA_FREESTANDING_BUILTINS=1
@@ -79,7 +83,19 @@ WEB_LINK_FLAGS := -Wl,--no-entry -Wl,--allow-undefined \
 ARM_FLAGS := -march=armv5te -mfloat-abi=soft -ffreestanding \
              -DVICTORIA_FREESTANDING_BUILTINS=1
 
-.PHONY: all linux web armv5 check clean
+# Genuine old-ABI ARM. -mabi=apcs-gnu is a GCC ARM-backend codegen flag rather
+# than a property of one particular toolchain build, so a stock
+# arm-linux-gnueabi- cross compiler produces it too. Never assume it worked:
+# the check target verifies ELF flags 0x600 (EABI version 0), because an
+# accidentally-EABI binary looks perfectly fine right up until the device
+# refuses to run it.
+OABI_FLAGS := -mabi=apcs-gnu $(ARM_FLAGS)
+OABI_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/oabi
+OABI_LIBRARY := $(OABI_OUTPUT_DIRECTORY)/libVictoriaEngine.a
+OABI_COMPILER ?= $(ARM_COMPILER)
+OABI_READELF ?= arm-linux-gnueabi-readelf
+
+.PHONY: all linux web armv5 oabi check clean
 
 all: linux
 
@@ -106,6 +122,22 @@ $(ARM_LIBRARY): $(ENGINE_SOURCES)
 		$(ARM_COMPILER) $(COMMON_FLAGS) $(ARM_FLAGS) -c $$source -o $$objectName || exit 1; \
 	done
 	$(ARCHIVER) rcs $@ $(ARM_OUTPUT_DIRECTORY)/*.o
+
+oabi: $(OABI_LIBRARY)
+
+$(OABI_LIBRARY): $(ENGINE_SOURCES)
+	@mkdir -p $(OABI_OUTPUT_DIRECTORY)
+	@for source in $(ENGINE_SOURCES); do \
+		objectName=$(OABI_OUTPUT_DIRECTORY)/`basename $$source .c`.o; \
+		echo "$(OABI_COMPILER) -mabi=apcs-gnu -c $$source -o $$objectName"; \
+		$(OABI_COMPILER) $(COMMON_FLAGS) $(OABI_FLAGS) -c $$source -o $$objectName || exit 1; \
+	done
+	$(ARCHIVER) rcs $@ $(OABI_OUTPUT_DIRECTORY)/*.o
+	@flags=`$(OABI_READELF) -h $(OABI_OUTPUT_DIRECTORY)/memoryArena.o | grep -i '^ *Flags:'`; \
+	case "$$flags" in \
+		*0x600*) echo "verified genuine OABI ($$flags)" ;; \
+		*) echo "ERROR: not OABI, got $$flags" >&2; exit 1 ;; \
+	esac
 
 check:
 	@tools/checkNoDynamicAllocation.sh

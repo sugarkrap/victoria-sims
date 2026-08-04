@@ -1,5 +1,6 @@
 #include "victoria/engineCore.h"
 #include "victoria/freestandingRuntime.h"
+#include "victoria/graphicsMemoryBudget.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
@@ -31,8 +32,35 @@ static void logMemoryBudget(void)
     platformLogMessage(message);
 }
 
-Boolean engineInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+static void establishGraphicsMemoryLimit(MemorySize overrideBytes)
 {
+    MemorySize detectedBytes;
+
+    if (overrideBytes > 0UL)
+    {
+        graphicsMemoryBudgetInitialize(overrideBytes);
+        graphicsMemoryBudgetSetLimitSource(GRAPHICS_MEMORY_LIMIT_SOURCE_OVERRIDE);
+        platformLogMessage("graphics memory: limit taken from override");
+        return;
+    }
+
+    detectedBytes = renderQueryGraphicsMemoryBytes();
+    graphicsMemoryBudgetInitialize(detectedBytes);
+    graphicsMemoryBudgetSetLimitSource(detectedBytes > 0UL ? GRAPHICS_MEMORY_LIMIT_SOURCE_DETECTED
+                                                           : GRAPHICS_MEMORY_LIMIT_SOURCE_DEFAULT);
+
+    if (detectedBytes == 0UL)
+    {
+        /* Neither OpenGL ES 2.0 nor WebGPU can be asked portably, so this is
+           the common path rather than an error. */
+        platformLogMessage("graphics memory: backend did not report a size, assuming the default");
+    }
+}
+
+Boolean engineInitialize(const EngineConfiguration *configuration)
+{
+    Boolean renderIsReady;
+
     if (engineIsRunning == BOOLEAN_TRUE)
     {
         return BOOLEAN_TRUE;
@@ -51,7 +79,21 @@ Boolean engineInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
         profilerReportText[0] = '\0';
     }
 
-    if (renderInitialize(globalArena, widthInPixels, heightInPixels) == BOOLEAN_FALSE)
+    /* Before the renderer, so the very first resource it creates is already
+       counted against the ceiling. */
+    establishGraphicsMemoryLimit(configuration->graphicsMemoryLimitBytes);
+
+    /* Bracketed as a frame of its own. Shader compilation and warm-up are the
+       most expensive things the engine ever does, and zones entered outside a
+       frame accumulate nothing — they would have reported as zero, hiding
+       exactly the cost this is here to expose. Startup therefore shows up as
+       frame one, and as the worst frame until something beats it. */
+    profilerBeginFrame();
+    renderIsReady = renderInitialize(globalArena, configuration->widthInPixels,
+                                     configuration->heightInPixels);
+    profilerEndFrame();
+
+    if (renderIsReady == BOOLEAN_FALSE)
     {
         platformLogMessage("engine: renderer failed to initialize");
         return BOOLEAN_FALSE;
@@ -116,7 +158,14 @@ void engineEndFrame(void)
     if (profilerReportText[0] == '\0' ||
         nowMicroseconds - lastReportMicroseconds >= ENGINE_REPORT_INTERVAL_MICROSECONDS)
     {
-        profilerWriteReport(profilerReportText, VICTORIA_PROFILER_REPORT_CAPACITY);
+        MemorySize reportLength =
+            profilerWriteReport(profilerReportText, VICTORIA_PROFILER_REPORT_CAPACITY);
+
+        /* Composed here rather than inside the profiler: system memory and
+           graphics memory are tracked by different modules and neither should
+           have to know about the other. */
+        graphicsMemoryBudgetWriteReport(profilerReportText + reportLength,
+                                        VICTORIA_PROFILER_REPORT_CAPACITY - reportLength);
         lastReportMicroseconds = nowMicroseconds;
     }
 }

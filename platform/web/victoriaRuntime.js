@@ -112,6 +112,44 @@ const importObject = {
             pass.draw(3, 1, 0, 0);
             pass.end();
             runtimeState.device.queue.submit([encoder.finish()]);
+        },
+
+        // WebGPU deliberately does not expose total video memory. maxBufferSize
+        // is the closest thing an adapter will admit to, and it tracks the
+        // device class well enough to be a better starting point than a fixed
+        // guess. Reported as a hint, not a measurement.
+        queryGraphicsMemoryKibibytes() {
+            const maximumBufferBytes = runtimeState.device?.limits?.maxBufferSize;
+            if (!maximumBufferBytes || !Number.isFinite(maximumBufferBytes)) {
+                return 0;
+            }
+            return Math.floor(maximumBufferBytes / 1024);
+        },
+
+        // Draws once into an off-screen target so pipeline compilation and
+        // first-use specialisation happen now instead of during frame one.
+        warmUpPipeline() {
+            const warmUpTexture = runtimeState.device.createTexture({
+                size: { width: 1, height: 1 },
+                format: runtimeState.canvasFormat,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
+            });
+
+            const encoder = runtimeState.device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: warmUpTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            });
+            pass.setPipeline(runtimeState.pipeline);
+            pass.setBindGroup(0, runtimeState.bindGroup);
+            pass.draw(3, 1, 0, 0);
+            pass.end();
+            runtimeState.device.queue.submit([encoder.finish()]);
+            warmUpTexture.destroy();
         }
     }
 };
@@ -245,15 +283,27 @@ async function start() {
     const initialWidth = Math.max(1, Math.floor(runtimeState.canvas.clientWidth * pixelRatio));
     const initialHeight = Math.max(1, Math.floor(runtimeState.canvas.clientHeight * pixelRatio));
 
-    if (!runtimeState.instance.exports.victoriaWebInitialize(initialWidth, initialHeight)) {
+    // ?graphicsMemoryMebibytes=8 simulates a small-memory device, which is the
+    // only practical way to exercise the ceiling from a desktop browser.
+    const requestedMebibytes = Number(
+        new URLSearchParams(window.location.search).get("graphicsMemoryMebibytes"));
+    const overrideBytes = Number.isFinite(requestedMebibytes) && requestedMebibytes > 0
+        ? Math.floor(requestedMebibytes * 1024 * 1024)
+        : 0;
+
+    if (!runtimeState.instance.exports.victoriaWebInitialize(
+            initialWidth, initialHeight, overrideBytes)) {
         reportStatus("Engine failed to initialize.", true);
         return;
     }
 
     const budgetMebibytes = runtimeState.instance.exports.victoriaWebGetBudgetTotalBytes() / (1024 * 1024);
     const linearMebibytes = runtimeState.memory.buffer.byteLength / (1024 * 1024);
+    const graphicsMebibytes =
+        runtimeState.instance.exports.victoriaWebGetGraphicsMemoryLimitBytes() / (1024 * 1024);
     reportStatus(
-        `WebGPU running. Arena ${budgetMebibytes} MiB, wasm linear memory ${linearMebibytes.toFixed(1)} MiB.`,
+        `WebGPU running. Arena ${budgetMebibytes} MiB, wasm linear memory ` +
+        `${linearMebibytes.toFixed(1)} MiB, graphics ceiling ${graphicsMebibytes.toFixed(1)} MiB.`,
         false);
 
     requestAnimationFrame(renderLoop);

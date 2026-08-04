@@ -13,6 +13,12 @@ Integer32 memoryCompare(const void *first, const void *second, MemorySize sizeIn
 
 MemorySize stringLength(const char *text);
 Boolean stringEquals(const char *first, const char *second);
+Boolean stringStartsWith(const char *text, const char *prefix);
+
+/* Stops at the first character that is not a digit, so trailing junk is
+   ignored rather than rejected. Returns zero for an empty or non-numeric
+   string, which callers treat as "unset". */
+MemorySize stringParseUnsigned(const char *text);
 
 /* Writes decimal digits plus a terminator into destination. Returns the number
    of characters written, excluding the terminator, or zero if the buffer is

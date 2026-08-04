@@ -60,6 +60,34 @@ Boolean stringEquals(const char *first, const char *second)
     return (Boolean)(first[index] == second[index]);
 }
 
+Boolean stringStartsWith(const char *text, const char *prefix)
+{
+    MemorySize index = 0UL;
+
+    while (prefix[index] != '\0')
+    {
+        if (text[index] != prefix[index])
+        {
+            return BOOLEAN_FALSE;
+        }
+        index += 1UL;
+    }
+    return BOOLEAN_TRUE;
+}
+
+MemorySize stringParseUnsigned(const char *text)
+{
+    MemorySize value = 0UL;
+    MemorySize index = 0UL;
+
+    while (text[index] >= '0' && text[index] <= '9')
+    {
+        value = (value * 10UL) + (MemorySize)(text[index] - '0');
+        index += 1UL;
+    }
+    return value;
+}
+
 MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, Unsigned64 value)
 {
     char reversedDigits[24];
