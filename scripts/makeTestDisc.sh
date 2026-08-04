@@ -43,7 +43,7 @@ printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 # engine has to be able to find its way from one to the other. Nothing here is
 # compressed: a fixture that pretended to be would be testing an unpacker that
 # does not exist. What it does test is everything up to that point.
-python3 - "$buildRoot/TSData.exe" <<'PYTHON'
+python3 - "$buildRoot/TSData.exe" "$scenegraph/material_definition.package" <<'PYTHON'
 import struct, sys
 
 # A real program at the front, and an archive appended past the end of it.
@@ -59,9 +59,11 @@ import struct, sys
 HEADER_AT = 0x80          # where the DOS stub points
 SECTION_TABLE_AT = HEADER_AT + 4 + 20 + 224
 PROGRAM_ENDS_AT = 0x200   # the one section's bytes end here, and the archive begins
-TOTAL = 0x2B3
+# A real package goes inside the stored entry, so the arithmetic that mounts it
+# is checked against bytes that either are a package or are not.
+stored = open(sys.argv[2], "rb").read()
 
-image = bytearray(TOTAL)
+image = bytearray(PROGRAM_ENDS_AT)
 # Delphi's stub, which is what separates an installer from every other program
 # on a disc: Microsoft's linker writes MZ, Borland's writes MZP.
 image[0:4] = b"MZP\x00"
@@ -78,43 +80,52 @@ image[SECTION_TABLE_AT + 20:SECTION_TABLE_AT + 24] = struct.pack("<I", 0)
 # Rar!, fourth generation. The fifth writes an eighth byte and is a different
 # format; the reader refuses that one by name rather than misreading it.
 at = PROGRAM_ENDS_AT
-image[at:at + 7] = b"Rar!\x1a\x07\x00"
+image.extend(b"Rar!\x1a\x07\x00")
 at += 7
 
 # The archive header block: a length and nothing this reader needs.
-image[at + 2] = 0x73
-image[at + 5:at + 7] = struct.pack("<H", 13)
+archiveHeader = bytearray(13)
+archiveHeader[2] = 0x73
+archiveHeader[5:7] = struct.pack("<H", 13)
+image.extend(archiveHeader)
 at += 13
 
-def fileHeader(at, name, packed, unpacked, method):
-    """One file header block, followed by its data. Returns where the next
-    block starts."""
+def fileHeader(at, name, data, unpacked, method):
+    """One file header block followed by its data, appended to the image.
+    Returns where the next block starts and where the data landed."""
     name = name.encode()
     headerSize = 32 + len(name)
-    image[at + 2] = 0x74
-    image[at + 3:at + 5] = struct.pack("<H", 0x8000)      # carries data
-    image[at + 5:at + 7] = struct.pack("<H", headerSize)
-    image[at + 7:at + 11] = struct.pack("<I", packed)
-    image[at + 11:at + 15] = struct.pack("<I", unpacked)
-    image[at + 24] = 20                                    # version needed
-    image[at + 25] = method                                # 0x30 stored
-    image[at + 26:at + 28] = struct.pack("<H", len(name))
-    image[at + 32:at + 32 + len(name)] = name
-    return at + headerSize + packed, at + headerSize
+    header = bytearray(headerSize)
+    header[2] = 0x74
+    header[3:5] = struct.pack("<H", 0x8000)      # carries data
+    header[5:7] = struct.pack("<H", headerSize)
+    header[7:11] = struct.pack("<I", len(data))
+    header[11:15] = struct.pack("<I", unpacked)
+    header[24] = 20                              # version needed
+    header[25] = method                          # 0x30 stored
+    header[26:28] = struct.pack("<H", len(name))
+    header[32:32 + len(name)] = name
+    image.extend(header)
+    dataAt = at + headerSize
+    image.extend(data)
+    return dataAt + len(data), dataAt
 
-# Stored, and its data really is a package: the whole reason to care which of
-# the two an entry is.
-at, dataAt = fileHeader(at, "TSData/Res/Sims3D/Sims01.package", 16, 16, 0x30)
-image[dataAt:dataAt + 4] = b"DBPF"
+# Stored, and its data really is a package. Mounting it means adding the
+# containing file's own offset to the entry's, and if that addition is wrong the
+# mounted file starts somewhere that is not a package — which is exactly what
+# the engine checks once it has mounted one.
+at, dataAt = fileHeader(at, "TSData/Res/Materials/mounted.package", stored, len(stored), 0x30)
 
 # Packed, whose sizes differ — which is the other thing that says so.
-at, dataAt = fileHeader(at, "TSData/Res/Sims3D/Sims02.package", 8, 32, 0x35)
+at, dataAt = fileHeader(at, "TSData/Res/Sims3D/Sims02.package", b"\0" * 8, 32, 0x35)
 
 # The end block a real archive closes with. Without it the walk runs off the
 # last entry into whatever follows and reports it as damage, which is what the
 # first version of this fixture did.
-image[at + 2] = 0x7B
-image[at + 5:at + 7] = struct.pack("<H", 7)
+endBlock = bytearray(7)
+endBlock[2] = 0x7B
+endBlock[5:7] = struct.pack("<H", 7)
+image.extend(endBlock)
 
 open(sys.argv[1], "wb").write(image)
 PYTHON

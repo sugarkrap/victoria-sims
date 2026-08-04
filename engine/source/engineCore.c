@@ -66,9 +66,14 @@ static void establishGraphicsMemoryLimit(MemorySize overrideBytes)
 }
 
 
-/* How many files a disc catalogue can hold. A retail disc lists a few hundred;
-   this leaves room without the catalogue itself becoming the cost. */
-#define DISC_FILE_LIMIT 4096U
+/* How many files a disc catalogue can hold.
+ *
+ * A retail disc lists a few hundred. This one lists 745, and then one of those
+ * turns out to be an archive holding the whole installed game, every stored
+ * entry of which becomes a file in the same catalogue. Sixteen thousand entries
+ * cost about two and a half mebibytes of the budget, which is affordable; being
+ * unable to see the game is not. */
+#define DISC_FILE_LIMIT 16384U
 
 static void appendCount(char *destination, MemorySize capacity, Unsigned32 value)
 {
@@ -313,10 +318,10 @@ static InstallerOffsetTable installerTable;
 #define INSTALLER_SCAN_LIMIT_BYTES (32ULL * 1024ULL * 1024ULL)
 #define INSTALLER_SCAN_CHUNK_BYTES (256UL * 1024UL)
 
-/* How far into an archive the walk goes for a first look. Every entry costs a
-   read, and a 2.7 gibibyte archive holds thousands; sixty-four is enough to say
-   what kind of entries these are, which is the question. */
-#define ARCHIVE_WALK_LIMIT 64U
+/* How far into an archive the walk goes. Every entry costs a read, so this is
+   real time on a browser's event loop — but the alternative is not seeing most
+   of the game. Bounded so a misread length cannot walk for ever. */
+#define ARCHIVE_WALK_LIMIT 20000U
 /* And how many get named. The rest are counted. */
 #define ARCHIVE_NAME_LIMIT_IN_LOG 8U
 
@@ -325,6 +330,11 @@ static Unsigned32 archiveEntriesWalked = 0U;
 static Unsigned32 archiveStoredCount = 0U;
 static Unsigned32 archivePackedCount = 0U;
 static Unsigned64 archiveStoredBytes = 0ULL;
+static Unsigned32 archiveMountedCount = 0U;
+static Unsigned32 archiveUnmountableCount = 0U;
+/* The first package mounted, kept so the arithmetic that placed it can be
+   checked against the bytes it points at. */
+static Unsigned32 archiveFirstMountedIndex = 0xFFFFFFFFUL;
 
 static Unsigned64 installerScanOffset = 0ULL;
 static Unsigned64 installerScanFrom = 0ULL;
@@ -434,6 +444,59 @@ static const FileSignature *identifySignature(const Unsigned8 *bytes, MemorySize
         }
     }
     return NULL_POINTER;
+}
+
+/* Presents one stored archive entry to the catalogue as a file of its own.
+ *
+ * A stored entry is a range of the containing file and nothing more, and the
+ * catalogue is a list of ranges — so the engine can be handed the packages
+ * inside an archive without learning that there is an archive. Everything
+ * downstream, the disc-wide index and the scenegraph chain included, then works
+ * on them unchanged.
+ *
+ * Only packages are mounted. The archive holds the whole installed game, most
+ * of which is programs, configuration and text this engine has no reader for,
+ * and a catalogue full of them is a catalogue with no room for the ones that
+ * matter. */
+static void mountArchiveEntry(const VirtualFileEntry *containingFile, const ArchiveEntry *archiveEntry)
+{
+    MemorySize nameLength;
+    char *storedName;
+
+    if (archiveEntry->isDirectory || archiveEntry->unpackedSizeInBytes == 0ULL ||
+        !stringEndsWithIgnoringCase(archiveEntry->name, ".package"))
+    {
+        return;
+    }
+
+    /* The catalogue keeps the pointer, not the characters, so the name has to
+       outlive this call. */
+    nameLength = stringLength(archiveEntry->name);
+    storedName = (char *)memoryArenaAllocate(globalArena, nameLength + 1UL, 1UL);
+    if (storedName == NULL_POINTER)
+    {
+        archiveUnmountableCount++;
+        return;
+    }
+    storedName[0] = '\0';
+    stringAppend(storedName, nameLength + 1UL, archiveEntry->name);
+
+    /* The archive's offsets are inside the file that holds it; the catalogue's
+       are inside the store. One addition apart, and getting it wrong would
+       point every mounted package at the wrong place by exactly the size of the
+       program in front of them. */
+    if (!virtualFileSystemAddEntry(discFileSystem, storedName,
+                                   containingFile->offsetInBytes + archiveEntry->dataOffsetInBytes,
+                                   archiveEntry->unpackedSizeInBytes))
+    {
+        archiveUnmountableCount++;
+        return;
+    }
+    if (archiveFirstMountedIndex == 0xFFFFFFFFUL)
+    {
+        archiveFirstMountedIndex = discFileSystem->entryCount - 1U;
+    }
+    archiveMountedCount++;
 }
 
 static void reportDiscFailure(const char *what)
@@ -1058,9 +1121,19 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 appendByteSize(message, sizeof(message), archiveStoredBytes);
                 stringAppend(message, sizeof(message), "), ");
                 appendCount(message, sizeof(message), archivePackedCount);
-                stringAppend(message, sizeof(message), " packed");
+                stringAppend(message, sizeof(message), " packed, ");
+                appendCount(message, sizeof(message), archiveMountedCount);
+                stringAppend(message, sizeof(message), " package(s) mounted");
+                if (archiveUnmountableCount > 0U)
+                {
+                    /* Said rather than swallowed: a catalogue that filled up
+                       looks exactly like an archive that held less. */
+                    stringAppend(message, sizeof(message), ", ");
+                    appendCount(message, sizeof(message), archiveUnmountableCount);
+                    stringAppend(message, sizeof(message), " would not fit");
+                }
                 platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
+                installerStage = 7U;
                 return ENGINE_DISC_WORKING;
             }
 
@@ -1105,6 +1178,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 {
                     archiveStoredCount++;
                     archiveStoredBytes += archiveEntry.unpackedSizeInBytes;
+                    mountArchiveEntry(entry, &archiveEntry);
                 }
                 else
                 {
@@ -1147,6 +1221,53 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 return ENGINE_DISC_WORKING;
             }
             archiveBlockOffset = archiveEntry.nextBlockOffsetInBytes;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Reading the first package that was mounted, to see whether it is one.
+         *
+         * The archive counts from the start of the file that holds it and the
+         * catalogue counts from the start of the store, so mounting is one
+         * addition — and getting it wrong would point every mounted package at
+         * the wrong place by exactly the size of the program in front of them,
+         * which is the kind of mistake that produces six hundred unreadable
+         * files and no explanation. Four bytes settle it. */
+        if (installerStage == 7U)
+        {
+            Unsigned8 head[4];
+
+            if (archiveFirstMountedIndex == 0xFFFFFFFFUL)
+            {
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            read = virtualFileSystemReadFile(discFileSystem, archiveFirstMountedIndex, 0U,
+                                             sizeof(head), head);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: the first mounted package ");
+            if (read != VIRTUAL_READ_OK)
+            {
+                stringAppend(message, sizeof(message), "would not read: ");
+                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+            }
+            else if (head[0] == (Unsigned8)'D' && head[1] == (Unsigned8)'B' &&
+                     head[2] == (Unsigned8)'P' && head[3] == (Unsigned8)'F')
+            {
+                stringAppend(message, sizeof(message), "really is one");
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), "starts ");
+                appendHexadecimalBytes(message, sizeof(message), head, sizeof(head), 0UL, 4UL);
+                stringAppend(message, sizeof(message), "rather than DBPF, so the offsets are wrong");
+            }
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
             return ENGINE_DISC_WORKING;
         }
 

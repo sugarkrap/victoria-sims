@@ -314,7 +314,7 @@ calls.length = 0;
           loggedMessages.some((text) =>
               text.includes("5 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
-          loggedMessages.some((text) => text.includes("691 bytes  TSData.exe")));
+          loggedMessages.some((text) => text.includes("KiB  TSData.exe")));
 
     // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
     // Setup installer, copied from the shape a real repack has: a Delphi MZP
@@ -347,7 +347,7 @@ calls.length = 0;
     check("reads the program's own section table to find where it ends",
           loggedMessages.some((text) =>
               text.includes("1 section(s) ending at 0x00000200") &&
-              text.includes("179 bytes appended past it")));
+              text.includes("appended past it")));
     check("and names what is appended there",
           loggedMessages.some((text) =>
               text.includes("what is appended starts 52 61 72 21") &&
@@ -359,16 +359,29 @@ calls.length = 0;
     // reader that called them all one thing would fail on the other.
     check("names a stored entry, its size and where its data begins",
           loggedMessages.some((text) =>
-              text.includes("stored 16 bytes at 0x00000254") &&
-              text.includes("Sims01.package")));
+              text.includes("stored 1 KiB at 0x00000258") &&
+              text.includes("mounted.package")));
     check("and a packed one by its unpacked size",
           loggedMessages.some((text) =>
-              text.includes("packed 32 bytes at 0x000002A4") &&
+              text.includes("packed 32 bytes at 0x000008EB") &&
               text.includes("Sims02.package")));
     check("counting both kinds separately",
           loggedMessages.some((text) =>
               text.includes("walked 2 archive entries") &&
-              text.includes("1 stored (16 bytes), 1 packed")));
+              text.includes("1 stored (1 KiB), 1 packed")));
+    // The stored entry is presented to the catalogue as a file of its own, so
+    // everything downstream reads it without learning there is an archive.
+    // Only the package is mounted: the archive holds the whole installed game,
+    // most of which this engine has no reader for.
+    check("mounting the stored package and not the packed one",
+          loggedMessages.some((text) => text.includes("1 package(s) mounted")));
+    // The archive counts from the start of its containing file and the
+    // catalogue counts from the start of the store. That addition is the one
+    // thing that would silently point every mounted package at the wrong place,
+    // so the fixture puts a real package inside and the engine reads it back.
+    check("and the mounted package really is a package where it says it is",
+          loggedMessages.some((text) =>
+              text.includes("the first mounted package really is one")));
 
     const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
     check("probes a file it cannot name", Boolean(probe));
