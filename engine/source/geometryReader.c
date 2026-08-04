@@ -1,8 +1,7 @@
 #include "victoria/geometryReader.h"
 
-#include "utils/strings.h"
+#include "victoria/resourceCollection.h"
 
-#define SCENEGRAPH_VERSION_MARK 0xFFFF0001UL
 #define GEOMETRY_TYPE_IDENTIFIER 0xAC4F8687UL
 
 /* Element payload layouts. The file records a format per element; only the two
@@ -25,120 +24,6 @@
  * claiming more is either not what it says or beyond what we can carry. */
 #define LARGEST_ADDRESSABLE_VERTEX_COUNT 65536U
 
-/* Reads a buffer without ever indexing past its end. Every read checks, and a
- * cursor that has overrun stays overrun, so a caller can do a run of reads and
- * test once at the end rather than after each one. */
-typedef struct Cursor
-{
-    const Unsigned8 *bytes;
-    MemorySize sizeInBytes;
-    MemorySize position;
-    Boolean overran;
-} Cursor;
-
-static void cursorInitialize(Cursor *cursor, const Unsigned8 *bytes, MemorySize sizeInBytes)
-{
-    cursor->bytes = bytes;
-    cursor->sizeInBytes = sizeInBytes;
-    cursor->position = 0UL;
-    cursor->overran = BOOLEAN_FALSE;
-}
-
-static Boolean cursorTake(Cursor *cursor, MemorySize count)
-{
-    if (cursor->overran || count > cursor->sizeInBytes - cursor->position)
-    {
-        cursor->overran = BOOLEAN_TRUE;
-        return BOOLEAN_FALSE;
-    }
-    cursor->position += count;
-    return BOOLEAN_TRUE;
-}
-
-static Unsigned8 readUnsigned8(Cursor *cursor)
-{
-    MemorySize at = cursor->position;
-
-    if (!cursorTake(cursor, 1UL))
-    {
-        return 0U;
-    }
-    return cursor->bytes[at];
-}
-
-static Unsigned16 readUnsigned16(Cursor *cursor)
-{
-    MemorySize at = cursor->position;
-
-    if (!cursorTake(cursor, 2UL))
-    {
-        return 0U;
-    }
-    return (Unsigned16)((Unsigned16)cursor->bytes[at] | ((Unsigned16)cursor->bytes[at + 1UL] << 8));
-}
-
-static Unsigned32 readUnsigned32(Cursor *cursor)
-{
-    MemorySize at = cursor->position;
-
-    if (!cursorTake(cursor, 4UL))
-    {
-        return 0U;
-    }
-    return (Unsigned32)cursor->bytes[at] | ((Unsigned32)cursor->bytes[at + 1UL] << 8) |
-           ((Unsigned32)cursor->bytes[at + 2UL] << 16) | ((Unsigned32)cursor->bytes[at + 3UL] << 24);
-}
-
-/* Assembled from bytes rather than cast, because the payload is not aligned and
- * an unaligned load is a fault on ARMv5 rather than a slow path. */
-static Real32 readReal32(Cursor *cursor)
-{
-    union
-    {
-        Unsigned32 word;
-        Real32 value;
-    } converter;
-
-    converter.word = readUnsigned32(cursor);
-    return converter.value;
-}
-
-/* Strings carry a length prefixed seven bits at a time, high bit set while more
- * follows. Copies what fits and skips the rest, so a long name costs a truncated
- * label rather than the whole mesh. */
-static void readString(Cursor *cursor, char *destination, MemorySize capacity)
-{
-    MemorySize length = 0UL;
-    MemorySize shift = 0UL;
-    MemorySize index;
-
-    for (;;)
-    {
-        Unsigned8 byte = readUnsigned8(cursor);
-
-        length |= (MemorySize)(byte & 0x7FU) << shift;
-        if ((byte & 0x80U) == 0U || shift >= 28UL || cursor->overran)
-        {
-            break;
-        }
-        shift += 7UL;
-    }
-
-    for (index = 0UL; index < length; index++)
-    {
-        Unsigned8 character = readUnsigned8(cursor);
-
-        if (destination != NULL_POINTER && index + 1UL < capacity)
-        {
-            destination[index] = (char)character;
-        }
-    }
-    if (destination != NULL_POINTER && capacity > 0UL)
-    {
-        destination[(length + 1UL < capacity) ? length : capacity - 1UL] = '\0';
-    }
-}
-
 /* How wide one index is at a given block version. */
 static MemorySize indexWidth(Unsigned32 version)
 {
@@ -147,33 +32,16 @@ static MemorySize indexWidth(Unsigned32 version)
 
 /* An index array: a count, then that many words or half words. Returns where
  * the array starts so a caller can come back for it, having skipped it here. */
-static Unsigned32 skipIndexArray(Cursor *cursor, Unsigned32 version, MemorySize *startPosition)
+static Unsigned32 skipIndexArray(ResourceCursor *cursor, Unsigned32 version, MemorySize *startPosition)
 {
-    Unsigned32 count = readUnsigned32(cursor);
+    Unsigned32 count = resourceCursorReadUnsigned32(cursor);
 
     if (startPosition != NULL_POINTER)
     {
         *startPosition = cursor->position;
     }
-    cursorTake(cursor, (MemorySize)count * indexWidth(version));
+    resourceCursorSkip(cursor, (MemorySize)count * indexWidth(version));
     return count;
-}
-
-/* The type name, identifier and version that prefix every scenegraph block. */
-static Unsigned32 readTypeInformation(Cursor *cursor, Unsigned32 *typeIdentifier, char *name,
-                                      MemorySize nameCapacity)
-{
-    Unsigned32 identifier;
-    Unsigned32 version;
-
-    readString(cursor, name, nameCapacity);
-    identifier = readUnsigned32(cursor);
-    version = readUnsigned32(cursor);
-    if (typeIdentifier != NULL_POINTER)
-    {
-        *typeIdentifier = identifier;
-    }
-    return version;
 }
 
 const char *geometryReadResultGetName(GeometryReadResult result)
@@ -216,7 +84,7 @@ typedef struct ElementSpan
 
 #define MAXIMUM_ELEMENTS 32U
 
-static Real32 *copyRealArray(MemoryArena *arena, Cursor *cursor, const ElementSpan *span,
+static Real32 *copyRealArray(MemoryArena *arena, ResourceCursor *cursor, const ElementSpan *span,
                              Unsigned32 componentCount, Unsigned32 vertexCount)
 {
     Real32 *values;
@@ -237,23 +105,40 @@ static Real32 *copyRealArray(MemoryArena *arena, Cursor *cursor, const ElementSp
     cursor->overran = BOOLEAN_FALSE;
     for (index = 0U; index < total; index++)
     {
-        values[index] = readReal32(cursor);
+        values[index] = resourceCursorReadReal32(cursor);
     }
     return cursor->overran ? NULL_POINTER : values;
+}
+
+/* The collection result, said in the geometry reader's own words. Callers count
+ * these, so a cause that arrives here must not be folded into a neighbouring
+ * one on the way. */
+static GeometryReadResult translateCollectionResult(ResourceCollectionResult result)
+{
+    switch (result)
+    {
+    case RESOURCE_COLLECTION_NOT_A_RESOURCE:
+        return GEOMETRY_READ_NOT_A_RESOURCE;
+    case RESOURCE_COLLECTION_OLDER:
+        return GEOMETRY_READ_OLDER_COLLECTION;
+    case RESOURCE_COLLECTION_NO_BLOCKS:
+        return GEOMETRY_READ_NO_GEOMETRY;
+    default:
+        return GEOMETRY_READ_TRUNCATED;
+    }
 }
 
 GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes, MemorySize sizeInBytes,
                                       MemoryArena *arena)
 {
-    Cursor cursor;
+    ResourceCursor cursor;
+    ResourceCollection collection;
+    ResourceCollectionResult collectionResult;
+    PersistTypeInfo blockType;
     ElementSpan spans[MAXIMUM_ELEMENTS];
     const ElementSpan *positionSpan = NULL_POINTER;
     const ElementSpan *normalSpan = NULL_POINTER;
     const ElementSpan *textureSpan = NULL_POINTER;
-    Unsigned32 versionMark;
-    Unsigned32 fileLinkCount;
-    Unsigned32 blockCount;
-    Unsigned32 blockType = 0U;
     Unsigned32 blockVersion;
     Unsigned32 elementCount;
     Unsigned32 componentCount;
@@ -275,50 +160,26 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->versionMark = 0U;
     mesh->containerVersion = 0U;
 
-    cursorInitialize(&cursor, bytes, sizeInBytes);
+    /* The wrapper — version mark, links to resources elsewhere, the block type
+     * list — is the same for every scenegraph resource and is read in one
+     * place. Following the links is the scenegraph's job, not this reader's. */
+    collectionResult = resourceCollectionOpen(&collection, &cursor, bytes, sizeInBytes);
+    mesh->versionMark = collection.versionMark;
+    if (collectionResult != RESOURCE_COLLECTION_OK)
+    {
+        return translateCollectionResult(collectionResult);
+    }
 
-    versionMark = readUnsigned32(&cursor);
+    resourceCursorReadTypeInformation(&cursor, &blockType);
     if (cursor.overran)
     {
         return GEOMETRY_READ_TRUNCATED;
     }
-    mesh->versionMark = versionMark;
-    if (versionMark != (Unsigned32)SCENEGRAPH_VERSION_MARK)
-    {
-        /* Older collections mark themselves 0xFFFE0001 or 0xFFFD0001 and differ
-         * in how the file links are laid out. Saying so separately keeps them
-         * from being counted as rubbish. */
-        if ((versionMark & 0x0000FFFFUL) == 0x00000001UL &&
-            (versionMark >> 16) >= 0xFFF0UL)
-        {
-            return GEOMETRY_READ_OLDER_COLLECTION;
-        }
-        return GEOMETRY_READ_NOT_A_RESOURCE;
-    }
-
-    /* Links to resources in other packages. Following them is the scenegraph's
-     * job, not this reader's. */
-    fileLinkCount = readUnsigned32(&cursor);
-    cursorTake(&cursor, (MemorySize)fileLinkCount * 16UL);
-
-    blockCount = readUnsigned32(&cursor);
-    if (blockCount == 0U)
-    {
-        return GEOMETRY_READ_NO_GEOMETRY;
-    }
-    /* The type list, then the blocks themselves. Only the first is read: a GMDC
-     * resource carries exactly one. */
-    cursorTake(&cursor, (MemorySize)blockCount * 4UL);
-
-    blockVersion = readTypeInformation(&cursor, &blockType, NULL_POINTER, 0UL);
-    if (cursor.overran)
-    {
-        return GEOMETRY_READ_TRUNCATED;
-    }
-    if (blockType != (Unsigned32)GEOMETRY_TYPE_IDENTIFIER)
+    if (blockType.typeIdentifier != (Unsigned32)GEOMETRY_TYPE_IDENTIFIER)
     {
         return GEOMETRY_READ_WRONG_TYPE;
     }
+    blockVersion = blockType.version;
     mesh->containerVersion = blockVersion;
     if (blockVersion < MINIMUM_BLOCK_VERSION)
     {
@@ -326,10 +187,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     }
 
     /* The resource's own name, behind another type prefix. */
-    readTypeInformation(&cursor, NULL_POINTER, NULL_POINTER, 0UL);
-    readString(&cursor, mesh->resourceName, GEOMETRY_NAME_LIMIT);
+    resourceCursorReadTypeInformation(&cursor, NULL_POINTER);
+    resourceCursorReadString(&cursor, mesh->resourceName, GEOMETRY_NAME_LIMIT);
 
-    elementCount = readUnsigned32(&cursor);
+    elementCount = resourceCursorReadUnsigned32(&cursor);
     /* Checked before the counts are believed. A resource that stops here has a
      * zero element count only because the read failed, and reporting that as
      * "holds no geometry" would blame the file for our own short buffer. */
@@ -345,16 +206,16 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     {
         Unsigned32 payloadBytes;
 
-        (void)readUnsigned32(&cursor);
-        spans[index].identifier = readUnsigned32(&cursor);
-        (void)readUnsigned32(&cursor);
-        spans[index].format = readUnsigned32(&cursor);
-        (void)readUnsigned32(&cursor);
-        payloadBytes = readUnsigned32(&cursor);
+        (void)resourceCursorReadUnsigned32(&cursor);
+        spans[index].identifier = resourceCursorReadUnsigned32(&cursor);
+        (void)resourceCursorReadUnsigned32(&cursor);
+        spans[index].format = resourceCursorReadUnsigned32(&cursor);
+        (void)resourceCursorReadUnsigned32(&cursor);
+        payloadBytes = resourceCursorReadUnsigned32(&cursor);
 
         spans[index].payloadBytes = payloadBytes;
         spans[index].payloadPosition = cursor.position;
-        cursorTake(&cursor, (MemorySize)payloadBytes);
+        resourceCursorSkip(&cursor, (MemorySize)payloadBytes);
         (void)skipIndexArray(&cursor, blockVersion, NULL_POINTER);
 
         if (cursor.overran)
@@ -365,7 +226,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
 
     /* Components tie a set of elements together and say how many vertices they
      * describe. The first is the one the first primitive draws from. */
-    componentCount = readUnsigned32(&cursor);
+    componentCount = resourceCursorReadUnsigned32(&cursor);
     if (cursor.overran)
     {
         return GEOMETRY_READ_TRUNCATED;
@@ -382,8 +243,8 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         Unsigned32 inner;
 
         elementIndexCount = skipIndexArray(&cursor, blockVersion, &elementIndexStart);
-        componentVertexCount = readUnsigned32(&cursor);
-        (void)readUnsigned32(&cursor);
+        componentVertexCount = resourceCursorReadUnsigned32(&cursor);
+        (void)resourceCursorReadUnsigned32(&cursor);
         (void)skipIndexArray(&cursor, blockVersion, NULL_POINTER);
         (void)skipIndexArray(&cursor, blockVersion, NULL_POINTER);
         (void)skipIndexArray(&cursor, blockVersion, NULL_POINTER);
@@ -400,13 +261,14 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         vertexCount = componentVertexCount;
         for (inner = 0U; inner < elementIndexCount; inner++)
         {
-            Cursor elementCursor = cursor;
+            ResourceCursor elementCursor = cursor;
             Unsigned32 which;
 
             elementCursor.position = elementIndexStart + ((MemorySize)inner * indexWidth(blockVersion));
             elementCursor.overran = BOOLEAN_FALSE;
-            which = (blockVersion < 3UL) ? readUnsigned32(&elementCursor)
-                                         : (Unsigned32)readUnsigned16(&elementCursor);
+            which = (blockVersion < 3UL)
+                        ? resourceCursorReadUnsigned32(&elementCursor)
+                        : (Unsigned32)resourceCursorReadUnsigned16(&elementCursor);
             if (which >= elementCount)
             {
                 continue;
@@ -430,7 +292,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         }
     }
 
-    mesh->primitiveCount = readUnsigned32(&cursor);
+    mesh->primitiveCount = resourceCursorReadUnsigned32(&cursor);
     if (cursor.overran)
     {
         return GEOMETRY_READ_TRUNCATED;
@@ -441,9 +303,9 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     }
 
     /* Only the first primitive. Its faces index into the component's vertices. */
-    (void)readUnsigned32(&cursor);
-    (void)readUnsigned32(&cursor);
-    readString(&cursor, mesh->name, GEOMETRY_NAME_LIMIT);
+    (void)resourceCursorReadUnsigned32(&cursor);
+    (void)resourceCursorReadUnsigned32(&cursor);
+    resourceCursorReadString(&cursor, mesh->name, GEOMETRY_NAME_LIMIT);
     faceCount = skipIndexArray(&cursor, blockVersion, &faceStart);
     if (cursor.overran)
     {
@@ -483,8 +345,8 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     cursor.overran = BOOLEAN_FALSE;
     for (index = 0U; index < faceCount; index++)
     {
-        Unsigned32 value = (blockVersion < 3UL) ? readUnsigned32(&cursor)
-                                                : (Unsigned32)readUnsigned16(&cursor);
+        Unsigned32 value = (blockVersion < 3UL) ? resourceCursorReadUnsigned32(&cursor)
+                                                : (Unsigned32)resourceCursorReadUnsigned16(&cursor);
 
         /* An index outside the component would read a vertex that is not there.
          * Clamping keeps a malformed model from reading past the arrays. */

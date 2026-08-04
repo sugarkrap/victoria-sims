@@ -34,7 +34,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/profiler.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
-                  engine/source/geometryReader.c \
+                  engine/source/resourceCollection.c engine/source/geometryReader.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -222,10 +222,11 @@ GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
 MESH_CAMERA_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyMeshCamera
 COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
 STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
+RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
-		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER)
+		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -233,8 +234,16 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(MESH_CAMERA_VERIFIER)
 	@$(COMPRESSION_VERIFIER)
 	@$(STRINGS_VERIFIER)
+	@$(RESOURCE_COLLECTION_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCollection.c \
+		engine/source/resourceCollection.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(STRINGS_VERIFIER): tests/verifyStrings.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
@@ -247,17 +256,17 @@ $(COMPRESSION_VERIFIER): tests/verifyCompression.c engine/source/compression.c $
 		$(VERIFIER_SUPPORT) -o $@
 
 $(MESH_CAMERA_VERIFIER): tests/verifyMeshCamera.c render/meshCamera.c \
-		engine/source/freestandingRuntime.c engine/source/geometryReader.c \
+		engine/source/freestandingRuntime.c engine/source/resourceCollection.c engine/source/geometryReader.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyMeshCamera.c render/meshCamera.c \
-		engine/source/freestandingRuntime.c engine/source/geometryReader.c \
+		engine/source/freestandingRuntime.c engine/source/resourceCollection.c engine/source/geometryReader.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
-$(GEOMETRY_READER_VERIFIER): tests/verifyGeometryReader.c engine/source/geometryReader.c \
+$(GEOMETRY_READER_VERIFIER): tests/verifyGeometryReader.c engine/source/resourceCollection.c engine/source/geometryReader.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
-	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGeometryReader.c engine/source/geometryReader.c \
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGeometryReader.c engine/source/resourceCollection.c engine/source/geometryReader.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
 		$(VERIFIER_SUPPORT) -o $@
 
