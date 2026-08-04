@@ -92,4 +92,26 @@ ScenegraphReadResult scenegraphReadGeometryNode(GeometryNodeDescription *node, c
    hundred thousand. */
 const PackageResource *scenegraphFindResource(const Package *package, const PackageResourceKey *key);
 
+/* A resource's bytes, unpacked if the stream says it is packed.
+ *
+ * Almost everything on a retail disc is stored compressed, so what the index
+ * points at is usually not the resource — it is a RefPack stream that unpacks
+ * into it. Detected from the stream's own header rather than from the package's
+ * directory resource: the header is on the thing being read, which is the
+ * harder of the two to be wrong about.
+ *
+ * Uncompressed resources are returned pointing into the package and cost the
+ * arena nothing. Compressed ones are unpacked into it, so a caller that rewinds
+ * gets the space back. */
+const Unsigned8 *scenegraphReadResourceBytes(MemoryArena *arena, const Package *package,
+                                             const PackageResource *resource, MemorySize *sizeInBytes,
+                                             Boolean *wasCompressed);
+
+/* The container holding the vertices of the geometry node with this name, or
+   null when the package has no such node or its reference does not resolve.
+   Matching is by the name the node carries, because a name is what a shape
+   gives you to match on. */
+const PackageResource *scenegraphFindGeometryNamed(MemoryArena *arena, const Package *package,
+                                                   const char *nodeName);
+
 #endif

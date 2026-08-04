@@ -158,6 +158,42 @@ int main(void)
         }
     }
 
+    printf("\n-- looking a container up by the name a shape would give --\n");
+    {
+        /* This is the lookup the engine performs, called directly rather than
+           restated. The name asked for is the one the node actually carries.
+
+           The fixture's shape names ufoCrash_tslocator_gmnd while its node is
+           teapot_tslocator_gmnd, so the engine's own chain finds nothing here
+           and falls back — correctly, and visibly in its log. That mismatch is
+           upstream's fixture being a grab bag, not a reader fault, but it does
+           mean the successful path needs asking for by name to be exercised at
+           all. */
+        const PackageResource *found =
+            scenegraphFindGeometryNamed(&arena, &package, "teapot_tslocator_gmnd");
+
+        checkThat(&failureCount, "a node named by a shape resolves to its container",
+                  found == packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMDC));
+        checkThat(&failureCount, "and a name no node carries resolves to nothing",
+                  scenegraphFindGeometryNamed(&arena, &package, "no_such_gmnd") == NULL_POINTER);
+        /* Prefix matching would find the teapot for this and be wrong. */
+        checkThat(&failureCount, "a name that is only a prefix does not match",
+                  scenegraphFindGeometryNamed(&arena, &package, "teapot") == NULL_POINTER);
+    }
+
+    printf("\n-- the arena is left where it was found --\n");
+    {
+        /* The lookup reads every node in the package to compare names. If it
+           kept any of that, a disc with hundreds of packages would exhaust the
+           budget on nodes it had already rejected. */
+        MemorySize before = memoryArenaGetMarker(&arena);
+
+        (void)scenegraphFindGeometryNamed(&arena, &package, "teapot_tslocator_gmnd");
+        (void)scenegraphFindGeometryNamed(&arena, &package, "no_such_gmnd");
+        checkThat(&failureCount, "scanning for a name costs the arena nothing",
+                  memoryArenaGetMarker(&arena) == before);
+    }
+
     printf("\n-- refusing what it should --\n");
     {
         ShapeDescription shape;

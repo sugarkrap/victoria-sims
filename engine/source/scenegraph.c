@@ -1,5 +1,8 @@
 #include "victoria/scenegraph.h"
 
+#include "utils/strings.h"
+#include "victoria/compression.h"
+
 const char *scenegraphReadResultGetName(ScenegraphReadResult result)
 {
     switch (result)
@@ -360,6 +363,100 @@ const PackageResource *scenegraphFindResource(const Package *package, const Pack
             resource->key.instanceIdentifierHigh == key->instanceIdentifierHigh)
         {
             return resource;
+        }
+    }
+    return NULL_POINTER;
+}
+
+/* A resource's bytes, unpacked if the stream says it is packed.
+ *
+ * Almost everything on a retail disc is stored compressed, so what the index
+ * points at is usually not the resource — it is a RefPack stream that unpacks
+ * into it. Detected from the stream's own header rather than from the package's
+ * directory resource: the header is on the thing being read, which is the
+ * harder of the two to be wrong about.
+ *
+ * Anything allocated here comes from the arena, so a caller that rewinds gets
+ * it back. */
+const Unsigned8 *scenegraphReadResourceBytes(MemoryArena *arena, const Package *package,
+                                             const PackageResource *resource, MemorySize *sizeInBytes,
+                                             Boolean *wasCompressed)
+{
+    const Unsigned8 *bytes = packageReaderGetResourceBytes(package, resource);
+    MemorySize size = (MemorySize)resource->sizeInBytes;
+    MemorySize decompressedSize;
+    Unsigned8 *unpacked;
+
+    *wasCompressed = BOOLEAN_FALSE;
+    *sizeInBytes = 0UL;
+    if (bytes == NULL_POINTER)
+    {
+        return NULL_POINTER;
+    }
+    if (!compressionLooksLikeRefPack(bytes, size))
+    {
+        *sizeInBytes = size;
+        return bytes;
+    }
+
+    *wasCompressed = BOOLEAN_TRUE;
+    decompressedSize = compressionGetDecompressedSize(bytes, size);
+    unpacked = (Unsigned8 *)memoryArenaAllocate(arena, decompressedSize, 8UL);
+    if (unpacked == NULL_POINTER)
+    {
+        return NULL_POINTER;
+    }
+    if (compressionDecompressRefPack(unpacked, decompressedSize, bytes, size, &decompressedSize) !=
+        COMPRESSION_OK)
+    {
+        return NULL_POINTER;
+    }
+    *sizeInBytes = decompressedSize;
+    return unpacked;
+}
+
+/* The container a named geometry node points at, or null.
+ *
+ * Every geometry node in the package is read and matched by the name it carries
+ * rather than by its instance identifier. That is a walk over a handful of small
+ * resources, and it is the right way round: the shape names its meshes, and a
+ * name is what the file gives us to match on. */
+const PackageResource *scenegraphFindGeometryNamed(MemoryArena *arena, const Package *package,
+                                                   const char *nodeName)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < package->resourceCount; index++)
+    {
+        const PackageResource *candidate = &package->resources[index];
+        MemorySize marker;
+        const Unsigned8 *nodeBytes;
+        MemorySize nodeSize;
+        Boolean compressed;
+        GeometryNodeDescription node;
+        const PackageResource *geometry = NULL_POINTER;
+
+        if (candidate->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_GMND)
+        {
+            continue;
+        }
+
+        /* Each candidate is read and given straight back, so scanning a package
+         * full of nodes costs the arena one node at a time rather than all of
+         * them. The key is a struct copy, so it survives the rewind. */
+        marker = memoryArenaGetMarker(arena);
+        nodeBytes = scenegraphReadResourceBytes(arena, package, candidate, &nodeSize, &compressed);
+        if (nodeBytes != NULL_POINTER &&
+            scenegraphReadGeometryNode(&node, nodeBytes, nodeSize) == SCENEGRAPH_READ_OK &&
+            node.hasGeometry && stringEquals(node.resourceName, nodeName))
+        {
+            geometry = scenegraphFindResource(package, &node.geometryKey);
+        }
+        memoryArenaRewindToMarker(arena, marker);
+
+        if (geometry != NULL_POINTER)
+        {
+            return geometry;
         }
     }
     return NULL_POINTER;

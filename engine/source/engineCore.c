@@ -191,7 +191,11 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         appendCount(message, sizeof(message), discSearch.packagesCompressed);
         stringAppend(message, sizeof(message), " compressed, ");
         appendCount(message, sizeof(message), discSearch.packagesWithGeometry);
-        stringAppend(message, sizeof(message), " with geometry");
+        stringAppend(message, sizeof(message), " with geometry, ");
+        appendCount(message, sizeof(message), discSearch.packagesWithShapes);
+        stringAppend(message, sizeof(message), " with a shape, ");
+        appendCount(message, sizeof(message), discSearch.modelsResolved);
+        stringAppend(message, sizeof(message), " followed to a model");
         platformLogMessage(message);
 
         /* Why the ones that were refused were refused. A count on its own says
@@ -282,6 +286,18 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine: drawing ");
         stringAppend(message, sizeof(message), discSearch.mesh.name);
+        /* Named only when a shape led here. A container taken outright is not a
+           model, and saying it is would make the log agree with a claim the
+           engine has not earned. */
+        if (discSearch.foundThroughScenegraph)
+        {
+            stringAppend(message, sizeof(message), " of model ");
+            stringAppend(message, sizeof(message), discSearch.modelName);
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), " (no shape, container taken directly)");
+        }
         stringAppend(message, sizeof(message), " from ");
         stringAppend(message, sizeof(message), discSearch.packagePath);
         platformLogMessage(message);

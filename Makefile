@@ -35,6 +35,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
                   engine/source/resourceCollection.c engine/source/geometryReader.c \
+                  engine/source/scenegraph.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -250,12 +251,13 @@ $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/
 
 $(SCENEGRAPH_VERIFIER): tests/verifyScenegraph.c engine/source/scenegraph.c \
 		engine/source/resourceCollection.c engine/source/geometryReader.c \
-		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+		engine/source/compression.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyScenegraph.c engine/source/scenegraph.c \
 		engine/source/resourceCollection.c engine/source/geometryReader.c \
-		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
-		$(VERIFIER_SUPPORT) -o $@
+		engine/source/compression.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(STRINGS_VERIFIER): tests/verifyStrings.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests

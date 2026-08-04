@@ -39,6 +39,10 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
     search->packagesWithGeometry = 0U;
+    search->packagesWithShapes = 0U;
+    search->modelsResolved = 0U;
+    search->modelName[0] = '\0';
+    search->foundThroughScenegraph = BOOLEAN_FALSE;
     search->geometryRefused = 0U;
     search->decompressionRefused = 0U;
     search->sawUnknownMark = BOOLEAN_FALSE;
@@ -73,6 +77,60 @@ static Boolean endsWithPackage(const char *path)
         }
     }
     return BOOLEAN_TRUE;
+}
+
+/* Follows shape to geometry node to container, and says whether it got there.
+ *
+ * A package with no shape is not a failure — plenty hold a container and
+ * nothing else, and the caller falls back to taking the container directly.
+ * What this buys is a mesh that was chosen: named, and known to be part of a
+ * model rather than whatever the index happened to list first. */
+static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *search,
+                                                            const Package *package)
+{
+    const PackageResource *shapeResource =
+        packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_SHPE);
+    MemorySize marker;
+    const Unsigned8 *shapeBytes;
+    MemorySize shapeSize;
+    Boolean compressed;
+    ShapeDescription shape;
+    const PackageResource *geometry = NULL_POINTER;
+    Unsigned32 index;
+
+    if (shapeResource == NULL_POINTER)
+    {
+        return NULL_POINTER;
+    }
+
+    marker = memoryArenaGetMarker(search->arena);
+    shapeBytes = scenegraphReadResourceBytes(search->arena, package, shapeResource, &shapeSize, &compressed);
+    if (shapeBytes == NULL_POINTER ||
+        scenegraphReadShape(&shape, shapeBytes, shapeSize) != SCENEGRAPH_READ_OK)
+    {
+        memoryArenaRewindToMarker(search->arena, marker);
+        return NULL_POINTER;
+    }
+    search->packagesWithShapes++;
+
+    for (index = 0U; index < shape.storedMeshCount && geometry == NULL_POINTER; index++)
+    {
+        if (shape.meshNames[index][0] == '\0')
+        {
+            continue;
+        }
+        geometry = scenegraphFindGeometryNamed(search->arena, package, shape.meshNames[index]);
+    }
+
+    if (geometry != NULL_POINTER)
+    {
+        search->modelName[0] = '\0';
+        stringAppend(search->modelName, RESOURCE_NAME_LIMIT, shape.resourceName);
+    }
+    /* The shape's own bytes are done with either way; the container is found by
+     * index entry, which outlives them. */
+    memoryArenaRewindToMarker(search->arena, marker);
+    return geometry;
 }
 
 DiscContentStatus discContentStep(DiscContentSearch *search)
@@ -130,7 +188,21 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     }
     search->packagesOpened++;
 
-    geometry = packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMDC);
+    /* Ask the scenegraph first. A shape names the meshes a model is built from,
+     * so a container reached that way is one this engine chose rather than the
+     * first the index happened to list. Packages that carry no shape fall back
+     * to the blunt rule, which is how the engine has worked until now. */
+    search->modelName[0] = '\0';
+    geometry = findGeometryThroughScenegraph(search, &package);
+    search->foundThroughScenegraph = (geometry != NULL_POINTER) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+    if (geometry != NULL_POINTER)
+    {
+        search->modelsResolved++;
+    }
+    else
+    {
+        geometry = packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMDC);
+    }
     if (geometry == NULL_POINTER)
     {
         memoryArenaRewindToMarker(search->arena, attemptMarker);
@@ -138,38 +210,21 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     }
     search->packagesWithGeometry++;
 
-    geometryBytes = packageReaderGetResourceBytes(&package, geometry);
-    geometrySize = (MemorySize)geometry->sizeInBytes;
-
-    /* Almost everything on a retail disc is stored compressed, so the bytes the
-       index points at are usually not the resource — they are a RefPack stream
-       that unpacks into it. Detected from the stream's own header rather than
-       from the package's directory resource: the header is on the thing being
-       read, which is the harder of the two to be wrong about. */
-    if (geometryBytes != NULL_POINTER && compressionLooksLikeRefPack(geometryBytes, geometrySize))
     {
-        MemorySize decompressedSize = compressionGetDecompressedSize(geometryBytes, geometrySize);
-        Unsigned8 *unpacked =
-            (Unsigned8 *)memoryArenaAllocate(search->arena, decompressedSize, 8UL);
-        CompressionResult unpackResult;
+        Boolean compressed = BOOLEAN_FALSE;
 
-        search->packagesCompressed++;
-        if (unpacked == NULL_POINTER)
+        geometryBytes = scenegraphReadResourceBytes(search->arena, &package, geometry, &geometrySize, &compressed);
+        if (compressed)
         {
-            memoryArenaRewindToMarker(search->arena, attemptMarker);
-            return DISC_CONTENT_OUT_OF_ARENA;
+            search->packagesCompressed++;
         }
-        unpackResult = compressionDecompressRefPack(unpacked, decompressedSize, geometryBytes,
-                                                    geometrySize, &decompressedSize);
-        if (unpackResult != COMPRESSION_OK)
+        if (geometryBytes == NULL_POINTER && compressed)
         {
             search->geometryRefused++;
             search->decompressionRefused++;
             memoryArenaRewindToMarker(search->arena, attemptMarker);
             return DISC_CONTENT_PENDING;
         }
-        geometryBytes = unpacked;
-        geometrySize = decompressedSize;
     }
 
     if (geometryBytes == NULL_POINTER)
