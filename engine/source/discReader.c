@@ -287,7 +287,13 @@ static DiscReadStatus stepDescriptors(DiscReader *reader)
             reader->volumeIdentifier[index] = (char)sector[OFFSET_VOLUME_IDENTIFIER + index];
         }
         reader->volumeIdentifier[32] = '\0';
-        while (length > 0UL && reader->volumeIdentifier[length - 1UL] == ' ')
+        /* The field is padded to thirty-two bytes. Spaces are the usual filler,
+           but a disc that ends it with a NUL or other control byte would stop a
+           space-only trim dead and leave the padding in the name — which is
+           what this disc does. */
+        while (length > 0UL && (reader->volumeIdentifier[length - 1UL] == ' ' ||
+                                reader->volumeIdentifier[length - 1UL] == '\0' ||
+                                (Unsigned8)reader->volumeIdentifier[length - 1UL] < 0x20U))
         {
             length--;
         }

@@ -182,6 +182,39 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         stringAppend(message, sizeof(message), " with geometry");
         platformLogMessage(message);
 
+        /* Why the ones that were refused were refused. A count on its own says
+           something is wrong; this says what, and whether it is one thing or
+           several. */
+        if (discSearch.geometryRefused > 0U)
+        {
+            Unsigned32 reason;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: refused ");
+            appendCount(message, sizeof(message), discSearch.geometryRefused);
+            stringAppend(message, sizeof(message), " meshes —");
+            if (discSearch.decompressionRefused > 0U)
+            {
+                stringAppend(message, sizeof(message), " would not decompress x");
+                appendCount(message, sizeof(message), discSearch.decompressionRefused);
+                stringAppend(message, sizeof(message), ";");
+            }
+            for (reason = 0U; reason < 8U; reason++)
+            {
+                if (discSearch.refusalsByReason[reason] == 0U)
+                {
+                    continue;
+                }
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message),
+                             geometryReadResultGetName((GeometryReadResult)reason));
+                stringAppend(message, sizeof(message), " x");
+                appendCount(message, sizeof(message), discSearch.refusalsByReason[reason]);
+                stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+        }
+
         if (status != DISC_CONTENT_FOUND)
         {
             reportDiscFailure(discContentStatusGetName(status));

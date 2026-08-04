@@ -48,6 +48,13 @@ typedef struct DiscContentSearch
     Unsigned32 packagesCompressed;
     Unsigned32 packagesWithGeometry;
     Unsigned32 geometryRefused;
+    /* Why the refusals happened, one bucket per GeometryReadResult. A disc that
+       refuses hundreds of meshes for one reason and a disc that refuses them for
+       six are different problems, and a bare count cannot tell them apart. */
+    Unsigned32 refusalsByReason[8];
+    /* Refusals that never reached the geometry reader because the stream would
+       not decompress. */
+    Unsigned32 decompressionRefused;
 } DiscContentSearch;
 
 void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, MemoryArena *arena);

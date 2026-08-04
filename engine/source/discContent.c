@@ -29,6 +29,8 @@ const char *discContentStatusGetName(DiscContentStatus status)
 
 void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, MemoryArena *arena)
 {
+    Unsigned32 index;
+
     search->fileSystem = fileSystem;
     search->arena = arena;
     search->arenaMarker = memoryArenaGetMarker(arena);
@@ -38,6 +40,11 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesCompressed = 0U;
     search->packagesWithGeometry = 0U;
     search->geometryRefused = 0U;
+    search->decompressionRefused = 0U;
+    for (index = 0U; index < 8U; index++)
+    {
+        search->refusalsByReason[index] = 0U;
+    }
 }
 
 static Boolean endsWithPackage(const char *path)
@@ -150,6 +157,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         if (unpackResult != COMPRESSION_OK)
         {
             search->geometryRefused++;
+            search->decompressionRefused++;
             memoryArenaRewindToMarker(search->arena, attemptMarker);
             return DISC_CONTENT_PENDING;
         }
@@ -157,13 +165,22 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         geometrySize = decompressedSize;
     }
 
-    if (geometryBytes == NULL_POINTER ||
-        geometryReaderOpen(&search->mesh, geometryBytes, geometrySize, search->arena) !=
-            GEOMETRY_READ_OK)
     {
-        search->geometryRefused++;
-        memoryArenaRewindToMarker(search->arena, attemptMarker);
-        return DISC_CONTENT_PENDING;
+        GeometryReadResult readResult =
+            (geometryBytes == NULL_POINTER)
+                ? GEOMETRY_READ_TRUNCATED
+                : geometryReaderOpen(&search->mesh, geometryBytes, geometrySize, search->arena);
+
+        if (readResult != GEOMETRY_READ_OK)
+        {
+            search->geometryRefused++;
+            if ((Unsigned32)readResult < 8U)
+            {
+                search->refusalsByReason[(Unsigned32)readResult]++;
+            }
+            memoryArenaRewindToMarker(search->arena, attemptMarker);
+            return DISC_CONTENT_PENDING;
+        }
     }
 
     search->packagePath[0] = '\0';
