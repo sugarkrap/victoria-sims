@@ -20,8 +20,15 @@ constraints that currently govern the code.
 ```sh
 make linux    # native OpenGL ES 2.0 build
 make web      # WebAssembly + WebGPU build
+make armv7    # Cortex-A8 with NEON, the reference handheld
+make armv5    # the portability floor (ARM_ARCHITECTURE=armv4t for StrongARM)
+make oabi     # the same, as genuine ARM old-ABI
 make check    # enforce the no-dynamic-allocation rule
 ```
+
+The machine this is meant to run on is the Sharp NetWalker PC-Z1 — i.MX515
+Cortex-A8, 512 MB of RAM, Ubuntu 9.04. Older ARM handhelds such as the HP iPAQ
+family remain the supported floor, which is why the old-ABI target exists.
 
 ## Status
 

@@ -4,6 +4,7 @@
 #   make web      freestanding wasm32 module plus its host page
 #   make armv5    ARMv5TE cross build of the portable engine core (EABI)
 #   make oabi     the same, built as genuine ARM OABI
+#   make armv7    Cortex-A8 with NEON, the reference handheld
 #   make check    static enforcement of the no-dynamic-allocation rule
 #   make clean
 #
@@ -78,9 +79,19 @@ WEB_LINK_FLAGS := -Wl,--no-entry -Wl,--allow-undefined \
                   -Wl,--max-memory=$(WEB_LINEAR_MEMORY_BYTES) \
                   $(WEB_EXPORTS)
 
-# ARMv5TE, software floating point: the oldest hardware in scope has no
-# floating point unit worth targeting.
-ARM_FLAGS := -march=armv5te -mfloat-abi=soft -ffreestanding \
+# --- ARM tiers ---------------------------------------------------------
+# Three of them, oldest first. All are compile-only: there are no
+# cross-compiled EGL or X11 libraries here, and the point is to prove the
+# portable core stays portable.
+#
+#   armv5  the floor. No floating point unit assumed, soft-float ABI.
+#          ARM_ARCHITECTURE=armv4t covers the StrongARM iPAQs (h3600, h3800);
+#          the default armv5te covers the PXA25x/27x ones (h3900, hx4700).
+#   oabi   the same code as genuine old-ABI, for pre-EABI userlands.
+#   armv7  the reference device: Sharp NetWalker PC-Z1, i.MX515 Cortex-A8.
+
+ARM_ARCHITECTURE ?= armv5te
+ARM_FLAGS := -march=$(ARM_ARCHITECTURE) -mfloat-abi=soft -ffreestanding \
              -DVICTORIA_FREESTANDING_BUILTINS=1
 
 # Genuine old-ABI ARM. -mabi=apcs-gnu is a GCC ARM-backend codegen flag rather
@@ -95,7 +106,33 @@ OABI_LIBRARY := $(OABI_OUTPUT_DIRECTORY)/libVictoriaEngine.a
 OABI_COMPILER ?= $(ARM_COMPILER)
 OABI_READELF ?= arm-linux-gnueabi-readelf
 
-.PHONY: all linux web armv5 oabi check clean
+# Cortex-A8 with VFPv3 and NEON. softfp rather than hard float on purpose: the
+# NetWalker shipped Ubuntu 9.04, which is armel and predates armhf entirely.
+# softfp gives hardware floating point instructions while keeping the
+# soft-float calling convention that userland expects.
+ARMV7_COMPILER ?= $(ARM_COMPILER)
+ARMV7_ARCHITECTURE ?= armv7-a
+ARMV7_TUNE ?= cortex-a8
+ARMV7_FLAGS := -march=$(ARMV7_ARCHITECTURE) -mtune=$(ARMV7_TUNE) \
+               -mfpu=neon -mfloat-abi=softfp -ffreestanding \
+               -DVICTORIA_FREESTANDING_BUILTINS=1
+ARMV7_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/armv7
+ARMV7_LIBRARY := $(ARMV7_OUTPUT_DIRECTORY)/libVictoriaEngine.a
+ARMV7_READELF ?= arm-linux-gnueabi-readelf
+
+# Compiles the portable core into one static library.
+#   $(1) compiler   $(2) output directory   $(3) flags   $(4) library
+define buildEngineLibrary
+@mkdir -p $(2)
+@for source in $(ENGINE_SOURCES); do \
+	objectName=$(2)/`basename $$source .c`.o; \
+	echo "$(1) -c $$source -o $$objectName"; \
+	$(1) $(COMMON_FLAGS) $(3) -c $$source -o $$objectName || exit 1; \
+done
+$(ARCHIVER) rcs $(4) $(2)/*.o
+endef
+
+.PHONY: all linux web armv5 armv7 oabi check clean
 
 all: linux
 
@@ -115,24 +152,23 @@ $(WEB_MODULE): $(WEB_SOURCES) platform/web/index.html platform/web/victoriaRunti
 armv5: $(ARM_LIBRARY)
 
 $(ARM_LIBRARY): $(ENGINE_SOURCES)
-	@mkdir -p $(ARM_OUTPUT_DIRECTORY)
-	@for source in $(ENGINE_SOURCES); do \
-		objectName=$(ARM_OUTPUT_DIRECTORY)/`basename $$source .c`.o; \
-		echo "$(ARM_COMPILER) -c $$source -o $$objectName"; \
-		$(ARM_COMPILER) $(COMMON_FLAGS) $(ARM_FLAGS) -c $$source -o $$objectName || exit 1; \
-	done
-	$(ARCHIVER) rcs $@ $(ARM_OUTPUT_DIRECTORY)/*.o
+	$(call buildEngineLibrary,$(ARM_COMPILER),$(ARM_OUTPUT_DIRECTORY),$(ARM_FLAGS),$@)
+
+armv7: $(ARMV7_LIBRARY)
+
+$(ARMV7_LIBRARY): $(ENGINE_SOURCES)
+	$(call buildEngineLibrary,$(ARMV7_COMPILER),$(ARMV7_OUTPUT_DIRECTORY),$(ARMV7_FLAGS),$@)
+	@attributes=`$(ARMV7_READELF) -A $(ARMV7_OUTPUT_DIRECTORY)/memoryArena.o`; \
+	echo "$$attributes" | grep -q 'Tag_CPU_arch: v7' || \
+		{ echo "ERROR: not ARMv7" >&2; exit 1; }; \
+	echo "$$attributes" | grep -q 'Tag_Advanced_SIMD_arch: NEON' || \
+		{ echo "ERROR: NEON not enabled" >&2; exit 1; }; \
+	echo "verified ARMv7-A with NEON"
 
 oabi: $(OABI_LIBRARY)
 
 $(OABI_LIBRARY): $(ENGINE_SOURCES)
-	@mkdir -p $(OABI_OUTPUT_DIRECTORY)
-	@for source in $(ENGINE_SOURCES); do \
-		objectName=$(OABI_OUTPUT_DIRECTORY)/`basename $$source .c`.o; \
-		echo "$(OABI_COMPILER) -mabi=apcs-gnu -c $$source -o $$objectName"; \
-		$(OABI_COMPILER) $(COMMON_FLAGS) $(OABI_FLAGS) -c $$source -o $$objectName || exit 1; \
-	done
-	$(ARCHIVER) rcs $@ $(OABI_OUTPUT_DIRECTORY)/*.o
+	$(call buildEngineLibrary,$(OABI_COMPILER),$(OABI_OUTPUT_DIRECTORY),$(OABI_FLAGS),$@)
 	@flags=`$(OABI_READELF) -h $(OABI_OUTPUT_DIRECTORY)/memoryArena.o | grep -i '^ *Flags:'`; \
 	case "$$flags" in \
 		*0x600*) echo "verified genuine OABI ($$flags)" ;; \

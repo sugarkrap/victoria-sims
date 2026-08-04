@@ -56,15 +56,36 @@ These two are settled. They are the minimum, not the finish line.
 
 | Target | Graphics | Notes |
 | --- | --- | --- |
-| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv5 and up, EABI and OABI. Kernels as old as 2.4. |
+| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv4 and up, EABI and OABI. Kernels as old as 2.4. |
 | WebAssembly | WebGPU, no wrapper library | `wasm32`, freestanding, no Emscripten. |
 
-The reference ARMv5 machine is the Sharp Zaurus SL-C760/C860 that
-[piko](https://github.com/sugarkrap/piko) targets: PXA255, XScale ARMv5TE,
-64 MB of RAM, and an ATI Imageon w100 with a few megabytes of its own memory.
-Note that 64 MB is *half* the engine's 128 MiB ceiling, so the engine cannot
-currently run there — ARMv5 is a compile-only portability target for now, and
-that is a deliberate decision rather than an oversight.
+### The device ladder
+
+**The machine to run on is the Sharp NetWalker PC-Z1**: Freescale i.MX515,
+ARM Cortex-A8 at 800 MHz, 512 MB of RAM, 1024×600, shipped with Ubuntu 9.04.
+Two things follow. 512 MB against a 128 MiB ceiling is comfortable, roughly a
+quarter of memory, so the budget is not the constraint here. And Cortex-A8 has
+VFPv3 and NEON, so `make armv7` builds `softfp` with NEON enabled — *soft*fp,
+not hard float, because that machine's userland is armel and predates armhf
+entirely.
+
+**The floor is the old handhelds**, the HP iPAQ family among them, and it is
+not going away. That family spans two architectures:
+
+* StrongARM SA-1110 models (h3600, h3800) are **ARMv4** — build with
+  `make armv5 ARM_ARCHITECTURE=armv4t`.
+* PXA25x/27x models (h3900, h5500, hx4700) are ARMv5TE, the default.
+
+Those userlands are frequently pre-EABI, which is what `make oabi` is for.
+
+The Sharp Zaurus SL-C760 that [piko](https://github.com/sugarkrap/piko) targets
+is explicitly **not** a goal: 64 MB of RAM is half the ceiling, so the engine
+cannot load there at all.
+
+All ARM tiers are compile-only. There are no cross-compiled EGL or X11
+libraries in continuous integration, and the point of those jobs is to prove
+the portable core stays portable — not that the whole engine runs. Nothing has
+been run on real hardware yet. Do not claim otherwise.
 
 Consequences worth internalising before writing platform code:
 
@@ -98,6 +119,9 @@ This approach comes from the sibling [piko](https://github.com/sugarkrap/piko)
 project, whose `tools/build-oabi-toolchain.sh` also has a from-source
 crosstool-NG fallback for environments where no stock compiler works.
 
+OABI is not legacy baggage to be dropped once the reference device works: the
+old handhelds in the device ladder above genuinely need it.
+
 Still unproven: nothing has *run* on real hardware. The objects are correct;
 that is not the same as the engine working on a device.
 
@@ -108,7 +132,9 @@ table — but that is a deliberate decision to be made in the open, not somethin
 to drift into one `.cpp` file at a time.
 
 Assembly is allowed for optimisation. Always behind a portable C fallback, and
-only once a measurement justifies it.
+only once a measurement justifies it. NEON is the obvious place for that on the
+reference device; nothing below ARMv7 has it, so a NEON path never removes the
+need for the C one.
 
 ## Naming
 
