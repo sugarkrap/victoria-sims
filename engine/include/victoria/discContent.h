@@ -20,6 +20,9 @@
 
 #define DISC_CONTENT_PATH_LIMIT 320UL
 
+/* Container versions 0 to 14, then everything above in the last. */
+#define DISC_CONTENT_VERSION_BUCKETS 16U
+
 typedef enum DiscContentStatus
 {
     DISC_CONTENT_FOUND = 0,
@@ -51,10 +54,20 @@ typedef struct DiscContentSearch
     /* Why the refusals happened, one bucket per GeometryReadResult. A disc that
        refuses hundreds of meshes for one reason and a disc that refuses them for
        six are different problems, and a bare count cannot tell them apart. */
-    Unsigned32 refusalsByReason[8];
+    Unsigned32 refusalsByReason[GEOMETRY_READ_RESULT_COUNT];
     /* Refusals that never reached the geometry reader because the stream would
        not decompress. */
     Unsigned32 decompressionRefused;
+
+    /* Which container versions the disc actually holds, read or not. A reason
+       says what this engine did; this says what the game shipped, which is the
+       part no amount of reasoning about the reader can supply. Anything past
+       the last bucket lands in it. */
+    Unsigned32 versionsSeen[DISC_CONTENT_VERSION_BUCKETS];
+    /* Collection marks that were not 0xFFFF0001, most recent first seen. Kept
+       whole rather than bucketed: there are only a few, and knowing it was
+       0xFFFE0001 rather than "some other mark" is the whole question. */
+    Unsigned32 firstUnknownMark;
 } DiscContentSearch;
 
 void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, MemoryArena *arena);

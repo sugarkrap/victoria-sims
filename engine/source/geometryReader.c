@@ -194,6 +194,12 @@ const char *geometryReadResultGetName(GeometryReadResult result)
         return "the container holds no drawable geometry";
     case GEOMETRY_READ_OUT_OF_ARENA:
         return "not enough arena space for the mesh";
+    case GEOMETRY_READ_OLDER_COLLECTION:
+        return "an older collection, laid out differently";
+    case GEOMETRY_READ_TOO_MANY_ELEMENTS:
+        return "more geometry elements than this reader holds";
+    case GEOMETRY_READ_TOO_MANY_VERTICES:
+        return "more vertices than a half word index can address";
     default:
         return "unknown";
     }
@@ -266,6 +272,8 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;
     mesh->primitiveCount = 0U;
+    mesh->versionMark = 0U;
+    mesh->containerVersion = 0U;
 
     cursorInitialize(&cursor, bytes, sizeInBytes);
 
@@ -274,16 +282,16 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     {
         return GEOMETRY_READ_TRUNCATED;
     }
+    mesh->versionMark = versionMark;
     if (versionMark != (Unsigned32)SCENEGRAPH_VERSION_MARK)
     {
         /* Older collections mark themselves 0xFFFE0001 or 0xFFFD0001 and differ
          * in how the file links are laid out. Saying so separately keeps them
-         * from being counted as rubbish, which is what the last run did to
-         * forty-four of them. */
+         * from being counted as rubbish. */
         if ((versionMark & 0x0000FFFFUL) == 0x00000001UL &&
             (versionMark >> 16) >= 0xFFF0UL)
         {
-            return GEOMETRY_READ_UNSUPPORTED_VERSION;
+            return GEOMETRY_READ_OLDER_COLLECTION;
         }
         return GEOMETRY_READ_NOT_A_RESOURCE;
     }
@@ -311,6 +319,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     {
         return GEOMETRY_READ_WRONG_TYPE;
     }
+    mesh->containerVersion = blockVersion;
     if (blockVersion < MINIMUM_BLOCK_VERSION)
     {
         return GEOMETRY_READ_UNSUPPORTED_VERSION;
@@ -330,7 +339,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     }
     if (elementCount > MAXIMUM_ELEMENTS)
     {
-        return GEOMETRY_READ_UNSUPPORTED_VERSION;
+        return GEOMETRY_READ_TOO_MANY_ELEMENTS;
     }
     for (index = 0U; index < elementCount; index++)
     {
@@ -446,7 +455,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     }
     if (vertexCount > LARGEST_ADDRESSABLE_VERTEX_COUNT)
     {
-        return GEOMETRY_READ_UNSUPPORTED_VERSION;
+        return GEOMETRY_READ_TOO_MANY_VERTICES;
     }
 
     mesh->positions = copyRealArray(arena, &cursor, positionSpan, 3U, vertexCount);

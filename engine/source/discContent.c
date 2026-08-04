@@ -41,9 +41,14 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesWithGeometry = 0U;
     search->geometryRefused = 0U;
     search->decompressionRefused = 0U;
-    for (index = 0U; index < 8U; index++)
+    search->firstUnknownMark = 0U;
+    for (index = 0U; index < GEOMETRY_READ_RESULT_COUNT; index++)
     {
         search->refusalsByReason[index] = 0U;
+    }
+    for (index = 0U; index < DISC_CONTENT_VERSION_BUCKETS; index++)
+    {
+        search->versionsSeen[index] = 0U;
     }
 }
 
@@ -165,16 +170,40 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         geometrySize = decompressedSize;
     }
 
+    if (geometryBytes == NULL_POINTER)
+    {
+        search->geometryRefused++;
+        search->refusalsByReason[GEOMETRY_READ_TRUNCATED]++;
+        memoryArenaRewindToMarker(search->arena, attemptMarker);
+        return DISC_CONTENT_PENDING;
+    }
+
     {
         GeometryReadResult readResult =
-            (geometryBytes == NULL_POINTER)
-                ? GEOMETRY_READ_TRUNCATED
-                : geometryReaderOpen(&search->mesh, geometryBytes, geometrySize, search->arena);
+            geometryReaderOpen(&search->mesh, geometryBytes, geometrySize, search->arena);
+
+        /* Recorded whether or not the read succeeded. What the disc holds does
+           not depend on what this engine could do with it. */
+        if (search->mesh.containerVersion != 0U)
+        {
+            Unsigned32 bucket = search->mesh.containerVersion;
+
+            if (bucket >= DISC_CONTENT_VERSION_BUCKETS)
+            {
+                bucket = DISC_CONTENT_VERSION_BUCKETS - 1U;
+            }
+            search->versionsSeen[bucket]++;
+        }
+        if (search->mesh.versionMark != 0U && search->mesh.versionMark != 0xFFFF0001UL &&
+            search->firstUnknownMark == 0U)
+        {
+            search->firstUnknownMark = search->mesh.versionMark;
+        }
 
         if (readResult != GEOMETRY_READ_OK)
         {
             search->geometryRefused++;
-            if ((Unsigned32)readResult < 8U)
+            if ((Unsigned32)readResult < GEOMETRY_READ_RESULT_COUNT)
             {
                 search->refusalsByReason[(Unsigned32)readResult]++;
             }

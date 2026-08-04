@@ -245,6 +245,10 @@ int main(void)
               stringEquals(mesh.resourceName, "teapot_tslocator_gmdc"));
     checkThat(&failureCount, "names the primitive teapot", stringEquals(mesh.name, "teapot"));
     checkThat(&failureCount, "the model is one primitive", mesh.primitiveCount == 1U);
+    /* Reported so a disc can be described by what it holds rather than by what
+       was made of it. The teapot is the newest layout of the four. */
+    checkThat(&failureCount, "says it is a 0xFFFF0001 collection", mesh.versionMark == 0xFFFF0001UL);
+    checkThat(&failureCount, "at container version 4", mesh.containerVersion == 4U);
 
     checkThat(&failureCount, "finds 13248 vertices", mesh.vertexCount == 13248U);
     checkThat(&failureCount, "finds 18960 indices", mesh.indexCount == 18960U);
@@ -345,6 +349,8 @@ int main(void)
             }
             checkThat(&failureCount, "names the resource body_tslocator_gmdc",
                       stringEquals(older.resourceName, "body_tslocator_gmdc"));
+            checkThat(&failureCount, "reports the version it read",
+                      older.containerVersion == version);
             checkThat(&failureCount, "finds its three vertices", older.vertexCount == 3U);
             checkThat(&failureCount, "and its one triangle", older.indexCount == 3U);
             checkThat(&failureCount, "with the faces in order",
@@ -384,7 +390,9 @@ int main(void)
 
             checkThat(&failureCount, "calls an older collection mark a version, not rubbish",
                       geometryReaderOpen(&other, olderMark, sizeof(olderMark), &arena) ==
-                          GEOMETRY_READ_UNSUPPORTED_VERSION);
+                          GEOMETRY_READ_OLDER_COLLECTION);
+            checkThat(&failureCount, "and reports which mark it was",
+                      other.versionMark == 0xFFFE0001UL);
         }
 
         {

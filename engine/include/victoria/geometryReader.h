@@ -39,6 +39,13 @@
  * for a human reading a log, and losing the mesh over it would be absurd. */
 #define GEOMETRY_NAME_LIMIT 64UL
 
+/* One reason per cause, and never one code for several.
+ *
+ * These are counted and reported, and a bucket that three different causes
+ * share cannot be acted on: a run that refused 238 meshes for "version" looked
+ * exactly the same whether the block version was too old, the element list too
+ * long, or the vertex count past what a half word index can address. Splitting
+ * them costs nothing and is the difference between a number and a diagnosis. */
 typedef enum GeometryReadResult
 {
     GEOMETRY_READ_OK = 0,
@@ -47,8 +54,17 @@ typedef enum GeometryReadResult
     GEOMETRY_READ_UNSUPPORTED_VERSION,
     GEOMETRY_READ_TRUNCATED,
     GEOMETRY_READ_NO_GEOMETRY,
-    GEOMETRY_READ_OUT_OF_ARENA
+    GEOMETRY_READ_OUT_OF_ARENA,
+    /* A collection marked 0xFFFE0001 or 0xFFFD0001. Older than what is read
+       here, and laid out differently, but not rubbish. */
+    GEOMETRY_READ_OLDER_COLLECTION,
+    GEOMETRY_READ_TOO_MANY_ELEMENTS,
+    /* More vertices than a half word index can address, which is this reader's
+       limit rather than the format's. */
+    GEOMETRY_READ_TOO_MANY_VERTICES
 } GeometryReadResult;
+
+#define GEOMETRY_READ_RESULT_COUNT 10U
 
 const char *geometryReadResultGetName(GeometryReadResult result);
 
@@ -72,6 +88,13 @@ typedef struct GeometryMesh
     /* How many the file held, so a caller can say "showing 1 of 3" rather than
      * quietly drawing part of a model. */
     Unsigned32 primitiveCount;
+
+    /* What the resource said about itself, filled in as soon as it is known and
+       left set when the read then fails. A refusal that cannot say which
+       version it refused sends the next reader guessing. Zero when the read did
+       not get that far. */
+    Unsigned32 versionMark;
+    Unsigned32 containerVersion;
 } GeometryMesh;
 
 GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes, MemorySize sizeInBytes,

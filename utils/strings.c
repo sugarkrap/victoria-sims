@@ -79,6 +79,41 @@ MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity
     return digitCount;
 }
 
+MemorySize stringWriteHexadecimal(char *destination, MemorySize destinationCapacity, Unsigned64 value,
+                                  MemorySize digitCount)
+{
+    /* Upper case, because every reference that quotes these — the format notes,
+       the tools, the wiki — writes them that way, and a log line that has to be
+       case folded before it can be searched for is a log line that will not be. */
+    static const char digits[16] = { '0', '1', '2', '3', '4', '5', '6', '7',
+                                     '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+    MemorySize index;
+
+    if (digitCount == 0UL || digitCount > 16UL)
+    {
+        digitCount = 8UL;
+    }
+    if (destinationCapacity < digitCount + 3UL)
+    {
+        if (destinationCapacity > 0UL)
+        {
+            destination[0] = '\0';
+        }
+        return 0UL;
+    }
+
+    destination[0] = '0';
+    destination[1] = 'x';
+    for (index = 0UL; index < digitCount; index += 1UL)
+    {
+        MemorySize shift = (digitCount - 1UL - index) * 4UL;
+
+        destination[2UL + index] = digits[(MemorySize)((value >> shift) & 0xFULL)];
+    }
+    destination[digitCount + 2UL] = '\0';
+    return digitCount + 2UL;
+}
+
 MemorySize stringAppend(char *destination, MemorySize destinationCapacity, const char *source)
 {
     MemorySize destinationLength = stringLength(destination);

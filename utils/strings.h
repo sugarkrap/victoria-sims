@@ -29,6 +29,13 @@ MemorySize stringParseUnsigned(const char *text);
    narrowed on 32-bit targets. */
 MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, Unsigned64 value);
 
+/* The same in hexadecimal, prefixed 0x and padded to the requested number of
+   digits. Format identifiers and version marks are quoted in hexadecimal
+   everywhere they are documented, and printing one in decimal makes a log line
+   that cannot be matched against anything. */
+MemorySize stringWriteHexadecimal(char *destination, MemorySize destinationCapacity, Unsigned64 value,
+                                  MemorySize digitCount);
+
 /* Appends as much of source as fits, always terminating. Returns the new
    length of destination. */
 MemorySize stringAppend(char *destination, MemorySize destinationCapacity, const char *source);

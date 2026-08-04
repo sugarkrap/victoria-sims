@@ -74,6 +74,16 @@ static void appendCount(char *destination, MemorySize capacity, Unsigned32 value
     }
 }
 
+static void appendHexadecimal(char *destination, MemorySize capacity, Unsigned32 value)
+{
+    char digits[24];
+
+    if (stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)value, 8UL) > 0UL)
+    {
+        stringAppend(destination, capacity, digits);
+    }
+}
+
 
 /* A disc load, one step at a time.
  *
@@ -130,7 +140,9 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
 
 EngineDiscLoadStatus engineStepDiscLoad(void)
 {
-    char message[192];
+    /* Wide enough for every refusal reason at once. A truncated diagnostic is
+       worse than none: it looks complete. */
+    char message[512];
 
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
@@ -199,7 +211,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 appendCount(message, sizeof(message), discSearch.decompressionRefused);
                 stringAppend(message, sizeof(message), ";");
             }
-            for (reason = 0U; reason < 8U; reason++)
+            for (reason = 0U; reason < GEOMETRY_READ_RESULT_COUNT; reason++)
             {
                 if (discSearch.refusalsByReason[reason] == 0U)
                 {
@@ -211,6 +223,45 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message), " x");
                 appendCount(message, sizeof(message), discSearch.refusalsByReason[reason]);
                 stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+        }
+
+        /* What the disc holds, as opposed to what was done with it. A reason
+           only says where this engine stopped; the versions say which layouts
+           the game actually shipped, and that is the part guessing cannot
+           supply. It doubles as proof the page is not a cached older build. */
+        {
+            Unsigned32 bucket;
+            Boolean anyVersion = BOOLEAN_FALSE;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: container versions seen —");
+            for (bucket = 0U; bucket < DISC_CONTENT_VERSION_BUCKETS; bucket++)
+            {
+                if (discSearch.versionsSeen[bucket] == 0U)
+                {
+                    continue;
+                }
+                anyVersion = BOOLEAN_TRUE;
+                stringAppend(message, sizeof(message), " v");
+                appendCount(message, sizeof(message), bucket);
+                if (bucket == DISC_CONTENT_VERSION_BUCKETS - 1U)
+                {
+                    stringAppend(message, sizeof(message), "+");
+                }
+                stringAppend(message, sizeof(message), " x");
+                appendCount(message, sizeof(message), discSearch.versionsSeen[bucket]);
+                stringAppend(message, sizeof(message), ";");
+            }
+            if (!anyVersion)
+            {
+                stringAppend(message, sizeof(message), " none reached the block header");
+            }
+            if (discSearch.firstUnknownMark != 0U)
+            {
+                stringAppend(message, sizeof(message), " first non-0xFFFF0001 mark ");
+                appendHexadecimal(message, sizeof(message), discSearch.firstUnknownMark);
             }
             platformLogMessage(message);
         }
