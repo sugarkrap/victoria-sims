@@ -9,6 +9,7 @@
 #include "victoria/renderInterface.h"
 #include "victoria/compression.h"
 #include "victoria/resourceIndex.h"
+#include "victoria/installerReader.h"
 #include "victoria/textureDecode.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
@@ -271,6 +272,7 @@ typedef enum DiscPhase
 {
     DISC_PHASE_CONTENT = 0,
     DISC_PHASE_PROBE,
+    DISC_PHASE_INSTALLER,
     DISC_PHASE_INDEX,
     DISC_PHASE_FETCH_TEXTURE,
     DISC_PHASE_DONE
@@ -291,6 +293,13 @@ static Unsigned32 probesDone = 0U;
    sealed inside one archive is, by definition, the biggest one there. */
 #define PROBE_LIMIT 12U
 
+/* The largest file the probe found worth opening, and how far into opening it
+   the load has got. */
+#define NO_INSTALLER 0xFFFFFFFFUL
+static Unsigned32 installerFileIndex = (Unsigned32)NO_INSTALLER;
+static Unsigned32 installerStage = 0U;
+static InstallerOffsetTable installerTable;
+
 /* The first bytes of a file, and what they mean.
  *
  * This disc's entire game is inside a single two point seven gigabyte file that
@@ -303,6 +312,10 @@ static Unsigned32 probesDone = 0U;
  * extension. */
 typedef struct FileSignature
 {
+    /* Whether a file carrying this mark is worth opening rather than merely
+       naming. A cabinet is a container too, but nothing here can read one; an
+       installer is a container this engine has a reader for. */
+    Boolean worthFollowing;
     /* Where in the file the mark sits. Nearly always the very front, but a
        program that carries an archive puts its own mark past the header it had
        to start with — and that mark is the informative one, because "a Windows
@@ -313,34 +326,32 @@ typedef struct FileSignature
     const char *name;
 } FileSignature;
 
-/* Installer loaders write their offset table at 0x30, past the DOS stub. Six
-   characters rather than the full mark, because the two bytes after it are a
-   format version and this only needs to say which family it is. */
-#define INSTALLER_LOADER_OFFSET 0x30UL
-
 static const FileSignature fileSignatures[] = {
-    { 0UL, "DBPF", 4UL, "a package by content, whatever it is called" },
-    { 0UL, "MSCF", 4UL, "a Microsoft cabinet" },
-    { 0UL, "ISc(", 4UL, "an InstallShield cabinet" },
-    { 0UL, "Rar!", 4UL, "a RAR archive" },
-    { 0UL, "PK\x03\x04", 4UL, "a zip archive" },
-    { 0UL, "PK\x05\x06", 4UL, "an empty zip archive" },
-    { 0UL, "7z\xBC\xAF", 4UL, "a 7-zip archive" },
-    { 0UL, "\x1F\x8B", 2UL, "gzip" },
-    { 0UL, "BSDIFF", 6UL, "a binary patch" },
+    { BOOLEAN_FALSE, 0UL, "DBPF", 4UL, "a package by content, whatever it is called" },
+    { BOOLEAN_FALSE, 0UL, "MSCF", 4UL, "a Microsoft cabinet" },
+    { BOOLEAN_FALSE, 0UL, "ISc(", 4UL, "an InstallShield cabinet" },
+    { BOOLEAN_FALSE, 0UL, "Rar!", 4UL, "a RAR archive" },
+    { BOOLEAN_FALSE, 0UL, "PK\x03\x04", 4UL, "a zip archive" },
+    { BOOLEAN_FALSE, 0UL, "PK\x05\x06", 4UL, "an empty zip archive" },
+    { BOOLEAN_FALSE, 0UL, "7z\xBC\xAF", 4UL, "a 7-zip archive" },
+    { BOOLEAN_FALSE, 0UL, "\x1F\x8B", 2UL, "gzip" },
+    { BOOLEAN_FALSE, 0UL, "BSDIFF", 6UL, "a binary patch" },
     /* Before the plain program marks, because this is a program and the fact
        that it is an installer carrying a payload is the part worth knowing. */
-    { INSTALLER_LOADER_OFFSET, "rDlPtS", 6UL,
-      "an Inno Setup installer — the payload is inside it, LZMA compressed" },
+    { BOOLEAN_TRUE, INSTALLER_LOADER_HEADER_OFFSET, "rDlPtS", 6UL,
+      "an Inno Setup installer" },
     /* Last, because a self-extracting archive of any of the above is also a
        Windows program, and the specific answer is the useful one. Delphi's
        linker writes MZP where Microsoft's writes MZ, which is worth separating:
-       every installer builder worth the name is a Delphi program. */
-    { 0UL, "MZP", 3UL, "a Delphi-built program, which on a file this size means an installer" },
-    { 0UL, "MZ", 2UL, "a Windows program — anything inside is appended, not at the front" }
+       every installer builder worth the name is a Delphi program. Followed as
+       well, because the mark at 0x30 is not the only place a loader may keep
+       its table, and being told it is not one is worth a read. */
+    { BOOLEAN_TRUE, 0UL, "MZP", 3UL, "a Delphi-built program, which on a file this size means an installer" },
+    { BOOLEAN_FALSE, 0UL, "MZ", 2UL, "a Windows program — anything inside is appended, not at the front" }
 };
 
-static const char *identifySignature(const Unsigned8 *bytes, MemorySize byteCount)
+
+static const FileSignature *identifySignature(const Unsigned8 *bytes, MemorySize byteCount)
 {
     MemorySize which;
 
@@ -364,10 +375,10 @@ static const char *identifySignature(const Unsigned8 *bytes, MemorySize byteCoun
         }
         if (matches)
         {
-            return signature->name;
+            return signature;
         }
     }
-    return "unrecognised";
+    return NULL_POINTER;
 }
 
 static void reportDiscFailure(const char *what)
@@ -698,7 +709,9 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             !findNextLargestOther(discFileSystem, probeCeilingSize, probeCeilingIndex, &nextSize,
                                   &nextIndex))
         {
-            discPhase = DISC_PHASE_CONTENT;
+            discPhase = (installerFileIndex == NO_INSTALLER) ? DISC_PHASE_CONTENT
+                                                             : DISC_PHASE_INSTALLER;
+            installerStage = 0U;
             return ENGINE_DISC_WORKING;
         }
 
@@ -738,7 +751,20 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
             return ENGINE_DISC_WORKING;
         }
-        stringAppend(message, sizeof(message), identifySignature(head, headSize));
+        {
+            const FileSignature *signature = identifySignature(head, headSize);
+
+            stringAppend(message, sizeof(message),
+                         (signature != NULL_POINTER) ? signature->name : "unrecognised");
+            /* The largest one worth opening, which is the first met: the walk
+               is largest first, and the file holding a disc's game is not the
+               second biggest thing on it. */
+            if (signature != NULL_POINTER && signature->worthFollowing &&
+                installerFileIndex == NO_INSTALLER)
+            {
+                installerFileIndex = nextIndex;
+            }
+        }
         stringAppend(message, sizeof(message), ", starting ");
         {
             /* The bytes as well as the verdict. A name this reader does not know
@@ -746,14 +772,152 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                needs to see — and the same goes for the mark at 0x30, which is
                where a program that carries an archive says so. */
             appendHexadecimalBytes(message, sizeof(message), head, headSize, 0UL, 8UL);
-            if (headSize >= INSTALLER_LOADER_OFFSET + 8UL)
+            if (headSize >= INSTALLER_LOADER_HEADER_OFFSET + 8UL)
             {
                 stringAppend(message, sizeof(message), "and at 0x30 ");
                 appendHexadecimalBytes(message, sizeof(message), head, headSize,
-                                       INSTALLER_LOADER_OFFSET, 8UL);
+                                       INSTALLER_LOADER_HEADER_OFFSET, 8UL);
             }
         }
         platformLogMessage(message);
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Opening the installer the probe found.
+     *
+     * Three reads: the front of the file, to find where the offset table is;
+     * the table itself, which ends with the two offsets everything else hangs
+     * off; and the version string at the first of them, because which fields
+     * the setup header holds depends on which version wrote it.
+     *
+     * Nothing is decompressed here. This establishes that the installer can be
+     * navigated and says what would have to be decoded next — a reader that
+     * announced it could open an archive before it could find its way around
+     * one would be announcing nothing. */
+    if (discPhase == DISC_PHASE_INSTALLER)
+    {
+        static Unsigned64 tableOffsetInBytes = 0ULL;
+        Unsigned8 buffer[INSTALLER_TABLE_LARGEST_BYTES > INSTALLER_VERSION_STRING_BYTES
+                             ? INSTALLER_TABLE_LARGEST_BYTES
+                             : INSTALLER_VERSION_STRING_BYTES];
+        const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, installerFileIndex);
+        VirtualReadResult read;
+        InstallerReadResult opened;
+
+        if (entry == NULL_POINTER)
+        {
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (installerStage == 0U)
+        {
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U,
+                                             INSTALLER_LOADER_HEADER_OFFSET + 12UL, buffer);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            opened = (read == VIRTUAL_READ_OK)
+                         ? installerFindOffsetTable(buffer, INSTALLER_LOADER_HEADER_OFFSET + 12UL,
+                                                    &tableOffsetInBytes)
+                         : INSTALLER_READ_TRUNCATED;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            stringAppend(message, sizeof(message), entry->path);
+            if (opened != INSTALLER_READ_OK)
+            {
+                stringAppend(message, sizeof(message), " — ");
+                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            stringAppend(message, sizeof(message), " keeps its offset table at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)tableOffsetInBytes);
+            platformLogMessage(message);
+            installerStage = 1U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (installerStage == 1U)
+        {
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, tableOffsetInBytes,
+                                             INSTALLER_TABLE_LARGEST_BYTES, buffer);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            opened = (read == VIRTUAL_READ_OK)
+                         ? installerReadOffsetTable(buffer, INSTALLER_TABLE_LARGEST_BYTES,
+                                                    tableOffsetInBytes, &installerTable)
+                         : INSTALLER_READ_TRUNCATED;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            if (opened != INSTALLER_READ_OK)
+            {
+                stringAppend(message, sizeof(message), "its offset table — ");
+                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+                stringAppend(message, sizeof(message), ", starting ");
+                appendHexadecimalBytes(message, sizeof(message), buffer,
+                                       INSTALLER_TABLE_LARGEST_BYTES, 0UL, 12UL);
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            stringAppend(message, sizeof(message), "table revision ");
+            appendCount(message, sizeof(message), installerTable.tableRevision);
+            stringAppend(message, sizeof(message), ", ");
+            appendCount(message, sizeof(message), installerTable.wordCount);
+            stringAppend(message, sizeof(message), " fields: accounts for ");
+            appendByteSize(message, sizeof(message), (Unsigned64)installerTable.totalSizeInBytes);
+            stringAppend(message, sizeof(message), " of ");
+            appendByteSize(message, sizeof(message), entry->sizeInBytes);
+            stringAppend(message, sizeof(message), ", header at ");
+            appendHexadecimal(message, sizeof(message), installerTable.headerOffsetInBytes);
+            stringAppend(message, sizeof(message), ", data at ");
+            appendHexadecimal(message, sizeof(message), installerTable.dataOffsetInBytes);
+            platformLogMessage(message);
+            installerStage = 2U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
+                                         (Unsigned64)installerTable.headerOffsetInBytes,
+                                         INSTALLER_VERSION_STRING_BYTES, buffer);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: built with ");
+        if (read == VIRTUAL_READ_OK)
+        {
+            char version[INSTALLER_VERSION_STRING_BYTES + 1UL];
+
+            opened = installerReadVersionString(buffer, INSTALLER_VERSION_STRING_BYTES, version,
+                                                sizeof(version));
+            if (opened == INSTALLER_READ_OK)
+            {
+                stringAppend(message, sizeof(message), version);
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+                stringAppend(message, sizeof(message), ", starting ");
+                appendHexadecimalBytes(message, sizeof(message), buffer,
+                                       INSTALLER_VERSION_STRING_BYTES, 0UL, 12UL);
+            }
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+        }
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_CONTENT;
         return ENGINE_DISC_WORKING;
     }
 

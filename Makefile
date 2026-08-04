@@ -43,8 +43,9 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
                   engine/source/discContent.c \
+                  engine/source/installerReader.c \
                   engine/source/engineCore.c \
-                  utils/strings.c
+                  utils/strings.c utils/checksum.c
 
 # Which renderer the native build uses. openGLES2 needs a driver with
 # programmable shaders; software needs nothing but a framebuffer, which is the
@@ -231,12 +232,13 @@ RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
 TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
 RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
+INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER) \
-		$(RESOURCE_INDEX_VERIFIER)
+		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -249,8 +251,15 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(TEXTURE_VERIFIER)
 	@$(RESOURCE_INDEX_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
+	@$(INSTALLER_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(INSTALLER_VERIFIER): tests/verifyInstaller.c engine/source/installerReader.c \
+		utils/checksum.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyInstaller.c engine/source/installerReader.c \
+		utils/checksum.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/resourceCollection.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)

@@ -36,19 +36,45 @@ printf 'this is not a package at all, despite the name\n' \
 printf 'placeholder cabinet payload\n' > "$buildRoot/Support/data1.cab"
 printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 
-# The head of an installer, and nothing else: a Delphi MZP stub with the loader
-# mark at 0x30 where Inno Setup writes it. The disc this was built for turned
-# out to be a repack with the whole game sealed in one of these, and identifying
-# it correctly is the difference between "this disc has no art on it" and "the
-# art is behind an archive". Sixty-four bytes, because that is all the probe
-# reads — a real installer's payload is not the part being tested.
-printf 'MZP\000\002\000\000\000\004\000\017\000\377\377\000\000' \
-    > "$buildRoot/TSData.exe"
-printf '\270\000\000\000\000\000\000\000@\000\032\000\000\000\000\000' \
-    >> "$buildRoot/TSData.exe"
-printf '\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' \
-    >> "$buildRoot/TSData.exe"
-printf 'rDlPtS02\207eVx\000\000\000\000' >> "$buildRoot/TSData.exe"
+# The navigable part of an installer, and nothing else.
+#
+# The disc this was built for turned out to be a repack with the whole game —
+# 2.7 gibibytes of it — sealed inside one of these, so the engine has to be able
+# to find its way around one. What that takes is a Delphi MZP stub, an offset
+# table at 0x30 with a checksum the reader uses to work out the field layout,
+# and the version string the table's first offset points at.
+#
+# No payload: nothing here is compressed, and a fixture that pretended to be
+# would be testing a decompressor that does not exist yet. What this does test
+# is everything up to that point, which is the part that says whether the
+# archive can be navigated at all.
+python3 - "$buildRoot/TSData.exe" <<'PYTHON'
+import binascii, struct, sys
+
+TABLE_AT = 0x30
+HEADER_AT = 0x100
+DATA_AT = 0x180
+TOTAL = 0x200
+
+image = bytearray(TOTAL)
+# Delphi's stub, which is what separates an installer from every other program
+# on a disc: Microsoft's linker writes MZ, Borland's writes MZP.
+image[0:4] = b"MZP\x00"
+
+# Six fields, which is the oldest layout: how much of the file the installer
+# accounts for, then four about the program it carries, then the two offsets
+# every layout ends with. The reader is not told there are six — it tries each
+# length until the checksum agrees, so this fixture is a real test of that.
+words = [TOTAL, 0, 0, 0, HEADER_AT, DATA_AT]
+table = b"rDlPtS02\x87eVx" + b"".join(struct.pack("<I", word) for word in words)
+table += struct.pack("<I", binascii.crc32(table) & 0xFFFFFFFF)
+image[TABLE_AT:TABLE_AT + len(table)] = table
+
+version = b"Inno Setup Setup Data (5.5.0) (u)"
+image[HEADER_AT:HEADER_AT + len(version)] = version
+
+open(sys.argv[1], "wb").write(image)
+PYTHON
 
 mkdir -p "$(dirname "$outputImage")"
 xorriso -as mkisofs -quiet -J -r -V "VICTORIA_TEST" -o "$outputImage" "$buildRoot"

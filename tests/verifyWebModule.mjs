@@ -314,7 +314,7 @@ calls.length = 0;
           loggedMessages.some((text) =>
               text.includes("5 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
-          loggedMessages.some((text) => text.includes("64 bytes  TSData.exe")));
+          loggedMessages.some((text) => text.includes("512 bytes  TSData.exe")));
 
     // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
     // Setup installer, copied from the shape a real repack has: a Delphi MZP
@@ -329,6 +329,27 @@ calls.length = 0;
         check("and printing both", installer.includes("4D 5A 50 00") &&
               installer.includes("72 44 6C 50 74 53 30 32"));
     }
+
+    // Having named it, the load goes on to open it: the table's own checksum
+    // establishes the field layout, and its last two offsets are what anything
+    // reading further would need. Nothing is decompressed — this is navigation,
+    // and a reader that claimed to open an archive before it could find its way
+    // around one would be claiming nothing.
+    check("finds the offset table",
+          loggedMessages.some((text) => text.includes("offset table at 0x00000030")));
+    const offsetTable = loggedMessages.find((text) => text.includes("table revision"));
+    check("reads it", Boolean(offsetTable));
+    if (offsetTable) {
+        // Six fields, discovered rather than assumed, and the two offsets taken
+        // off the end where every layout keeps them.
+        check("working out the layout from the checksum", offsetTable.includes("6 fields"));
+        check("with the offsets it ends with",
+              offsetTable.includes("header at 0x00000100") && offsetTable.includes("data at 0x00000180"));
+        check("and the size it claims matching the file",
+              offsetTable.includes("512 bytes of 512 bytes"));
+    }
+    check("and reads the version that built it",
+          loggedMessages.some((text) => text.includes("Inno Setup Setup Data (5.5.0) (u)")));
 
     const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
     check("probes a file it cannot name", Boolean(probe));
