@@ -34,7 +34,8 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/profiler.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
-                  engine/source/engineCore.c
+                  engine/source/engineCore.c \
+                  utils/strings.c
 
 # Which renderer the native build uses. openGLES2 needs a driver with
 # programmable shaders; software needs nothing but a framebuffer, which is the
@@ -212,23 +213,29 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
 
+VERIFIER_SUPPORT := utils/assert.c
+
 $(DISC_READER_VERIFIER): tests/verifyDiscReader.c engine/source/discReader.c \
 		engine/source/virtualFileSystem.c engine/source/packageReader.c \
-		engine/source/memoryArena.c engine/source/freestandingRuntime.c
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c \
+		utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscReader.c engine/source/discReader.c \
 		engine/source/virtualFileSystem.c engine/source/packageReader.c \
-		engine/source/memoryArena.c engine/source/freestandingRuntime.c -o $@
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
-$(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c engine/source/memoryArena.c
+$(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
-		engine/source/memoryArena.c -o $@
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
 
-$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
+$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
+		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyRasterizer.c render/software/rasterizer.c \
-		render/software/rasterizerNEON.c -o $@
+		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT) -o $@
 
 check:
 	@scripts/checkNoDynamicAllocation.sh

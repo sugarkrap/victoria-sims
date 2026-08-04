@@ -1,5 +1,6 @@
 #include "victoria/profiler.h"
 
+#include "utils/strings.h"
 #include "victoria/freestandingRuntime.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"

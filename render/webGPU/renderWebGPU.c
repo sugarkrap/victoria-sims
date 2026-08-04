@@ -1,3 +1,4 @@
+#include "utils/strings.h"
 #include "victoria/freestandingRuntime.h"
 #include "victoria/graphicsMemoryBudget.h"
 #include "victoria/platformInterface.h"

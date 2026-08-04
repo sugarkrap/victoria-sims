@@ -1,13 +1,6 @@
 #include "victoria/virtualFileSystem.h"
 
-static char toLowerCase(char character)
-{
-    if (character >= 'A' && character <= 'Z')
-    {
-        return (char)(character - 'A' + 'a');
-    }
-    return character;
-}
+#include "utils/strings.h"
 
 /* Paths differ in case between a disc's two name trees, and in separator on a
  * host that hands us Windows paths. Neither difference is meaningful, so
@@ -30,7 +23,7 @@ static Boolean pathsMatch(const char *first, const char *second)
             right = '/';
         }
 
-        if (toLowerCase(left) != toLowerCase(right))
+        if (characterToLowerCase(left) != characterToLowerCase(right))
         {
             return BOOLEAN_FALSE;
         }

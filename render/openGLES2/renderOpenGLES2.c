@@ -1,5 +1,6 @@
 #include <GLES2/gl2.h>
 
+#include "utils/strings.h"
 #include "victoria/freestandingRuntime.h"
 #include "victoria/graphicsMemoryBudget.h"
 #include "victoria/platformInterface.h"

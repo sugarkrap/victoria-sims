@@ -1,5 +1,5 @@
 #include "victoria/engineCore.h"
-#include "victoria/freestandingRuntime.h"
+#include "utils/strings.h"
 #include "victoria/graphicsMemoryBudget.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"

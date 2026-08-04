@@ -6,7 +6,7 @@
 
 #include "platform/linux/linuxPresenter.h"
 #include "victoria/engineCore.h"
-#include "victoria/freestandingRuntime.h"
+#include "utils/strings.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"

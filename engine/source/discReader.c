@@ -1,5 +1,6 @@
 #include "victoria/discReader.h"
 
+#include "utils/strings.h"
 #include "victoria/freestandingRuntime.h"
 
 /* Volume descriptors begin here: sixteen sectors of reserved space precede them. */

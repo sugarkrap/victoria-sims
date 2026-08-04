@@ -10,7 +10,7 @@
 
 set -eu
 
-SOURCE_DIRECTORIES="engine platform render tests"
+SOURCE_DIRECTORIES="engine platform render tests utils"
 
 # Matched as calls rather than bare words, so prose like "cheap but not free"
 # does not trip the check. Anything that slips past this is still caught by the
@@ -38,7 +38,8 @@ if command -v nm >/dev/null 2>&1; then
     trap 'rm -rf "$scratchDirectory"' EXIT
 
     HOST_COMPILER=${HOST_COMPILER:-clang}
-    for source in engine/source/*.c render/openGLES2/*.c render/software/*.c platform/linux/*.c; do
+    for source in engine/source/*.c render/openGLES2/*.c render/software/*.c \
+                  platform/linux/*.c utils/strings.c; do
         objectName="$scratchDirectory/$(basename "$source" .c).o"
         "$HOST_COMPILER" -std=c99 -I. -Iengine/include -c "$source" -o "$objectName"
     done

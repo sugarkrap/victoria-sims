@@ -16,8 +16,9 @@
 
 #include <stdio.h>
 
+#include "utils/assert.h"
 #include "victoria/discReader.h"
-#include "victoria/freestandingRuntime.h"
+#include "utils/strings.h"
 #include "victoria/memoryArena.h"
 #include "victoria/packageReader.h"
 #include "victoria/virtualFileSystem.h"
@@ -32,16 +33,7 @@ static Unsigned8 arenaStorage[ARENA_CAPACITY];
 static Unsigned8 packageBuffer[PACKAGE_CAPACITY];
 static MemorySize imageSizeInBytes = 0UL;
 
-static int failureCount = 0;
-
-static void check(const char *description, int condition)
-{
-    printf("%s  %s\n", condition ? "ok  " : "FAIL", description);
-    if (!condition)
-    {
-        failureCount += 1;
-    }
-}
+static Integer32 failureCount = 0;
 
 /* Stands in for whatever holds the image. Counts what it is asked for, because
    what the reader does not ask for is as much the point as what it does. */
@@ -144,7 +136,7 @@ static void checkTypeCount(const Package *package, const char *name, Unsigned32 
     Unsigned32 actual = packageReaderCountResourcesOfType(package, typeIdentifier);
 
     sprintf(description, "the package read off the disc holds %u %s", (unsigned)expectedCount, name);
-    check(description, actual == expectedCount);
+    checkThat(&failureCount, description, actual == expectedCount);
 }
 
 int main(void)
@@ -166,38 +158,38 @@ int main(void)
     memoryArenaInitialize(&arena, arenaStorage, ARENA_CAPACITY);
     resetStore(&store, BOOLEAN_FALSE);
     status = walkDisc(&fileSystem, &arena, &store, &reader);
-    check("the walk completes", status == DISC_READ_COMPLETE);
+    checkThat(&failureCount, "the walk completes", status == DISC_READ_COMPLETE);
     if (status != DISC_READ_COMPLETE)
     {
         printf("  status: %s\n", discReadStatusGetName(status));
         return 1;
     }
 
-    check("reads the volume identifier", stringEquals(reader.volumeIdentifier, "VICTORIA_TEST"));
-    check("prefers the Joliet name tree", reader.usesJoliet == BOOLEAN_TRUE);
-    check("finds every file", fileSystem.entryCount == 7U);
+    checkThat(&failureCount, "reads the volume identifier", stringEquals(reader.volumeIdentifier, "VICTORIA_TEST"));
+    checkThat(&failureCount, "prefers the Joliet name tree", reader.usesJoliet == BOOLEAN_TRUE);
+    checkThat(&failureCount, "finds every file", fileSystem.entryCount == 7U);
 
-    check("finds a nested package", catalogueHas(&fileSystem, "TSData/Res/Sims3D/teapot_model.package"));
-    check("finds the material definition",
+    checkThat(&failureCount, "finds a nested package", catalogueHas(&fileSystem, "TSData/Res/Sims3D/teapot_model.package"));
+    checkThat(&failureCount, "finds the material definition",
           catalogueHas(&fileSystem, "TSData/Res/Materials/material_definition.package"));
-    check("finds the root level file", catalogueHas(&fileSystem, "Autorun.inf"));
-    check("finds the installer archive", catalogueHas(&fileSystem, "Support/data1.cab"));
-    check("keeps a file that only looks like a package",
+    checkThat(&failureCount, "finds the root level file", catalogueHas(&fileSystem, "Autorun.inf"));
+    checkThat(&failureCount, "finds the installer archive", catalogueHas(&fileSystem, "Support/data1.cab"));
+    checkThat(&failureCount, "keeps a file that only looks like a package",
           catalogueHas(&fileSystem, "TSData/Res/NotReally.package"));
-    check("does not invent files", catalogueHas(&fileSystem, "TSData/Res/Sims3D/nothing.package") == BOOLEAN_FALSE);
+    checkThat(&failureCount, "does not invent files", catalogueHas(&fileSystem, "TSData/Res/Sims3D/nothing.package") == BOOLEAN_FALSE);
 
     /* A disc's two name trees disagree about case for the same file, and a host
        may hand us a path with the other separator. Neither should decide
        whether a file is found. */
-    check("finds a file whatever its case",
+    checkThat(&failureCount, "finds a file whatever its case",
           catalogueHas(&fileSystem, "tsdata/res/sims3d/TEAPOT_MODEL.PACKAGE"));
-    check("finds a file written with backslashes",
+    checkThat(&failureCount, "finds a file written with backslashes",
           catalogueHas(&fileSystem, "TSData\\Res\\Sims3D\\teapot_model.package"));
 
     printf("\n-- what the walk cost --\n");
     walkBytes = store.bytesRead;
-    check("does not read the image to catalogue it", walkBytes < (Unsigned64)imageSizeInBytes / 4U);
-    check("never asks for more than one directory at a time",
+    checkThat(&failureCount, "does not read the image to catalogue it", walkBytes < (Unsigned64)imageSizeInBytes / 4U);
+    checkThat(&failureCount, "never asks for more than one directory at a time",
           store.largestReadInBytes <= DISC_READER_DIRECTORY_BUFFER_BYTES);
     printf("  read %lu of %lu bytes in %u reads, largest %lu\n", (unsigned long)walkBytes,
            (unsigned long)imageSizeInBytes, (unsigned)store.readCount,
@@ -211,32 +203,32 @@ int main(void)
         PackageReadResult result;
         VirtualReadResult read;
 
-        check("the catalogue knows where the package is", entry != NULL_POINTER);
+        checkThat(&failureCount, "the catalogue knows where the package is", entry != NULL_POINTER);
         if (entry != NULL_POINTER)
         {
-            check("the catalogue has its size", entry->sizeInBytes == 699103U);
+            checkThat(&failureCount, "the catalogue has its size", entry->sizeInBytes == 699103U);
 
             read = virtualFileSystemReadFile(&fileSystem, (Unsigned32)index, 0U,
                                              (MemorySize)entry->sizeInBytes, packageBuffer);
-            check("reads the package out of the image", read == VIRTUAL_READ_OK);
+            checkThat(&failureCount, "reads the package out of the image", read == VIRTUAL_READ_OK);
 
             result = packageReaderOpen(&package, packageBuffer, (MemorySize)entry->sizeInBytes, &arena);
-            check("the package reader accepts what the disc reader found", result == PACKAGE_READ_OK);
+            checkThat(&failureCount, "the package reader accepts what the disc reader found", result == PACKAGE_READ_OK);
             if (result == PACKAGE_READ_OK)
             {
-                check("reports DBPF 1.1", package.majorVersion == 1U && package.minorVersion == 1U);
+                checkThat(&failureCount, "reports DBPF 1.1", package.majorVersion == 1U && package.minorVersion == 1U);
                 checkTypeCount(&package, "CRES", (Unsigned32)PACKAGE_TYPE_CRES, 1U);
                 checkTypeCount(&package, "SHPE", (Unsigned32)PACKAGE_TYPE_SHPE, 1U);
                 checkTypeCount(&package, "GMND", (Unsigned32)PACKAGE_TYPE_GMND, 1U);
                 checkTypeCount(&package, "GMDC", (Unsigned32)PACKAGE_TYPE_GMDC, 1U);
             }
 
-            check("refuses a read past the end of a file",
+            checkThat(&failureCount, "refuses a read past the end of a file",
                   virtualFileSystemReadFile(&fileSystem, (Unsigned32)index, entry->sizeInBytes - 4U, 8UL,
                                             packageBuffer) == VIRTUAL_READ_OUT_OF_RANGE);
         }
 
-        check("the decoy is not a package",
+        checkThat(&failureCount, "the decoy is not a package",
               packageReaderOpen(&package, (const Unsigned8 *)"this is not a package at all", 28UL, &arena) ==
                   PACKAGE_READ_TRUNCATED);
     }
@@ -255,12 +247,12 @@ int main(void)
         resetStore(&stutteringStore, BOOLEAN_TRUE);
         status = walkDisc(&secondFileSystem, &secondArena, &stutteringStore, &secondReader);
 
-        check("the walk completes even so", status == DISC_READ_COMPLETE);
-        check("it really did have to wait", stutteringStore.pendingCount > 0U);
-        check("finds exactly the same files", secondFileSystem.entryCount == 7U);
-        check("and the same nested package",
+        checkThat(&failureCount, "the walk completes even so", status == DISC_READ_COMPLETE);
+        checkThat(&failureCount, "it really did have to wait", stutteringStore.pendingCount > 0U);
+        checkThat(&failureCount, "finds exactly the same files", secondFileSystem.entryCount == 7U);
+        checkThat(&failureCount, "and the same nested package",
               catalogueHas(&secondFileSystem, "TSData/Res/Sims3D/teapot_model.package"));
-        check("reads no more than it did before", stutteringStore.bytesRead == walkBytes);
+        checkThat(&failureCount, "reads no more than it did before", stutteringStore.bytesRead == walkBytes);
         printf("  waited %u times\n", (unsigned)stutteringStore.pendingCount);
     }
 
@@ -282,16 +274,10 @@ int main(void)
         memoryArenaInitialize(&thirdArena, arenaStorage, ARENA_CAPACITY);
         resetStore(&thirdStore, BOOLEAN_FALSE);
         status = walkDisc(&thirdFileSystem, &thirdArena, &thirdStore, &thirdReader);
-        check("rejects an image with no descriptors", status == DISC_READ_NOT_A_DISC);
+        checkThat(&failureCount, "rejects an image with no descriptors", status == DISC_READ_NOT_A_DISC);
 
         imageSizeInBytes = savedSize;
     }
 
-    if (failureCount > 0)
-    {
-        printf("\n%d check(s) failed\n", failureCount);
-        return 1;
-    }
-    printf("\nall disc reader checks passed\n");
-    return 0;
+    return checkSummarize(failureCount, "disc reader");
 }
