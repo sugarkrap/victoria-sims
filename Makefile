@@ -222,11 +222,13 @@ GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
 MESH_CAMERA_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyMeshCamera
 COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
 STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
+SCENEGRAPH_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyScenegraph
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
-		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER)
+		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
+		$(SCENEGRAPH_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -234,6 +236,7 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(MESH_CAMERA_VERIFIER)
 	@$(COMPRESSION_VERIFIER)
 	@$(STRINGS_VERIFIER)
+	@$(SCENEGRAPH_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
@@ -244,6 +247,15 @@ $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCollection.c \
 		engine/source/resourceCollection.c engine/source/packageReader.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(SCENEGRAPH_VERIFIER): tests/verifyScenegraph.c engine/source/scenegraph.c \
+		engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyScenegraph.c engine/source/scenegraph.c \
+		engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
 
 $(STRINGS_VERIFIER): tests/verifyStrings.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
