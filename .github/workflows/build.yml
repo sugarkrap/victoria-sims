@@ -65,7 +65,9 @@ jobs:
         run: make web EXTRA_FLAGS=-Werror
 
       - name: Verify the module instantiates and drives the renderer
-        run: node tests/verifyWebModule.mjs
+        run: |
+          node tests/verifyWebModule.mjs
+          node tests/verifyRuntimeUpload.mjs
 
       - uses: actions/upload-artifact@v4
         with:

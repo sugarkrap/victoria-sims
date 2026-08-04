@@ -180,8 +180,11 @@ const importObject = {
         uploadMesh(vertexPointer, vertexCount, indexPointer, indexCount) {
             const memory = runtimeState.instance.exports.memory.buffer;
             const vertexBytes = vertexCount * 24;
-            // Index buffers must be a multiple of four bytes, and an odd number
-            // of sixteen-bit indices is not. Padding is cheaper than refusing.
+            // Both the buffer and the write have to be a multiple of four bytes,
+            // and an odd number of sixteen-bit indices is neither. A mesh of 737
+            // triangles is 4422 bytes of indices; the teapot's 6320 happen to
+            // land on a multiple of four, which is why rounding only the buffer
+            // size looked correct for as long as the teapot was the only model.
             const indexBytes = (indexCount * 2 + 3) & ~3;
 
             runtimeState.meshVertexBuffer = runtimeState.device.createBuffer({
@@ -192,13 +195,18 @@ const importObject = {
                 runtimeState.meshVertexBuffer, 0,
                 new Uint8Array(memory, vertexPointer, vertexBytes));
 
+            // Copied into a padded array of its own rather than read long out of
+            // the module's memory: the two extra bytes are somebody else's, and
+            // reading them would work right up until the mesh sat at the end of
+            // the arena.
+            const indexStaging = new Uint8Array(indexBytes);
+            indexStaging.set(new Uint8Array(memory, indexPointer, indexCount * 2));
+
             runtimeState.meshIndexBuffer = runtimeState.device.createBuffer({
                 size: indexBytes,
                 usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
             });
-            runtimeState.device.queue.writeBuffer(
-                runtimeState.meshIndexBuffer, 0,
-                new Uint8Array(memory, indexPointer, indexCount * 2));
+            runtimeState.device.queue.writeBuffer(runtimeState.meshIndexBuffer, 0, indexStaging);
 
             runtimeState.meshIndexCount = indexCount;
             return 1;
