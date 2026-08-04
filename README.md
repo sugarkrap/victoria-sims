@@ -1,53 +1,58 @@
-<h1 align="center">OpenTS2</h1>
-OpenTS2 is an Open-Source Reimplementation of The Sims 2, using the Unity game engine. Also aims to provide a number of modular libraries for working with TS2 formats in a C# environment.
+<h1 align="center">Victoria Sims</h1>
 
-## Progress
-Currently a basic main menu with a neighborhood chooser is implemented. Neighborhood info can be previewed and a basic neighborhood view can be accessed.
-![image](https://github.com/LazyDuchess/OpenTS2/assets/42678262/7ec4b21f-8987-41e6-b780-cca694698354)
+An open reimplementation of The Sims 2 in plain C, targeting OpenGL ES 2.0 on
+Linux and WebGPU on WebAssembly. Forked from
+[OpenTS2](https://github.com/LazyDuchess/OpenTS2), which is written in C# on
+Unity; the engine here is being rebuilt from scratch rather than ported.
 
+The two rules everything else follows from:
+
+* **No dynamic allocation.** All storage is reserved statically and handed out
+  from arenas.
+* **128 MiB, hard.** That is the whole budget, not a starting point.
+
+This README is a stub and will be rewritten once the project has more than a
+bootstrap to describe. See [AGENTS.md](AGENTS.md) for the conventions and
+constraints that currently govern the code.
+
+## Building
+
+```sh
+make linux    # native OpenGL ES 2.0 build
+make linux RENDER_BACKEND=software   # no GL at all, for pre-shader hardware
+make web      # WebAssembly + WebGPU build
+make armv7    # Cortex-A8 with NEON, the reference handheld
+make armv5    # the ARMv5TE portability floor
+make oabi     # the same, as genuine ARM old-ABI
+make verify   # rasterizer checks
+make check    # enforce the no-dynamic-allocation rule
+```
+
+The machine this is meant to run on is the Sharp NetWalker PC-Z1 — i.MX515
+Cortex-A8, 512 MB of RAM, Ubuntu 9.04. ARMv5TE handhelds remain the supported
+floor, which is why the old-ABI target exists. Their graphics hardware — Intel
+2700G, NVIDIA GoForce — is OpenGL ES 1.x class and cannot run shaders at all,
+so those machines use the software renderer.
+
+## Status
+
+Early. Three renderers — OpenGL ES 2.0, WebGPU, and a software rasterizer with
+a NEON path — all drawing the same triangle, plus a hierarchical frame profiler
+reporting zone timings alongside arena and graphics memory usage. There is no
+gameplay and no asset loading yet.
+
+## Assets
+
+No game assets live in this repository and none ever will. Reading the retail
+data is the job of extraction tooling that has yet to be written; see `tools/`.
 
 ## Acknowledgements
-* [InvertedTomato.CRC](https://github.com/invertedtomato/crc)
-* [TGA Image Reader](https://www.codeproject.com/Articles/31702/NET-Targa-Image-Reader)
-* [Hardware Cursor Plugin](https://forum.unity.com/threads/hardware-cursor-plugin.70163/)
-* [MoonSharp](https://github.com/moonsharp-devs/moonsharp/)
-* [FreeSO](https://github.com/RHY3756547/FreeSO)
-* [DBPFSharp](https://github.com/0xC0000054/DBPFSharp/blob/main/src/DBPFSharp)
-* [NAudio](https://github.com/naudio/NAudio)
-* [NSpeex](https://github.com/aijingsun6/NSpeex)
 
-## Similar Projects
-* [FreeSO](https://github.com/RHY3756547/FreeSO) - Open Source reimplementation of The Sims Online using C# and Monogame. OpenTS2 borrows a lot of code and structure from this project.
-* [Las Marionetas](https://github.com/OmniBlade/LasMarionetas) - Similar project, aiming to reimplement The Sims 2 by reverse engineering its binary code into C/C++ source code.
-* [SimUnity2](https://github.com/LazyDuchess/SimUnity2) - Earlier attempt at a TS2 reimplementation in the Unity engine. Abandoned, succeeded by this project.
-* [OpenTPW](https://github.com/ThemeParkWorld/OpenTPW) - Open Source reimplementation of Sim Theme Park / Theme Park World.
-* [OpenRCT2](https://github.com/OpenRCT2/OpenRCT2) - Open Source reimplementation of Rollercoaster Tycoon 2.
+* [OpenTS2](https://github.com/LazyDuchess/OpenTS2) — the project this is
+  forked from, and the source of the format notes under `docs/formats/`.
 
 ## License
-This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-# Development
-
-## Prerequisites
-* [Unity 2020.3.32f1](https://unity3d.com/get-unity/download/archive) - Can be found under "Unity 2020.x", you could also download the Unity Hub and install from there. Unity version is subject to change, please keep an eye on this!
-* [Visual Studio 2019](https://visualstudio.microsoft.com/vs/)
-* A copy of The Sims 2 Ultimate Collection
-
-## Setup
-1. You need to have a "config.json" file in the root folder that provides paths to your Sims 2 UC installation and user directories. Copy the "config.example.json" file and rename it to "config.json" to start off, and type in your own paths.
-2. In Unity, make sure Edit > Preferences > External Tools > External Script Editor is set to Visual Studio. By default it opens files separately as opposed to in a solution.
-
-## Project Structure
-
-We follow the layout of a normal Unity project except:
-
-* `Assets/Scripts/OpenTS2` - Contains the bulk of the C# code that deals with TS2 formats and files.
-* `Assets/Tests/OpenTS2/` - Unit tests following the same directory structure as the `Scripts` folder.
-* `Assets/Scenes/Test` - Tests but more at the integration level involving Unity scenes.
-  * `Assets/Scripts/OpenTS2/Engine/Tests` - Controller scripts for the above tests.
-
-## Testing
-
-We currently use the [Unity Test Runner](https://docs.unity3d.com/2020.3/Documentation/Manual/testing-editortestsrunner.html)
-for unit testing code. These tests can be run inside of unity through the test runner tab or if you use Rider as your C#
-editor, inside of it.
+This Source Code Form is subject to the terms of the Mozilla Public License,
+v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain
+one at http://mozilla.org/MPL/2.0/.

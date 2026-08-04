@@ -1,0 +1,76 @@
+name: Deploy to Netlify
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Requires two repository secrets:
+#   NETLIFY_AUTH_TOKEN  a personal access token from Netlify
+#   NETLIFY_SITE_ID     the target site's API identifier
+# Without them the job skips rather than failing the build.
+
+jobs:
+  deploy:
+    name: Build and deploy the WebAssembly build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and the WebAssembly linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Build
+        run: make web EXTRA_FLAGS=-Werror
+
+      - name: Verify the module before publishing
+        run: node tools/verifyWebModule.mjs
+
+      - name: Add Netlify headers
+        run: |
+          cat > build/web/_headers <<'HEADERS'
+          /*
+            Cross-Origin-Opener-Policy: same-origin
+            Cross-Origin-Embedder-Policy: require-corp
+          /*.wasm
+            Content-Type: application/wasm
+            Cache-Control: public, max-age=0, must-revalidate
+          HEADERS
+
+      - name: Check for deploy credentials
+        id: credentials
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          if [ -n "$NETLIFY_AUTH_TOKEN" ] && [ -n "$NETLIFY_SITE_ID" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID are not set; skipping deploy." >&2
+          fi
+
+      - name: Deploy
+        if: steps.credentials.outputs.available == 'true'
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            npx --yes netlify-cli@17 deploy --dir=build/web --prod \
+              --message "${{ github.sha }}"
+          else
+            npx --yes netlify-cli@17 deploy --dir=build/web \
+              --message "pull request ${{ github.event.number }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web/

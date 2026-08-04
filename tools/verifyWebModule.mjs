@@ -1,0 +1,221 @@
+// Instantiates the freestanding wasm module against stub host functions and
+// checks that the C engine drives the renderer the way the host page expects.
+// Catches a broken import/export contract without needing a browser or a GPU.
+
+import { readFileSync } from "node:fs";
+
+const modulePath = "build/web/victoriaSims.wasm";
+const calls = [];
+let memory = null;
+let failureCount = 0;
+
+function decodeUTF8(pointer, length) {
+    return new TextDecoder().decode(new Uint8Array(memory.buffer, pointer, length));
+}
+
+function check(description, condition) {
+    console.log(`${condition ? "ok  " : "FAIL"}  ${description}`);
+    if (!condition) {
+        failureCount += 1;
+    }
+}
+
+// A clock the test drives itself, so timing assertions are exact rather than
+// dependent on how fast this machine happens to be.
+let simulatedMilliseconds = 0;
+let frameCostMilliseconds = 0;
+// What the "adapter" claims it has, so detection can be checked against a
+// number chosen here rather than whatever the test machine happens to report.
+const reportedGraphicsKibibytes = 32 * 1024;
+const shaderCompileMilliseconds = 50;
+
+const imports = {
+    victoriaPlatform: {
+        logMessage: (pointer, length) => console.log(`      engine: ${decodeUTF8(pointer, length)}`),
+        getMilliseconds: () => simulatedMilliseconds
+    },
+    victoriaRender: {
+        configureSurface: (width, height) => calls.push({ name: "configureSurface", width, height }),
+        createTrianglePipeline: (pointer, length) => {
+            const shaderSource = decodeUTF8(pointer, length);
+            calls.push({ name: "createTrianglePipeline", shaderSource });
+            // Stands in for a slow driver compile, so the report can be checked
+            // for whether that cost is actually attributed to the right zone.
+            simulatedMilliseconds += shaderCompileMilliseconds;
+            return 1;
+        },
+        setClearColor: (red, green, blue) => calls.push({ name: "setClearColor", red, green, blue }),
+        setTriangleTint: (tint) => calls.push({ name: "setTriangleTint", tint }),
+        submitFrame: () => {
+            calls.push({ name: "submitFrame" });
+            // Advancing the clock mid-frame is what the engine measures: it
+            // reads the clock at frame start and again at frame end.
+            simulatedMilliseconds += frameCostMilliseconds;
+        },
+        queryGraphicsMemoryKibibytes: () => {
+            calls.push({ name: "queryGraphicsMemoryKibibytes" });
+            return reportedGraphicsKibibytes;
+        },
+        warmUpPipeline: () => calls.push({ name: "warmUpPipeline" })
+    }
+};
+
+const { instance } = await WebAssembly.instantiate(readFileSync(modulePath), imports);
+memory = instance.exports.memory;
+
+const requiredExports = [
+    "memory",
+    "victoriaWebInitialize",
+    "victoriaWebResize",
+    "victoriaWebRenderFrame",
+    "victoriaWebShutdown",
+    "victoriaWebGetBudgetTotalBytes",
+    "victoriaWebGetBudgetUsedBytes",
+    "victoriaWebGetProfilerReportPointer",
+    "victoriaWebGetProfilerReportLength",
+    "victoriaWebGetFrameMicroseconds",
+    "victoriaWebGetAverageFrameMicroseconds",
+    "victoriaWebGetWorstFrameMicroseconds",
+    "victoriaWebGetFrameIntervalMicroseconds",
+    "victoriaWebGetGraphicsMemoryLimitBytes",
+    "victoriaWebGetGraphicsMemoryUsedBytes"
+];
+for (const exportName of requiredExports) {
+    check(`exports ${exportName}`, exportName in instance.exports);
+}
+
+// Zero asks the engine to detect rather than override.
+const initializeResult = instance.exports.victoriaWebInitialize(1024, 576, 0);
+check("initializes successfully", initializeResult === 1);
+
+check("adopts the graphics memory size the backend reported",
+      instance.exports.victoriaWebGetGraphicsMemoryLimitBytes() === reportedGraphicsKibibytes * 1024);
+check("charges the uniform buffer against the graphics ceiling",
+      instance.exports.victoriaWebGetGraphicsMemoryUsedBytes() === 16);
+check("warms the pipeline up during initialisation",
+      calls.some((call) => call.name === "warmUpPipeline"));
+check("warm-up happens after pipeline creation",
+      calls.findIndex((call) => call.name === "warmUpPipeline") >
+      calls.findIndex((call) => call.name === "createTrianglePipeline"));
+
+const budgetBytes = instance.exports.victoriaWebGetBudgetTotalBytes();
+check("reserves a 128 MiB arena", budgetBytes === 128 * 1024 * 1024);
+check("linear memory covers the arena", memory.buffer.byteLength >= budgetBytes);
+
+const shaderCall = calls.find((call) => call.name === "createTrianglePipeline");
+check("creates a pipeline", Boolean(shaderCall));
+check("passes valid WGSL",
+      Boolean(shaderCall) &&
+      shaderCall.shaderSource.includes("@vertex") &&
+      shaderCall.shaderSource.includes("@fragment") &&
+      shaderCall.shaderSource.includes("fn vertexMain") &&
+      shaderCall.shaderSource.includes("fn fragmentMain"));
+
+calls.length = 0;
+const frameCount = 32;
+// Each frame is made to take a known 4 ms, with one deliberate 20 ms spike, so
+// the profiler's last/average/worst can be checked against exact numbers.
+const normalFrameMilliseconds = 8;
+const spikeFrameMilliseconds = 20;
+const spikeFrameIndex = 10;
+
+for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    frameCostMilliseconds = frameIndex === spikeFrameIndex ? spikeFrameMilliseconds : normalFrameMilliseconds;
+    instance.exports.victoriaWebRenderFrame(frameIndex / 60);
+}
+
+check("submits one frame per render call",
+      calls.filter((call) => call.name === "submitFrame").length === frameCount);
+
+const tints = calls.filter((call) => call.name === "setTriangleTint").map((call) => call.tint);
+check("tint stays inside its intended range", tints.every((tint) => tint >= 0.29 && tint <= 1.01));
+check("tint actually animates", new Set(tints.map((tint) => tint.toFixed(4))).size > 1);
+
+const lastMicroseconds = instance.exports.victoriaWebGetFrameMicroseconds();
+const worstMicroseconds = instance.exports.victoriaWebGetWorstFrameMicroseconds();
+const averageMicroseconds = instance.exports.victoriaWebGetAverageFrameMicroseconds();
+// Initialisation is bracketed as a profiler frame of its own, so shader
+// compilation counts as frame one and participates in these statistics.
+const measuredFrameCount = frameCount + 1;
+const totalMilliseconds =
+    shaderCompileMilliseconds + (frameCount - 1) * normalFrameMilliseconds + spikeFrameMilliseconds;
+const expectedAverage = Math.floor((totalMilliseconds * 1000) / measuredFrameCount);
+const expectedWorst = Math.max(shaderCompileMilliseconds, spikeFrameMilliseconds) * 1000;
+
+check(`profiler times the last frame at ${normalFrameMilliseconds} ms`,
+      lastMicroseconds === normalFrameMilliseconds * 1000);
+check(`profiler reports the ${expectedWorst / 1000} ms startup frame as the worst`,
+      worstMicroseconds === expectedWorst);
+check(`profiler averages to ${expectedAverage} us over ${measuredFrameCount} frames`,
+      averageMicroseconds === expectedAverage);
+
+const reportPointer = instance.exports.victoriaWebGetProfilerReportPointer();
+const reportLength = instance.exports.victoriaWebGetProfilerReportLength();
+const reportText = decodeUTF8(reportPointer, reportLength);
+
+check("profiler report is non-empty", reportLength > 0);
+check("report names the frame counter", reportText.includes("frame "));
+check("report separates work from interval", reportText.includes("work ") && reportText.includes("interval "));
+check("report includes the memory budget", reportText.includes("128 MiB budget"));
+check("report lists the renderDrawFrame zone", reportText.includes("renderDrawFrame"));
+check("report lists the engineRenderFrame zone", reportText.includes("engineRenderFrame"));
+check("report warns about no overflows", !reportText.includes("overflow"));
+check("report includes the graphics memory ledger",
+      reportText.includes("graphics memory") && reportText.includes("(detected)"));
+check("report attributes shader compilation",
+      reportText.includes("renderCompileShaders"));
+// Startup is its own profiler frame, so by steady state the compile shows as
+// the zone's worst rather than its most recent value.
+const compileLine = reportText.split("\n").find((line) => line.includes("renderCompileShaders")) ?? "";
+check(`report attributes the ${shaderCompileMilliseconds} ms compile to renderCompileShaders`,
+      compileLine.includes(`${shaderCompileMilliseconds}.000`));
+check("report shows a non-zero frame interval once frames are flowing",
+      /interval\s+\d+\.\d{3} ms\s+average\s+\d+\.\d{3} ms/.test(reportText) &&
+      !/interval 0\.000 ms\s+average 0\.000 ms/.test(reportText));
+
+console.log("\n--- profiler report ---");
+console.log(reportText.trimEnd());
+console.log("--- end report ---\n");
+
+calls.length = 0;
+instance.exports.victoriaWebResize(800, 600);
+const resizeCall = calls.find((call) => call.name === "configureSurface");
+check("reconfigures the surface on resize",
+      Boolean(resizeCall) && resizeCall.width === 800 && resizeCall.height === 600);
+
+instance.exports.victoriaWebShutdown();
+
+// A ceiling that never refuses anything is decoration. Instantiated fresh so
+// the budget starts clean, then given less room than the renderer needs.
+const refusalCalls = [];
+const refusalImports = {
+    victoriaPlatform: {
+        logMessage: (pointer, length) => refusalCalls.push({ name: "logMessage" }),
+        getMilliseconds: () => 0
+    },
+    victoriaRender: {
+        configureSurface: () => refusalCalls.push({ name: "configureSurface" }),
+        createTrianglePipeline: () => { refusalCalls.push({ name: "createTrianglePipeline" }); return 1; },
+        setClearColor: () => {},
+        setTriangleTint: () => {},
+        submitFrame: () => {},
+        queryGraphicsMemoryKibibytes: () => reportedGraphicsKibibytes,
+        warmUpPipeline: () => refusalCalls.push({ name: "warmUpPipeline" })
+    }
+};
+const refusalModule = await WebAssembly.instantiate(readFileSync(modulePath), refusalImports);
+// 8 bytes, against a 16-byte uniform buffer.
+const refusedInitialize = refusalModule.instance.exports.victoriaWebInitialize(1024, 576, 8);
+
+check("initialisation fails when the graphics ceiling is too low", refusedInitialize === 0);
+check("nothing is charged after a refusal",
+      refusalModule.instance.exports.victoriaWebGetGraphicsMemoryUsedBytes() === 0);
+check("no pipeline is built once the ceiling has refused",
+      !refusalCalls.some((call) => call.name === "createTrianglePipeline"));
+
+
+if (failureCount > 0) {
+    console.error(`\n${failureCount} check(s) failed`);
+    process.exit(1);
+}
+console.log("\nall web module checks passed");

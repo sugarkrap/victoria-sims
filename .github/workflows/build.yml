@@ -1,0 +1,179 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (OpenGL ES 2.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install graphics and windowing headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libegl1-mesa-dev libgles2-mesa-dev libx11-dev
+
+      - name: Build
+        run: make linux EXTRA_FLAGS=-Werror
+
+      - name: Headless smoke test
+        run: ./build/linux/victoriaSims --check
+
+      - name: Report memory footprint
+        run: size build/linux/victoriaSims
+
+      - name: Verify the software rasterizer
+        run: make verify
+
+      # The software backend must link no GL at all: that is the whole point of
+      # it on hardware whose driver has no programmable shaders.
+      - name: Build the software renderer
+        run: |
+          make clean
+          make linux RENDER_BACKEND=software EXTRA_FLAGS=-Werror
+          ./build/linux/victoriaSims --check
+          if ldd build/linux/victoriaSims | grep -qiE 'libEGL|libGLESv2'; then
+            echo "error: software build linked a GL library" >&2
+            exit 1
+          fi
+          echo "software build links no GL library"
+
+      # Keeps the compiled-out path from rotting: the macros still have to
+      # vanish cleanly and the binary still has to run.
+      - name: Build with the profiler compiled out
+        run: |
+          make clean
+          make linux EXTRA_FLAGS="-Werror -DVICTORIA_PROFILER_ENABLED=0"
+          ./build/linux/victoriaSims --check
+
+  web:
+    name: WebAssembly (WebGPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and the WebAssembly linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+
+      - name: Build
+        run: make web EXTRA_FLAGS=-Werror
+
+      - name: Verify the module instantiates and drives the renderer
+        run: node tools/verifyWebModule.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web/
+
+  armv5:
+    name: ARMv5TE engine core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi
+
+      # Builds the portable core only: there are no cross-compiled EGL or X11
+      # libraries here, and the point is to prove the engine itself stays
+      # portable to the oldest target we support.
+      - name: Cross build
+        run: make armv5 EXTRA_FLAGS=-Werror
+
+      - name: Confirm the object format
+        run: |
+          arm-linux-gnueabi-readelf -h build/armv5/*.o | head -20
+          arm-linux-gnueabi-readelf -A build/armv5/memoryArena.o
+
+  armv7:
+    name: ARMv7 Cortex-A8 engine core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi
+
+      # The reference handheld: Sharp NetWalker PC-Z1, i.MX515 Cortex-A8.
+      # softfp rather than hard float because that machine's userland is armel.
+      - name: Cross build
+        run: make armv7 EXTRA_FLAGS=-Werror
+
+      - name: Show the verified architecture
+        run: arm-linux-gnueabi-readelf -A build/armv7/memoryArena.o | head -12
+
+      - name: Install qemu for user-mode ARM
+        run: sudo apt-get install -y qemu-user-static
+
+      # The NEON span filler has to be a drop-in replacement, so both builds
+      # render the same scene and the outputs are compared byte for byte.
+      # Approximately equal is not good enough.
+      - name: NEON produces identical output to the portable path
+        run: |
+          FLAGS="-std=c99 -O2 -I. -Iengine/include -static \
+                 -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp"
+          arm-linux-gnueabi-gcc $FLAGS tools/verifyRasterizer.c \
+            render/software/rasterizer.c render/software/rasterizerNEON.c -o portableArm
+          arm-linux-gnueabi-gcc $FLAGS -DVICTORIA_HAS_NEON=1 tools/verifyRasterizer.c \
+            render/software/rasterizer.c render/software/rasterizerNEON.c -o neonArm
+          qemu-arm-static ./portableArm portable.ppm
+          qemu-arm-static ./neonArm neon.ppm
+          cmp portable.ppm neon.ppm
+          echo "NEON and portable output are byte-identical"
+
+  oabi:
+    name: ARM old-ABI engine core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the ARM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabi
+
+      # -mabi=apcs-gnu is a GCC ARM-backend codegen flag rather than a property
+      # of one toolchain build, so the stock cross compiler produces genuine
+      # OABI. The make target verifies ELF flags 0x600 rather than trusting it:
+      # an accidentally-EABI binary looks fine until the device refuses it.
+      - name: Cross build
+        run: make oabi EXTRA_FLAGS=-Werror
+
+      - name: Show the verified ABI
+        run: arm-linux-gnueabi-readelf -h build/oabi/memoryArena.o | grep -iE 'Machine|Flags'
+
+  rules:
+    name: Project rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The symbol half of the allocation check compiles every backend to
+      # inspect its undefined references, so it needs the same headers the
+      # normal builds do — clang alone is not enough.
+      - name: Install clang and the graphics headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libegl1-mesa-dev libgles2-mesa-dev libx11-dev
+
+      - name: No dynamic allocation
+        run: make check
+
+      - name: No game assets committed
+        run: |
+          if git ls-files | grep -iE '\.(package|dds|tga|xa|far|iff)$'; then
+            echo "error: game data must never be committed" >&2
+            exit 1
+          fi
+          echo "no game data found in the tree"

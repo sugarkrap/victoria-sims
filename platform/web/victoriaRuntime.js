@@ -1,0 +1,312 @@
+// Host side of the WebAssembly build. It owns the WebGPU objects and executes
+// commands issued from C; it makes no rendering decisions of its own.
+
+const runtimeState = {
+    instance: null,
+    memory: null,
+    canvas: null,
+    device: null,
+    context: null,
+    canvasFormat: null,
+    pipeline: null,
+    uniformBuffer: null,
+    bindGroup: null,
+    clearColor: { r: 0, g: 0, b: 0, a: 1 },
+    startTimestamp: 0,
+    lastOverlayTimestamp: 0,
+    frameMicrosecondHistory: []
+};
+
+// Matches the engine's own report refresh interval; sampling faster only costs
+// work without telling anyone anything new.
+const OVERLAY_INTERVAL_MILLISECONDS = 250;
+const SPARKLINE_SAMPLE_COUNT = 120;
+
+function readUTF8(pointer, length) {
+    const bytes = new Uint8Array(runtimeState.memory.buffer, pointer, length);
+    return new TextDecoder("utf-8").decode(bytes);
+}
+
+function reportStatus(text, isError) {
+    const element = document.getElementById("statusLine");
+    if (element) {
+        element.textContent = text;
+        element.classList.toggle("statusError", Boolean(isError));
+    }
+    if (isError) {
+        console.error(text);
+    }
+}
+
+const importObject = {
+    victoriaPlatform: {
+        logMessage(pointer, length) {
+            console.log(readUTF8(pointer, length));
+        },
+
+        getMilliseconds() {
+            return performance.now();
+        }
+    },
+    victoriaRender: {
+        configureSurface(widthInPixels, heightInPixels) {
+            runtimeState.canvas.width = widthInPixels;
+            runtimeState.canvas.height = heightInPixels;
+            runtimeState.context.configure({
+                device: runtimeState.device,
+                format: runtimeState.canvasFormat,
+                alphaMode: "opaque"
+            });
+        },
+
+        createTrianglePipeline(shaderPointer, shaderLength) {
+            const shaderModule = runtimeState.device.createShaderModule({
+                code: readUTF8(shaderPointer, shaderLength)
+            });
+
+            runtimeState.pipeline = runtimeState.device.createRenderPipeline({
+                layout: "auto",
+                vertex: { module: shaderModule, entryPoint: "vertexMain" },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: "fragmentMain",
+                    targets: [{ format: runtimeState.canvasFormat }]
+                },
+                primitive: { topology: "triangle-list" }
+            });
+
+            runtimeState.uniformBuffer = runtimeState.device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+
+            runtimeState.bindGroup = runtimeState.device.createBindGroup({
+                layout: runtimeState.pipeline.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: { buffer: runtimeState.uniformBuffer } }]
+            });
+
+            return 1;
+        },
+
+        setClearColor(red, green, blue) {
+            runtimeState.clearColor = { r: red, g: green, b: blue, a: 1 };
+        },
+
+        setTriangleTint(tint) {
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.uniformBuffer, 0, new Float32Array([tint, 0, 0, 0]));
+        },
+
+        submitFrame() {
+            const encoder = runtimeState.device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: runtimeState.context.getCurrentTexture().createView(),
+                    clearValue: runtimeState.clearColor,
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            });
+            pass.setPipeline(runtimeState.pipeline);
+            pass.setBindGroup(0, runtimeState.bindGroup);
+            pass.draw(3, 1, 0, 0);
+            pass.end();
+            runtimeState.device.queue.submit([encoder.finish()]);
+        },
+
+        // WebGPU deliberately does not expose total video memory. maxBufferSize
+        // is the closest thing an adapter will admit to, and it tracks the
+        // device class well enough to be a better starting point than a fixed
+        // guess. Reported as a hint, not a measurement.
+        queryGraphicsMemoryKibibytes() {
+            const maximumBufferBytes = runtimeState.device?.limits?.maxBufferSize;
+            if (!maximumBufferBytes || !Number.isFinite(maximumBufferBytes)) {
+                return 0;
+            }
+            return Math.floor(maximumBufferBytes / 1024);
+        },
+
+        // Draws once into an off-screen target so pipeline compilation and
+        // first-use specialisation happen now instead of during frame one.
+        warmUpPipeline() {
+            const warmUpTexture = runtimeState.device.createTexture({
+                size: { width: 1, height: 1 },
+                format: runtimeState.canvasFormat,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
+            });
+
+            const encoder = runtimeState.device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: warmUpTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: "clear",
+                    storeOp: "store"
+                }]
+            });
+            pass.setPipeline(runtimeState.pipeline);
+            pass.setBindGroup(0, runtimeState.bindGroup);
+            pass.draw(3, 1, 0, 0);
+            pass.end();
+            runtimeState.device.queue.submit([encoder.finish()]);
+            warmUpTexture.destroy();
+        }
+    }
+};
+
+function resizeToDisplaySize() {
+    const pixelRatio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.floor(runtimeState.canvas.clientWidth * pixelRatio));
+    const height = Math.max(1, Math.floor(runtimeState.canvas.clientHeight * pixelRatio));
+
+    if (runtimeState.canvas.width !== width || runtimeState.canvas.height !== height) {
+        runtimeState.instance.exports.victoriaWebResize(width, height);
+    }
+}
+
+// Reads the report the engine already formatted, rather than formatting one
+// here: the same text appears on the terminal in the Linux build.
+function updateProfilerOverlay() {
+    const exports = runtimeState.instance.exports;
+    const pointer = exports.victoriaWebGetProfilerReportPointer();
+    const length = exports.victoriaWebGetProfilerReportLength();
+
+    const reportElement = document.getElementById("profilerReport");
+    if (reportElement && length > 0) {
+        reportElement.textContent = readUTF8(pointer, length);
+    }
+
+    drawFrameSparkline();
+}
+
+function drawFrameSparkline() {
+    const canvas = document.getElementById("profilerSparkline");
+    if (!canvas) {
+        return;
+    }
+
+    const pixelRatio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.floor(canvas.clientWidth * pixelRatio));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * pixelRatio));
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+    }
+
+    const context = canvas.getContext("2d");
+    const samples = runtimeState.frameMicrosecondHistory;
+    context.clearRect(0, 0, width, height);
+
+    if (samples.length < 2) {
+        return;
+    }
+
+    // Scale against the 60 Hz budget so the line's height means something
+    // absolute, not just relative to whatever the worst recent frame was.
+    const budgetMicroseconds = 16667;
+    const peak = Math.max(budgetMicroseconds, ...samples);
+    const stepX = width / (SPARKLINE_SAMPLE_COUNT - 1);
+    // Inset so a line sitting at either extreme is not clipped in half.
+    const inset = 2 * pixelRatio;
+    const plotHeight = height - (inset * 2);
+    const plotY = (microseconds) => height - inset - (microseconds / peak) * plotHeight;
+
+    const budgetY = plotY(budgetMicroseconds);
+    context.strokeStyle = "#3a4152";
+    context.lineWidth = pixelRatio;
+    context.beginPath();
+    context.moveTo(0, budgetY);
+    context.lineTo(width, budgetY);
+    context.stroke();
+
+    context.strokeStyle = "#6fd3ff";
+    context.lineWidth = 1.5 * pixelRatio;
+    context.beginPath();
+    samples.forEach((microseconds, index) => {
+        const x = index * stepX;
+        const y = plotY(microseconds);
+        if (index === 0) {
+            context.moveTo(x, y);
+        } else {
+            context.lineTo(x, y);
+        }
+    });
+    context.stroke();
+}
+
+function renderLoop(timestamp) {
+    if (runtimeState.startTimestamp === 0) {
+        runtimeState.startTimestamp = timestamp;
+    }
+    resizeToDisplaySize();
+    runtimeState.instance.exports.victoriaWebRenderFrame((timestamp - runtimeState.startTimestamp) / 1000);
+
+    runtimeState.frameMicrosecondHistory.push(
+        runtimeState.instance.exports.victoriaWebGetFrameIntervalMicroseconds());
+    if (runtimeState.frameMicrosecondHistory.length > SPARKLINE_SAMPLE_COUNT) {
+        runtimeState.frameMicrosecondHistory.shift();
+    }
+
+    if (timestamp - runtimeState.lastOverlayTimestamp >= OVERLAY_INTERVAL_MILLISECONDS) {
+        runtimeState.lastOverlayTimestamp = timestamp;
+        updateProfilerOverlay();
+    }
+
+    requestAnimationFrame(renderLoop);
+}
+
+async function start() {
+    runtimeState.canvas = document.getElementById("victoriaCanvas");
+
+    if (!navigator.gpu) {
+        reportStatus("WebGPU is not available in this browser.", true);
+        return;
+    }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+        reportStatus("No WebGPU adapter available.", true);
+        return;
+    }
+
+    runtimeState.device = await adapter.requestDevice();
+    runtimeState.context = runtimeState.canvas.getContext("webgpu");
+    runtimeState.canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+
+    const response = await fetch("victoriaSims.wasm");
+    const wasm = await WebAssembly.instantiate(await response.arrayBuffer(), importObject);
+
+    runtimeState.instance = wasm.instance;
+    runtimeState.memory = wasm.instance.exports.memory;
+
+    const pixelRatio = window.devicePixelRatio || 1;
+    const initialWidth = Math.max(1, Math.floor(runtimeState.canvas.clientWidth * pixelRatio));
+    const initialHeight = Math.max(1, Math.floor(runtimeState.canvas.clientHeight * pixelRatio));
+
+    // ?graphicsMemoryMebibytes=8 simulates a small-memory device, which is the
+    // only practical way to exercise the ceiling from a desktop browser.
+    const requestedMebibytes = Number(
+        new URLSearchParams(window.location.search).get("graphicsMemoryMebibytes"));
+    const overrideBytes = Number.isFinite(requestedMebibytes) && requestedMebibytes > 0
+        ? Math.floor(requestedMebibytes * 1024 * 1024)
+        : 0;
+
+    if (!runtimeState.instance.exports.victoriaWebInitialize(
+            initialWidth, initialHeight, overrideBytes)) {
+        reportStatus("Engine failed to initialize.", true);
+        return;
+    }
+
+    const budgetMebibytes = runtimeState.instance.exports.victoriaWebGetBudgetTotalBytes() / (1024 * 1024);
+    const linearMebibytes = runtimeState.memory.buffer.byteLength / (1024 * 1024);
+    const graphicsMebibytes =
+        runtimeState.instance.exports.victoriaWebGetGraphicsMemoryLimitBytes() / (1024 * 1024);
+    reportStatus(
+        `WebGPU running. Arena ${budgetMebibytes} MiB, wasm linear memory ` +
+        `${linearMebibytes.toFixed(1)} MiB, graphics ceiling ${graphicsMebibytes.toFixed(1)} MiB.`,
+        false);
+
+    requestAnimationFrame(renderLoop);
+}
+
+start().catch((error) => reportStatus(`Startup failed: ${error.message}`, true));
