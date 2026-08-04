@@ -40,6 +40,9 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesCompressed = 0U;
     search->packagesWithGeometry = 0U;
     search->packagesWithShapes = 0U;
+    search->packagesWithTrees = 0U;
+    search->modelHasTree = BOOLEAN_FALSE;
+    search->modelNodeIndex = 0U;
     search->modelsResolved = 0U;
     search->modelName[0] = '\0';
     search->foundThroughScenegraph = BOOLEAN_FALSE;
@@ -79,17 +82,73 @@ static Boolean endsWithPackage(const char *path)
     return BOOLEAN_TRUE;
 }
 
-/* Follows shape to geometry node to container, and says whether it got there.
+/* The shape a model's resource node points at, or null.
  *
- * A package with no shape is not a failure — plenty hold a container and
- * nothing else, and the caller falls back to taking the container directly.
- * What this buys is a mesh that was chosen: named, and known to be part of a
- * model rather than whatever the index happened to list first. */
+ * This is the top of the chain, and starting here rather than at the first
+ * shape in the package is the difference between drawing a model and drawing
+ * something that happened to be filed beside one. It also yields the transform
+ * that says where the part belongs, which nothing below the resource node
+ * knows. */
+static const PackageResource *findShapeThroughResourceNode(DiscContentSearch *search,
+                                                           const Package *package)
+{
+    const PackageResource *nodeResource =
+        packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_CRES);
+    MemorySize marker;
+    const Unsigned8 *nodeBytes;
+    MemorySize nodeSize;
+    Boolean compressed;
+    const PackageResource *shape = NULL_POINTER;
+    Unsigned32 index;
+
+    search->modelHasTree = BOOLEAN_FALSE;
+    if (nodeResource == NULL_POINTER)
+    {
+        return NULL_POINTER;
+    }
+
+    marker = memoryArenaGetMarker(search->arena);
+    nodeBytes = scenegraphReadResourceBytes(search->arena, package, nodeResource, &nodeSize, &compressed);
+    if (nodeBytes == NULL_POINTER ||
+        resourceNodeRead(&search->modelTree, nodeBytes, nodeSize) != RESOURCE_NODE_OK)
+    {
+        memoryArenaRewindToMarker(search->arena, marker);
+        return NULL_POINTER;
+    }
+    search->packagesWithTrees++;
+    search->modelHasTree = BOOLEAN_TRUE;
+
+    for (index = 0U; index < search->modelTree.storedNodeCount && shape == NULL_POINTER; index++)
+    {
+        if (!search->modelTree.nodes[index].hasShape)
+        {
+            continue;
+        }
+        shape = scenegraphFindResource(package, &search->modelTree.nodes[index].shapeKey);
+        if (shape != NULL_POINTER)
+        {
+            search->modelNodeIndex = index;
+        }
+    }
+    memoryArenaRewindToMarker(search->arena, marker);
+    return shape;
+}
+
+/* Follows the chain down to a container, and says whether it got there.
+ *
+ * A package with no resource node and no shape is not a failure — plenty hold a
+ * container and nothing else, and the caller falls back to taking one directly.
+ * What this buys is a mesh that was chosen: part of a named model, rather than
+ * whatever the index happened to list first. */
 static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *search,
                                                             const Package *package)
 {
-    const PackageResource *shapeResource =
-        packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_SHPE);
+    /* Asked for by the model that owns it first; only failing that, whichever
+     * shape the package lists. The fallback is not a lesser answer for a
+     * package that has no resource node — plenty do not — but for one that
+     * does, taking any other shape would be picking a part of the model over
+     * the model. */
+    const PackageResource *shapeResource = findShapeThroughResourceNode(search, package);
     MemorySize marker;
     const Unsigned8 *shapeBytes;
     MemorySize shapeSize;
@@ -98,6 +157,10 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     const PackageResource *geometry = NULL_POINTER;
     Unsigned32 index;
 
+    if (shapeResource == NULL_POINTER)
+    {
+        shapeResource = packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_SHPE);
+    }
     if (shapeResource == NULL_POINTER)
     {
         return NULL_POINTER;

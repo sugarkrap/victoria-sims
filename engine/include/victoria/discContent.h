@@ -4,6 +4,7 @@
 #include "victoria/coreTypes.h"
 #include "victoria/geometryReader.h"
 #include "victoria/memoryArena.h"
+#include "victoria/resourceNode.h"
 #include "victoria/scenegraph.h"
 #include "victoria/virtualFileSystem.h"
 
@@ -12,16 +13,18 @@
  * Given a catalogue, this opens each package in turn and stops at the first one
  * carrying geometry it can read.
  *
- * How it picks that geometry depends on what the package holds. If there is a
- * shape, the shape is asked: it names the geometry nodes the model is built
+ * How it picks that geometry depends on what the package holds. The chain is
+ * entered as high up as it can be: a resource node names the model and the
+ * shapes it is assembled from, a shape names the geometry nodes it is built
  * from, and each of those names the container holding its vertices. A mesh
  * reached that way was chosen — it is part of a named model, not whichever
  * container the index happened to list first.
  *
- * Packages with no shape fall back to taking the first container outright. That
- * is blunt, and it is kept because it still answers the question this was
- * written to answer — is the path from a disc to a triangle connected — for the
- * many packages that carry a container and nothing else.
+ * Each hop falls back to the one below it. A package with no resource node is
+ * entered at its shape; one with neither takes the first container outright.
+ * That last rule is blunt, and it is kept because it still answers the question
+ * this was written to answer — is the path from a disc to a triangle connected
+ * — for the many packages that carry a container and nothing else.
  *
  * It counts what it passed over on the way. A retail disc will have every
  * package refused for the same reason, and a caller that can only say "nothing
@@ -59,6 +62,11 @@ typedef struct DiscContentSearch
        be reported as though it were. */
     char modelName[RESOURCE_NAME_LIMIT];
     Boolean foundThroughScenegraph;
+    /* The model's transform tree, when it had one. Held here rather than on a
+       stack: it is a few kilobytes, and the web build's stack is not. */
+    ResourceNodeDescription modelTree;
+    Boolean modelHasTree;
+    Unsigned32 modelNodeIndex;
 
     /* What the search met on the way, so a report can be specific. */
     Unsigned32 packagesOpened;
@@ -68,6 +76,9 @@ typedef struct DiscContentSearch
        the way to a container. The gap between them is the interesting number:
        it is shapes whose meshes this engine could not follow. */
     Unsigned32 packagesWithShapes;
+    /* Packages whose model could be entered from the top, at its resource node,
+       rather than from whichever shape was filed first. */
+    Unsigned32 packagesWithTrees;
     Unsigned32 modelsResolved;
     Unsigned32 geometryRefused;
     /* Why the refusals happened, one bucket per GeometryReadResult. A disc that

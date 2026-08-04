@@ -194,6 +194,8 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         stringAppend(message, sizeof(message), " with geometry, ");
         appendCount(message, sizeof(message), discSearch.packagesWithShapes);
         stringAppend(message, sizeof(message), " with a shape, ");
+        appendCount(message, sizeof(message), discSearch.packagesWithTrees);
+        stringAppend(message, sizeof(message), " with a tree, ");
         appendCount(message, sizeof(message), discSearch.modelsResolved);
         stringAppend(message, sizeof(message), " followed to a model");
         platformLogMessage(message);
@@ -315,6 +317,33 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         appendCount(message, sizeof(message), discSearch.mesh.componentCount);
         stringAppend(message, sizeof(message), " component(s)");
         platformLogMessage(message);
+
+        /* Where the model's tree says this part belongs. Nothing applies it
+           yet — one shape is drawn, and a single part's own transform is
+           usually identity — so it is reported rather than claimed. The number
+           to watch is whether every block was walked: a tree that stopped short
+           has parts this engine cannot reach at all. */
+        if (discSearch.modelHasTree)
+        {
+            const TransformNode *node = &discSearch.modelTree.nodes[discSearch.modelNodeIndex];
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: tree ");
+            stringAppend(message, sizeof(message), discSearch.modelTree.resourceName);
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), discSearch.modelTree.blocksRead);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), discSearch.modelTree.blockCount);
+            stringAppend(message, sizeof(message), " blocks walked, ");
+            appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
+            stringAppend(message, sizeof(message), " node(s)");
+            if (discSearch.modelTree.storedNodeCount > 0U)
+            {
+                stringAppend(message, sizeof(message), ", bone ");
+                appendCount(message, sizeof(message), node->boneIdentifier);
+            }
+            platformLogMessage(message);
+        }
 
         /* Each part by name. A model that arrives as one silhouette is hard to
            tell from a model that arrived as one part, and the difference
