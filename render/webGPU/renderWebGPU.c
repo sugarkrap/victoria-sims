@@ -115,6 +115,19 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
     hostConfigureSurface(widthInPixels, heightInPixels);
 }
 
+
+void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    (void)arena;
+    /* Not implemented here yet: this backend still draws the placeholder
+       triangle. Said out loud rather than ignored, so a disc that loaded
+       correctly is not mistaken for one that did not. */
+    if (mesh != NULL_POINTER)
+    {
+        platformLogMessage("render: the WebGPU backend cannot draw a mesh yet");
+    }
+}
+
 void renderDrawFrame(Real32 elapsedSeconds)
 {
     Real32 colorPulse = 0.65f + (0.35f * mathSine(elapsedSeconds * 1.5f));

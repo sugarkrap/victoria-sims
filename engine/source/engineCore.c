@@ -1,3 +1,5 @@
+#include "victoria/discContent.h"
+#include "victoria/discReader.h"
 #include "victoria/engineCore.h"
 #include "utils/strings.h"
 #include "victoria/graphicsMemoryBudget.h"
@@ -57,6 +59,106 @@ static void establishGraphicsMemoryLimit(MemorySize overrideBytes)
     }
 }
 
+
+/* How many files a disc catalogue can hold. A retail disc lists a few hundred;
+   this leaves room without the catalogue itself becoming the cost. */
+#define DISC_FILE_LIMIT 4096U
+
+static void appendCount(char *destination, MemorySize capacity, Unsigned32 value)
+{
+    char digits[24];
+
+    if (stringWriteUnsigned(digits, sizeof(digits), (Unsigned64)value) > 0UL)
+    {
+        stringAppend(destination, capacity, digits);
+    }
+}
+
+
+/* Opens whatever the platform handed over and finds something to draw on it.
+   Failure is never fatal: an engine that will not start because a disc was
+   unreadable is worse than one that starts and says so. */
+static void loadDiscContent(VirtualFileSystem *fileSystem)
+{
+    static DiscReader discReader;
+    static DiscContentSearch search;
+    char message[192];
+    DiscContentStatus status;
+
+    if (fileSystem == NULL_POINTER)
+    {
+        return;
+    }
+
+    if (fileSystem->entryCount == 0U)
+    {
+        /* No catalogue yet, so this is an image and has to be walked. */
+        DiscReadStatus walk = discReaderBegin(&discReader, fileSystem, globalArena, DISC_FILE_LIMIT);
+
+        if (walk == DISC_READ_PENDING)
+        {
+            walk = discReaderRunToCompletion(&discReader);
+        }
+        if (walk != DISC_READ_COMPLETE)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: cannot read the disc — ");
+            stringAppend(message, sizeof(message), discReadStatusGetName(walk));
+            platformLogMessage(message);
+            return;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: disc ");
+        stringAppend(message, sizeof(message), discReader.volumeIdentifier);
+        stringAppend(message, sizeof(message), " holds ");
+        appendCount(message, sizeof(message), fileSystem->entryCount);
+        stringAppend(message, sizeof(message), " files");
+        platformLogMessage(message);
+    }
+
+    discContentBegin(&search, fileSystem, globalArena);
+    status = discContentRunToCompletion(&search);
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: opened ");
+    appendCount(message, sizeof(message), search.packagesOpened);
+    stringAppend(message, sizeof(message), " packages, ");
+    appendCount(message, sizeof(message), search.packagesCompressed);
+    stringAppend(message, sizeof(message), " compressed, ");
+    appendCount(message, sizeof(message), search.packagesWithGeometry);
+    stringAppend(message, sizeof(message), " with geometry");
+    platformLogMessage(message);
+
+    if (status != DISC_CONTENT_FOUND)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        stringAppend(message, sizeof(message), discContentStatusGetName(status));
+        platformLogMessage(message);
+        return;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: drawing ");
+    stringAppend(message, sizeof(message), search.mesh.name);
+    stringAppend(message, sizeof(message), " from ");
+    stringAppend(message, sizeof(message), search.packagePath);
+    platformLogMessage(message);
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    appendCount(message, sizeof(message), search.mesh.vertexCount);
+    stringAppend(message, sizeof(message), " vertices, ");
+    appendCount(message, sizeof(message), search.mesh.indexCount / 3U);
+    stringAppend(message, sizeof(message), " triangles, ");
+    appendCount(message, sizeof(message), search.mesh.primitiveCount);
+    stringAppend(message, sizeof(message), " primitive(s) in the container");
+    platformLogMessage(message);
+
+    renderSetMesh(&search.mesh, globalArena);
+}
+
 Boolean engineInitialize(const EngineConfiguration *configuration)
 {
     Boolean renderIsReady;
@@ -98,6 +200,10 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         platformLogMessage("engine: renderer failed to initialize");
         return BOOLEAN_FALSE;
     }
+
+    /* After the renderer, because the backend may want to upload what it is
+       given, and before the first frame so nothing is drawn twice. */
+    loadDiscContent(configuration->fileSystem);
 
     engineIsRunning = BOOLEAN_TRUE;
     platformLogMessage("engine: initialized");

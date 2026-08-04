@@ -35,6 +35,9 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
                   engine/source/geometryReader.c \
+                  engine/source/discReader.c \
+                  engine/source/virtualFileSystem.c \
+                  engine/source/discContent.c \
                   engine/source/engineCore.c \
                   utils/strings.c
 
@@ -59,7 +62,7 @@ endif
 
 LINUX_SOURCES := $(ENGINE_SOURCES) \
                  $(LINUX_RENDER_SOURCES) \
-                 platform/linux/linuxEntryPoint.c
+                 platform/linux/linuxDiscStore.c platform/linux/linuxEntryPoint.c
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
                render/webGPU/renderWebGPU.c \

@@ -6,6 +6,7 @@
 
 #include "platform/linux/linuxPresenter.h"
 #include "victoria/engineCore.h"
+#include "platform/linux/linuxDiscStore.h"
 #include "utils/strings.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
@@ -256,6 +257,9 @@ int main(int argumentCount, char **argumentValues)
     EngineConfiguration configuration;
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
     MemorySize graphicsMemoryLimitBytes = 0UL;
+    const char *discPath = NULL_POINTER;
+    static DiscStore discStore;
+    static VirtualFileSystem discFileSystem;
     int argumentIndex;
 
     windowState.profilerReportIntervalMicroseconds = PROFILER_REPORT_DEFAULT_INTERVAL_MICROSECONDS;
@@ -271,6 +275,12 @@ int main(int argumentCount, char **argumentValues)
         else if (stringEquals(argument, "--quiet") == BOOLEAN_TRUE)
         {
             windowState.profilerReportIntervalMicroseconds = 0ULL;
+        }
+        else if (stringStartsWith(argument, "--disc=") == BOOLEAN_TRUE)
+        {
+            /* An image or a directory; which it is decided by looking, not by
+               the shape of the path, so a mounted CD and a rip both work. */
+            discPath = argument + stringLength("--disc=");
         }
         else if (stringStartsWith(argument, "--graphics-memory-mebibytes=") == BOOLEAN_TRUE)
         {
@@ -299,6 +309,28 @@ int main(int argumentCount, char **argumentValues)
     configuration.widthInPixels = windowState.widthInPixels;
     configuration.heightInPixels = windowState.heightInPixels;
     configuration.graphicsMemoryLimitBytes = graphicsMemoryLimitBytes;
+    configuration.fileSystem = NULL_POINTER;
+
+    if (discPath != NULL_POINTER)
+    {
+        if (discStoreOpen(&discStore, &discFileSystem, discPath, engineGetGlobalArena()) ==
+            BOOLEAN_TRUE)
+        {
+            char opened[256];
+
+            opened[0] = '\0';
+            stringAppend(opened, sizeof(opened), "platform: opened ");
+            stringAppend(opened, sizeof(opened), discPath);
+            stringAppend(opened, sizeof(opened), " as a ");
+            stringAppend(opened, sizeof(opened), discStoreDescribe(&discStore));
+            platformLogMessage(opened);
+            configuration.fileSystem = &discFileSystem;
+        }
+        else
+        {
+            platformLogMessage("platform: cannot open that disc, starting without one");
+        }
+    }
 
     platformLogMessage(linuxPresenterGetName());
 

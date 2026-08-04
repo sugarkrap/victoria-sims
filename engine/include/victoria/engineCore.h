@@ -3,6 +3,7 @@
 
 #include "victoria/coreTypes.h"
 #include "victoria/memoryArena.h"
+#include "victoria/virtualFileSystem.h"
 
 typedef struct EngineConfiguration
 {
@@ -11,6 +12,15 @@ typedef struct EngineConfiguration
     /* Zero asks the backend what it has and falls back to the conservative
        default; anything else overrides both. */
     MemorySize graphicsMemoryLimitBytes;
+
+    /* Where the game's data is, or null when none was given — in which case the
+       engine starts and draws its placeholder, which is what every build did
+       before there was a disc to read. The platform opens the store; the engine
+       does not know whether it is an image, a folder, or a browser's File.
+
+       An empty catalogue means "walk it as a disc image"; a catalogue that is
+       already filled is taken as it is, which is how a folder arrives. */
+    VirtualFileSystem *fileSystem;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);
