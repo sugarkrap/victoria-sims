@@ -36,7 +36,7 @@ their provenance cannot be established, so they are treated as retail-derived.
 
 ## Adding to this directory
 
-`tools/checkNoGameData.sh` pins every file here by SHA-256 against
+`scripts/checkNoGameData.sh` pins every file here by SHA-256 against
 `manifest.sha256`, and continuous integration runs it. Adding or changing a
 fixture means updating that manifest deliberately — a retail package cannot be
 dropped in quietly, and neither can a fixture be swapped for one.

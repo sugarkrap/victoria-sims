@@ -30,7 +30,7 @@ jobs:
         run: make web EXTRA_FLAGS=-Werror
 
       - name: Verify the module before publishing
-        run: node tools/verifyWebModule.mjs
+        run: node tests/verifyWebModule.mjs
 
       - name: Add Netlify headers
         run: |

@@ -202,18 +202,18 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 		*) echo "ERROR: not OABI, got $$flags" >&2; exit 1 ;; \
 	esac
 
-RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tools/verifyRasterizer
+RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
 
 verify: $(RASTERIZER_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 
-$(RASTERIZER_VERIFIER): tools/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
-	@mkdir -p $(BUILD_DIRECTORY)/tools
-	$(HOST_COMPILER) $(COMMON_FLAGS) tools/verifyRasterizer.c render/software/rasterizer.c \
+$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyRasterizer.c render/software/rasterizer.c \
 		render/software/rasterizerNEON.c -o $@
 
 check:
-	@tools/checkNoDynamicAllocation.sh
+	@scripts/checkNoDynamicAllocation.sh
 
 clean:
 	rm -rf $(BUILD_DIRECTORY)
