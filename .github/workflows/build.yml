@@ -170,10 +170,5 @@ jobs:
       - name: No dynamic allocation
         run: make check
 
-      - name: No game assets committed
-        run: |
-          if git ls-files | grep -iE '\.(package|dds|tga|xa|far|iff)$'; then
-            echo "error: game data must never be committed" >&2
-            exit 1
-          fi
-          echo "no game data found in the tree"
+      - name: No retail game data committed
+        run: tools/checkNoGameData.sh

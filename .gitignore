@@ -10,6 +10,10 @@ assets/
 extracted/
 *.package
 
+# ...except the purpose-built fixtures, which are pinned by hash in
+# testAssets/manifest.sha256 and checked by tools/checkNoGameData.sh.
+!testAssets/**
+
 .vscode/
 .idea/
 .cache/
