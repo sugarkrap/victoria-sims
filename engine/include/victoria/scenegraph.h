@@ -92,6 +92,15 @@ ScenegraphReadResult scenegraphReadGeometryNode(GeometryNodeDescription *node, c
    hundred thousand. */
 const PackageResource *scenegraphFindResource(const Package *package, const PackageResourceKey *key);
 
+/* The same, ignoring the group. A resource's instance words are its name
+   hashed, so they identify it on their own; the group says which collection it
+   was filed under, which the name does not tell you and a caller looking a name
+   up does not know. */
+const PackageResource *scenegraphFindResourceByInstance(const Package *package,
+                                                        Unsigned32 typeIdentifier,
+                                                        Unsigned32 instanceIdentifier,
+                                                        Unsigned32 instanceIdentifierHigh);
+
 /* A resource's bytes, unpacked if the stream says it is packed.
  *
  * Almost everything on a retail disc is stored compressed, so what the index

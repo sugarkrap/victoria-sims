@@ -1,6 +1,7 @@
 #include "victoria/scenegraph.h"
 
 #include "utils/strings.h"
+#include "utils/resourceHash.h"
 #include "victoria/compression.h"
 
 const char *scenegraphReadResultGetName(ScenegraphReadResult result)
@@ -421,39 +422,96 @@ const Unsigned8 *scenegraphReadResourceBytes(MemoryArena *arena, const Package *
  * rather than by its instance identifier. That is a walk over a handful of small
  * resources, and it is the right way round: the shape names its meshes, and a
  * name is what the file gives us to match on. */
-const PackageResource *scenegraphFindGeometryNamed(MemoryArena *arena, const Package *package,
-                                                   const char *nodeName)
+const PackageResource *scenegraphFindResourceByInstance(const Package *package,
+                                                        Unsigned32 typeIdentifier,
+                                                        Unsigned32 instanceIdentifier,
+                                                        Unsigned32 instanceIdentifierHigh)
 {
     Unsigned32 index;
 
     for (index = 0U; index < package->resourceCount; index++)
     {
+        const PackageResource *resource = &package->resources[index];
+
+        if (resource->key.typeIdentifier == typeIdentifier &&
+            resource->key.instanceIdentifier == instanceIdentifier &&
+            resource->key.instanceIdentifierHigh == instanceIdentifierHigh)
+        {
+            return resource;
+        }
+    }
+    return NULL_POINTER;
+}
+
+/* Reads one geometry node and returns the container it points at. */
+static const PackageResource *followGeometryNode(MemoryArena *arena, const Package *package,
+                                                 const PackageResource *nodeResource,
+                                                 const char *wantedName)
+{
+    MemorySize marker = memoryArenaGetMarker(arena);
+    MemorySize nodeSize;
+    Boolean compressed;
+    const Unsigned8 *nodeBytes =
+        scenegraphReadResourceBytes(arena, package, nodeResource, &nodeSize, &compressed);
+    GeometryNodeDescription node;
+    const PackageResource *geometry = NULL_POINTER;
+
+    if (nodeBytes != NULL_POINTER &&
+        scenegraphReadGeometryNode(&node, nodeBytes, nodeSize) == SCENEGRAPH_READ_OK &&
+        node.hasGeometry &&
+        (wantedName == NULL_POINTER || stringEquals(node.resourceName, wantedName)))
+    {
+        geometry = scenegraphFindResource(package, &node.geometryKey);
+    }
+    /* The key is a struct copy, so it survives the rewind. */
+    memoryArenaRewindToMarker(arena, marker);
+    return geometry;
+}
+
+const PackageResource *scenegraphFindGeometryNamed(MemoryArena *arena, const Package *package,
+                                                   const char *nodeName)
+{
+    Unsigned32 index;
+
+    /* Asked for by key first. A scenegraph resource's instance words are its
+     * name hashed, so the node can be found without opening anything — one
+     * read instead of one per node in the package.
+     *
+     * The walk below is kept rather than deleted. The hash holds for every
+     * resource checked so far, but "every resource checked so far" is three
+     * fixtures and a retail disc; a resource filed under a key that does not
+     * match its name would simply not be found, and silently drawing nothing
+     * is a worse failure than reading a few extra resources. */
+    {
+        const PackageResource *nodeResource = scenegraphFindResourceByInstance(
+            package, (Unsigned32)PACKAGE_TYPE_GMND, resourceHashInstance(nodeName),
+            resourceHashInstanceHigh(nodeName));
+
+        if (nodeResource != NULL_POINTER)
+        {
+            const PackageResource *geometry =
+                followGeometryNode(arena, package, nodeResource, NULL_POINTER);
+
+            if (geometry != NULL_POINTER)
+            {
+                return geometry;
+            }
+        }
+    }
+
+    for (index = 0U; index < package->resourceCount; index++)
+    {
         const PackageResource *candidate = &package->resources[index];
-        MemorySize marker;
-        const Unsigned8 *nodeBytes;
-        MemorySize nodeSize;
-        Boolean compressed;
-        GeometryNodeDescription node;
-        const PackageResource *geometry = NULL_POINTER;
+        const PackageResource *geometry;
 
         if (candidate->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_GMND)
         {
             continue;
         }
-
         /* Each candidate is read and given straight back, so scanning a package
          * full of nodes costs the arena one node at a time rather than all of
-         * them. The key is a struct copy, so it survives the rewind. */
-        marker = memoryArenaGetMarker(arena);
-        nodeBytes = scenegraphReadResourceBytes(arena, package, candidate, &nodeSize, &compressed);
-        if (nodeBytes != NULL_POINTER &&
-            scenegraphReadGeometryNode(&node, nodeBytes, nodeSize) == SCENEGRAPH_READ_OK &&
-            node.hasGeometry && stringEquals(node.resourceName, nodeName))
-        {
-            geometry = scenegraphFindResource(package, &node.geometryKey);
-        }
-        memoryArenaRewindToMarker(arena, marker);
-
+         * them. */
+        geometry = followGeometryNode(arena, package, candidate, nodeName);
         if (geometry != NULL_POINTER)
         {
             return geometry;

@@ -26,6 +26,7 @@
 #include "victoria/geometryReader.h"
 #include "victoria/memoryArena.h"
 #include "victoria/packageReader.h"
+#include "utils/resourceHash.h"
 #include "victoria/scenegraph.h"
 
 #define FILE_BUFFER_CAPACITY (2UL * 1024UL * 1024UL)
@@ -158,6 +159,51 @@ int main(void)
         }
     }
 
+    printf("\n-- is a resource's key its name, hashed --\n");
+    {
+        /* The claim: an instance identifier is CRC24 of the folded name with
+           0xFF in the top byte, and the high word is CRC32 in its MPEG-2 form.
+           If that holds, finding a resource by name needs no reading at all —
+           the key can be computed and matched against index entries that are
+           already parsed.
+
+           Checked against three resources whose keys come from the fixture's
+           own index, not from running this. Two of the three are in the chain
+           this file already walks, so a hash that agreed with itself and not
+           with the file would show up here immediately. */
+        checkThat(&failureCount, "the geometry container's instance is its name hashed",
+                  resourceHashInstance("teapot_tslocator_gmdc") == 0xFF515126UL);
+        checkThat(&failureCount, "and its high word too",
+                  resourceHashInstanceHigh("teapot_tslocator_gmdc") == 0x3AFDFD2CUL);
+        checkThat(&failureCount, "the geometry node's instance likewise",
+                  resourceHashInstance("teapot_tslocator_gmnd") == 0xFF3BD317UL);
+        checkThat(&failureCount, "and its high word",
+                  resourceHashInstanceHigh("teapot_tslocator_gmnd") == 0x0E007074UL);
+        checkThat(&failureCount, "the shape's instance",
+                  resourceHashInstance("ufoCrash_ufo_shpe") == 0xFFA11ECBUL);
+        checkThat(&failureCount, "and the shape's high word",
+                  resourceHashInstanceHigh("ufoCrash_ufo_shpe") == 0x78BFA44EUL);
+
+        /* The shape's name carries capitals and the key does not care, which is
+           the whole reason the fold is there. */
+        checkThat(&failureCount, "case makes no difference to the hash",
+                  resourceHashInstance("UFOCRASH_UFO_SHPE") == 0xFFA11ECBUL &&
+                      resourceHashInstanceHigh("ufocrash_ufo_shpe") == 0x78BFA44EUL);
+
+        /* Different masks, same underlying CRC24 — so a group hash and an
+           instance hash of the same string differ only in their top byte. */
+        checkThat(&failureCount, "a group hash is the same CRC under a different mask",
+                  (resourceHashGroup("teapot_tslocator_gmdc") & 0x00FFFFFFUL) ==
+                          (resourceHashInstance("teapot_tslocator_gmdc") & 0x00FFFFFFUL) &&
+                      (resourceHashGroup("teapot_tslocator_gmdc") >> 24) == 0x7FUL);
+
+        /* Two names that differ by one character must not collide, or the
+           lookup this enables would find the wrong resource in silence. */
+        checkThat(&failureCount, "a one character difference changes the key",
+                  resourceHashInstance("teapot_tslocator_gmdc") !=
+                      resourceHashInstance("teapot_tslocator_gmdd"));
+    }
+
     printf("\n-- looking a container up by the name a shape would give --\n");
     {
         /* This is the lookup the engine performs, called directly rather than
@@ -179,6 +225,22 @@ int main(void)
         /* Prefix matching would find the teapot for this and be wrong. */
         checkThat(&failureCount, "a name that is only a prefix does not match",
                   scenegraphFindGeometryNamed(&arena, &package, "teapot") == NULL_POINTER);
+
+        /* The lookup above now asks by hashed key first and only walks the
+           package if that finds nothing. Checked directly, so a hash path that
+           quietly never matched — leaving the walk to do all the work and the
+           test to pass anyway — is visible. */
+        checkThat(&failureCount, "the node is findable by its hashed key alone",
+                  scenegraphFindResourceByInstance(
+                      &package, (Unsigned32)PACKAGE_TYPE_GMND,
+                      resourceHashInstance("teapot_tslocator_gmnd"),
+                      resourceHashInstanceHigh("teapot_tslocator_gmnd")) ==
+                      packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMND));
+        checkThat(&failureCount, "and a name no resource carries hashes to nothing here",
+                  scenegraphFindResourceByInstance(&package, (Unsigned32)PACKAGE_TYPE_GMND,
+                                                   resourceHashInstance("no_such_gmnd"),
+                                                   resourceHashInstanceHigh("no_such_gmnd")) ==
+                      NULL_POINTER);
     }
 
     printf("\n-- the arena is left where it was found --\n");
