@@ -55,7 +55,7 @@ LINUX_RENDER_SOURCES := render/software/renderSoftware.c \
                         platform/linux/linuxPresenterSoftware.c
 LINUX_LIBRARIES := -lX11
 else
-LINUX_RENDER_SOURCES := render/openGLES2/renderOpenGLES2.c \
+LINUX_RENDER_SOURCES := render/openGLES2/renderOpenGLES2.c render/meshCamera.c \
                         platform/linux/linuxPresenterEGL.c
 LINUX_LIBRARIES := -lEGL -lGLESv2 -lX11
 endif
@@ -212,15 +212,25 @@ RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
 GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
+MESH_CAMERA_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyMeshCamera
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
-		$(GEOMETRY_READER_VERIFIER)
+		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
 	@$(GEOMETRY_READER_VERIFIER)
+	@$(MESH_CAMERA_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(MESH_CAMERA_VERIFIER): tests/verifyMeshCamera.c render/meshCamera.c \
+		engine/source/freestandingRuntime.c engine/source/geometryReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyMeshCamera.c render/meshCamera.c \
+		engine/source/freestandingRuntime.c engine/source/geometryReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(GEOMETRY_READER_VERIFIER): tests/verifyGeometryReader.c engine/source/geometryReader.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)

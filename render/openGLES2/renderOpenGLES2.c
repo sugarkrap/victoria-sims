@@ -5,6 +5,7 @@
 #include "victoria/graphicsMemoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
+#include "render/meshCamera.h"
 #include "victoria/renderInterface.h"
 
 /* Vendor queries for total graphics memory. Neither is core in OpenGL ES 2.0,
@@ -41,6 +42,50 @@ static const GLfloat triangleVertices[] = {
     /* position */ 0.6f, -0.5f, /* color */ 1.0f, 0.9f, 0.4f
 };
 
+/* The mesh program. Lighting is done here rather than baked per face as the
+   software backend does, because a shader can interpolate a normal across a
+   triangle and get smooth shading for the same cost as flat.
+
+   The light arrives already rotated into model space, so a vertex can be lit
+   from its own normal without a normal matrix — one less uniform, and one less
+   thing to get wrong when the model turns. */
+static const char *meshVertexShaderSource =
+    "attribute vec3 vertexPosition;\n"
+    "attribute vec3 vertexNormal;\n"
+    "uniform mat4 modelViewProjection;\n"
+    "varying vec3 interpolatedNormal;\n"
+    "void main()\n"
+    "{\n"
+    "    interpolatedNormal = vertexNormal;\n"
+    "    gl_Position = modelViewProjection * vec4(vertexPosition, 1.0);\n"
+    "}\n";
+
+static const char *meshFragmentShaderSource =
+    "precision mediump float;\n"
+    "varying vec3 interpolatedNormal;\n"
+    "uniform vec3 lightDirection;\n"
+    "void main()\n"
+    "{\n"
+    "    vec3 normal = normalize(interpolatedNormal);\n"
+    /* Absolute rather than clamped: nothing here has a back face material, and
+       an unlit interior reads as a hole in the model rather than as shadow. */
+    "    float lambert = abs(dot(normal, lightDirection));\n"
+    "    float shade = 0.28 + (0.72 * lambert);\n"
+    "    gl_FragColor = vec4(shade, shade * 0.93, shade * 0.84, 1.0);\n"
+    "}\n";
+
+static GLuint meshProgram = 0;
+static GLuint meshVertexBuffer = 0;
+static GLuint meshIndexBuffer = 0;
+static GLint meshPositionLocation = -1;
+static GLint meshNormalLocation = -1;
+static GLint meshMatrixLocation = -1;
+static GLint meshLightLocation = -1;
+static GLsizei meshIndexCount = 0;
+static MemorySize meshChargedBytes = 0UL;
+static MeshCamera meshCamera;
+
+static Real32 viewportAspect = 1.0f;
 static GLuint shaderProgram = 0;
 static GLuint vertexBuffer = 0;
 static GLint vertexPositionLocation = -1;
@@ -276,19 +321,147 @@ Unsigned32 renderGetShaderProgramCount(void)
 void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
     glViewport(0, 0, (GLsizei)widthInPixels, (GLsizei)heightInPixels);
+    viewportAspect = (heightInPixels > 0U) ? ((Real32)widthInPixels / (Real32)heightInPixels) : 1.0f;
 }
 
 
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 {
-    (void)arena;
-    /* Not implemented here yet: this backend still draws the placeholder
-       triangle. Said out loud rather than ignored, so a disc that loaded
-       correctly is not mistaken for one that did not. */
-    if (mesh != NULL_POINTER)
+    MemorySize marker;
+    GLfloat *interleaved;
+    MemorySize vertexBytes;
+    MemorySize indexBytes;
+    GLuint vertexShader;
+    GLuint fragmentShader;
+    GLint linkStatus = GL_FALSE;
+    Unsigned32 index;
+
+    if (mesh == NULL_POINTER || mesh->vertexCount == 0U || mesh->indexCount < 3U ||
+        mesh->normals == NULL_POINTER)
     {
-        platformLogMessage("render: the OpenGL ES 2.0 backend cannot draw a mesh yet");
+        meshIndexCount = 0;
+        return;
     }
+
+    vertexBytes = (MemorySize)mesh->vertexCount * 6UL * sizeof(GLfloat);
+    indexBytes = (MemorySize)mesh->indexCount * sizeof(GLushort);
+
+    /* Charged before anything is created, so a device that cannot afford the
+       mesh keeps its triangle rather than failing part way through. */
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_BUFFER, vertexBytes + indexBytes) ==
+        BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold this mesh");
+        return;
+    }
+    meshChargedBytes = vertexBytes + indexBytes;
+
+    vertexShader = compileShader(GL_VERTEX_SHADER, meshVertexShaderSource);
+    fragmentShader = compileShader(GL_FRAGMENT_SHADER, meshFragmentShaderSource);
+    if (vertexShader == 0U || fragmentShader == 0U)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+        return;
+    }
+
+    meshProgram = glCreateProgram();
+    glAttachShader(meshProgram, vertexShader);
+    glAttachShader(meshProgram, fragmentShader);
+    glLinkProgram(meshProgram);
+    glGetProgramiv(meshProgram, GL_LINK_STATUS, &linkStatus);
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    if (linkStatus == GL_FALSE)
+    {
+        platformLogMessage("render: the mesh program would not link");
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+        return;
+    }
+    shaderProgramCount += 1U;
+
+    meshPositionLocation = glGetAttribLocation(meshProgram, "vertexPosition");
+    meshNormalLocation = glGetAttribLocation(meshProgram, "vertexNormal");
+    meshMatrixLocation = glGetUniformLocation(meshProgram, "modelViewProjection");
+    meshLightLocation = glGetUniformLocation(meshProgram, "lightDirection");
+
+    /* Interleaved into scratch the arena gives back straight afterwards. The
+       driver copies it, so holding it any longer would be two of everything. */
+    marker = memoryArenaGetMarker(arena);
+    interleaved = (GLfloat *)memoryArenaAllocate(arena, vertexBytes, sizeof(GLfloat));
+    if (interleaved == NULL_POINTER)
+    {
+        platformLogMessage("render: not enough arena to stage the mesh");
+        memoryArenaRewindToMarker(arena, marker);
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+        return;
+    }
+    for (index = 0U; index < mesh->vertexCount; index++)
+    {
+        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
+        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
+        GLfloat *target = &interleaved[(MemorySize)index * 6UL];
+
+        target[0] = (GLfloat)position[0];
+        target[1] = (GLfloat)position[1];
+        target[2] = (GLfloat)position[2];
+        target[3] = (GLfloat)normal[0];
+        target[4] = (GLfloat)normal[1];
+        target[5] = (GLfloat)normal[2];
+    }
+
+    glGenBuffers(1, &meshVertexBuffer);
+    glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertexBytes, interleaved, GL_STATIC_DRAW);
+
+    glGenBuffers(1, &meshIndexBuffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, meshIndexBuffer);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)indexBytes, mesh->indices, GL_STATIC_DRAW);
+
+    memoryArenaRewindToMarker(arena, marker);
+
+    meshCameraFrame(&meshCamera, mesh);
+    meshIndexCount = (GLsizei)mesh->indexCount;
+    platformLogMessage("render: mesh uploaded to the OpenGL ES 2.0 backend");
+}
+
+/* The mesh is a closed solid seen from outside, so the far side is hidden by
+   the near one and the depth buffer sorts the rest. Enabled only while a mesh
+   is being drawn, so the placeholder triangle behaves exactly as it always
+   did. */
+static void drawMesh(Real32 elapsedSeconds)
+{
+    Real32 matrix[16];
+    Real32 light[3];
+    Real32 angle = elapsedSeconds * 0.6f;
+    const GLsizei vertexStride = (GLsizei)(6 * sizeof(GLfloat));
+
+    meshCameraBuildMatrix(&meshCamera, angle, viewportAspect, matrix);
+    meshCameraGetLightDirection(angle, light);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+
+    glUseProgram(meshProgram);
+    glUniformMatrix4fv(meshMatrixLocation, 1, GL_FALSE, matrix);
+    glUniform3f(meshLightLocation, light[0], light[1], light[2]);
+
+    glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, meshIndexBuffer);
+    glEnableVertexAttribArray((GLuint)meshPositionLocation);
+    glVertexAttribPointer((GLuint)meshPositionLocation, 3, GL_FLOAT, GL_FALSE, vertexStride,
+                          (const void *)0);
+    glEnableVertexAttribArray((GLuint)meshNormalLocation);
+    glVertexAttribPointer((GLuint)meshNormalLocation, 3, GL_FLOAT, GL_FALSE, vertexStride,
+                          (const void *)(3 * sizeof(GLfloat)));
+
+    glDrawElements(GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_SHORT, (const void *)0);
+
+    glDisableVertexAttribArray((GLuint)meshPositionLocation);
+    glDisableVertexAttribArray((GLuint)meshNormalLocation);
+    glDisable(GL_DEPTH_TEST);
 }
 
 void renderDrawFrame(Real32 elapsedSeconds)
@@ -298,16 +471,25 @@ void renderDrawFrame(Real32 elapsedSeconds)
     VICTORIA_PROFILE_ZONE_BEGIN("renderDrawFrame");
 
     glClearColor(0.06f, 0.07f, 0.11f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(shaderProgram);
-    glUniform1f(colorPulseLocation, colorPulse);
+    if (meshIndexCount > 0)
+    {
+        VICTORIA_PROFILE_ZONE_BEGIN("drawMesh");
+        drawMesh(elapsedSeconds);
+        VICTORIA_PROFILE_ZONE_END();
+    }
+    else
+    {
+        glUseProgram(shaderProgram);
+        glUniform1f(colorPulseLocation, colorPulse);
 
-    bindTriangleAttributes();
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+        bindTriangleAttributes();
+        glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    glDisableVertexAttribArray((GLuint)vertexPositionLocation);
-    glDisableVertexAttribArray((GLuint)vertexColorLocation);
+        glDisableVertexAttribArray((GLuint)vertexPositionLocation);
+        glDisableVertexAttribArray((GLuint)vertexColorLocation);
+    }
 
     VICTORIA_PROFILE_ZONE_END();
 }
@@ -324,6 +506,27 @@ void renderShutdown(void)
         graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, sizeof(triangleVertices));
         vertexBufferIsCharged = BOOLEAN_FALSE;
     }
+    if (meshVertexBuffer != 0)
+    {
+        glDeleteBuffers(1, &meshVertexBuffer);
+        meshVertexBuffer = 0;
+    }
+    if (meshIndexBuffer != 0)
+    {
+        glDeleteBuffers(1, &meshIndexBuffer);
+        meshIndexBuffer = 0;
+    }
+    if (meshChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+    }
+    if (meshProgram != 0)
+    {
+        glDeleteProgram(meshProgram);
+        meshProgram = 0;
+    }
+    meshIndexCount = 0;
     if (shaderProgram != 0)
     {
         glDeleteProgram(shaderProgram);
