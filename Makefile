@@ -35,6 +35,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
                   engine/source/geometryReader.c \
+                  engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
                   engine/source/discContent.c \
@@ -219,16 +220,24 @@ PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
 GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
 MESH_CAMERA_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyMeshCamera
+COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
-		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER)
+		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
+		$(COMPRESSION_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
 	@$(GEOMETRY_READER_VERIFIER)
 	@$(MESH_CAMERA_VERIFIER)
+	@$(COMPRESSION_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(COMPRESSION_VERIFIER): tests/verifyCompression.c engine/source/compression.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyCompression.c engine/source/compression.c \
+		$(VERIFIER_SUPPORT) -o $@
 
 $(MESH_CAMERA_VERIFIER): tests/verifyMeshCamera.c render/meshCamera.c \
 		engine/source/freestandingRuntime.c engine/source/geometryReader.c \

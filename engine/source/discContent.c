@@ -1,6 +1,7 @@
 #include "victoria/discContent.h"
 
 #include "utils/strings.h"
+#include "victoria/compression.h"
 #include "victoria/packageReader.h"
 
 /* Files larger than this are not opened looking for geometry. A retail
@@ -69,6 +70,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     Package package;
     const PackageResource *geometry;
     const Unsigned8 *geometryBytes;
+    MemorySize geometrySize;
     VirtualReadResult read;
 
     if (search->nextIndex >= search->fileSystem->entryCount)
@@ -114,11 +116,6 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     }
     search->packagesOpened++;
 
-    if (packageReaderHasCompressedResources(&package))
-    {
-        search->packagesCompressed++;
-    }
-
     geometry = packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMDC);
     if (geometry == NULL_POINTER)
     {
@@ -128,9 +125,41 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     search->packagesWithGeometry++;
 
     geometryBytes = packageReaderGetResourceBytes(&package, geometry);
+    geometrySize = (MemorySize)geometry->sizeInBytes;
+
+    /* Almost everything on a retail disc is stored compressed, so the bytes the
+       index points at are usually not the resource — they are a RefPack stream
+       that unpacks into it. Detected from the stream's own header rather than
+       from the package's directory resource: the header is on the thing being
+       read, which is the harder of the two to be wrong about. */
+    if (geometryBytes != NULL_POINTER && compressionLooksLikeRefPack(geometryBytes, geometrySize))
+    {
+        MemorySize decompressedSize = compressionGetDecompressedSize(geometryBytes, geometrySize);
+        Unsigned8 *unpacked =
+            (Unsigned8 *)memoryArenaAllocate(search->arena, decompressedSize, 8UL);
+        CompressionResult unpackResult;
+
+        search->packagesCompressed++;
+        if (unpacked == NULL_POINTER)
+        {
+            memoryArenaRewindToMarker(search->arena, attemptMarker);
+            return DISC_CONTENT_OUT_OF_ARENA;
+        }
+        unpackResult = compressionDecompressRefPack(unpacked, decompressedSize, geometryBytes,
+                                                    geometrySize, &decompressedSize);
+        if (unpackResult != COMPRESSION_OK)
+        {
+            search->geometryRefused++;
+            memoryArenaRewindToMarker(search->arena, attemptMarker);
+            return DISC_CONTENT_PENDING;
+        }
+        geometryBytes = unpacked;
+        geometrySize = decompressedSize;
+    }
+
     if (geometryBytes == NULL_POINTER ||
-        geometryReaderOpen(&search->mesh, geometryBytes, (MemorySize)geometry->sizeInBytes,
-                           search->arena) != GEOMETRY_READ_OK)
+        geometryReaderOpen(&search->mesh, geometryBytes, geometrySize, search->arena) !=
+            GEOMETRY_READ_OK)
     {
         search->geometryRefused++;
         memoryArenaRewindToMarker(search->arena, attemptMarker);
