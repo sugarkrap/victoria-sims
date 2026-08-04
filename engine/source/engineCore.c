@@ -308,9 +308,34 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         stringAppend(message, sizeof(message), " vertices, ");
         appendCount(message, sizeof(message), discSearch.mesh.indexCount / 3U);
         stringAppend(message, sizeof(message), " triangles, ");
+        appendCount(message, sizeof(message), discSearch.mesh.storedPrimitiveCount);
+        stringAppend(message, sizeof(message), " of ");
         appendCount(message, sizeof(message), discSearch.mesh.primitiveCount);
-        stringAppend(message, sizeof(message), " primitive(s) in the container");
+        stringAppend(message, sizeof(message), " primitive(s) drawn, from ");
+        appendCount(message, sizeof(message), discSearch.mesh.componentCount);
+        stringAppend(message, sizeof(message), " component(s)");
         platformLogMessage(message);
+
+        /* Each part by name. A model that arrives as one silhouette is hard to
+           tell from a model that arrived as one part, and the difference
+           matters as soon as materials do. */
+        if (discSearch.mesh.storedPrimitiveCount > 1U)
+        {
+            Unsigned32 part;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: parts —");
+            for (part = 0U; part < discSearch.mesh.storedPrimitiveCount; part++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message), discSearch.mesh.primitives[part].name);
+                stringAppend(message, sizeof(message), " (");
+                appendCount(message, sizeof(message),
+                            discSearch.mesh.primitives[part].indexCount / 3U);
+                stringAppend(message, sizeof(message), " triangles);");
+            }
+            platformLogMessage(message);
+        }
 
         renderSetMesh(&discSearch.mesh, globalArena);
         discLoadStatus = ENGINE_DISC_READY;

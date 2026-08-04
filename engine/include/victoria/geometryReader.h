@@ -19,9 +19,6 @@
  *   - Bone assignments and weights. A mesh comes back in its bind pose, which
  *     is the right thing to look at first and the wrong thing to animate.
  *   - Morph targets. Face shapes and body sliders live here.
- *   - Every primitive after the first. A model with separate parts — a bed's
- *     frame and its bedding — will draw only one of them, and says how many it
- *     found so a caller can tell that is what happened.
  *
  * The mesh's arrays are copied into the arena rather than pointed at the source
  * buffer. The buffer's floats are not aligned, and reading an unaligned float
@@ -71,6 +68,26 @@ typedef enum GeometryReadResult
 
 const char *geometryReadResultGetName(GeometryReadResult result);
 
+/* One named part of a model: a bed's frame as distinct from its bedding, or a
+ * Sim's body as distinct from the shadow under it.
+ *
+ * The file gives each primitive its own faces and points it at a component,
+ * which is the set of vertices it draws from. Different primitives may use
+ * different components, so the vertices are not one array in the file. They are
+ * merged into one here and the indices adjusted to match, which means a caller
+ * can draw the whole model in one call and still address a single part when it
+ * needs to — for a material, or to leave one out. */
+typedef struct GeometryPrimitive
+{
+    char name[GEOMETRY_NAME_LIMIT];
+    /* Which component the file said it draws from, kept for reporting: the
+       indices below already point into the merged arrays. */
+    Unsigned32 componentIndex;
+    /* Its range in the mesh's index array. */
+    Unsigned32 firstIndex;
+    Unsigned32 indexCount;
+} GeometryPrimitive;
+
 typedef struct GeometryMesh
 {
     char name[GEOMETRY_NAME_LIMIT];
@@ -88,9 +105,18 @@ typedef struct GeometryMesh
     const Unsigned16 *indices;
     Unsigned32 indexCount;
 
-    /* How many the file held, so a caller can say "showing 1 of 3" rather than
-     * quietly drawing part of a model. */
+    /* Every part of the model, in the order the file listed them. Their index
+     * ranges tile the mesh's index array, so drawing all of the indices draws
+     * all of the parts. */
+    const GeometryPrimitive *primitives;
+    /* How many the file held, and how many are in the array above. They differ
+     * when a primitive pointed at a component that does not exist, which is a
+     * file this reader will not invent vertices for. */
     Unsigned32 primitiveCount;
+    Unsigned32 storedPrimitiveCount;
+    /* How many components the vertices were merged from, so a caller can tell a
+     * one piece model from an assembled one. */
+    Unsigned32 componentCount;
 
     /* What the resource said about itself, filled in as soon as it is known and
        left set when the read then fails. A refusal that cannot say which

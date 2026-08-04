@@ -148,6 +148,94 @@ static void putIndexArray(Builder *builder, const Unsigned32 *values, Unsigned32
     }
 }
 
+static void putFloatElement(Builder *builder, Unsigned32 identifier, const Real32 *values,
+                            Unsigned32 vertexCount, Unsigned32 valuesPerVertex, Unsigned32 version)
+{
+    Unsigned32 index;
+
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, identifier);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, (valuesPerVertex == 2U) ? 1U : 2U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, vertexCount * valuesPerVertex * 4U);
+    for (index = 0U; index < vertexCount * valuesPerVertex; index++)
+    {
+        putReal32(builder, values[index]);
+    }
+    putIndexArray(builder, NULL_POINTER, 0U, version);
+}
+
+static void putComponent(Builder *builder, const Unsigned32 *elementIndices, Unsigned32 elementCount,
+                         Unsigned32 vertexCount, Unsigned32 version)
+{
+    putIndexArray(builder, elementIndices, elementCount, version);
+    putUnsigned32(builder, vertexCount);
+    putUnsigned32(builder, 0U);
+    putIndexArray(builder, NULL_POINTER, 0U, version);
+    putIndexArray(builder, NULL_POINTER, 0U, version);
+    putIndexArray(builder, NULL_POINTER, 0U, version);
+}
+
+static void putPrimitive(Builder *builder, Unsigned32 componentIndex, const char *name,
+                         const Unsigned32 *faces, Unsigned32 faceCount, Unsigned32 version)
+{
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, componentIndex);
+    putString(builder, name);
+    putIndexArray(builder, faces, faceCount, version);
+    putUnsigned32(builder, 0U); /* draw order */
+    if (version > 1U)
+    {
+        putIndexArray(builder, NULL_POINTER, 0U, version);
+    }
+}
+
+/* Two components with vertices of their own and three primitives, one of which
+   names a component that is not there. What an assembled model looks like. */
+static void buildTwoPartContainer(Builder *builder, Unsigned32 blockVersion)
+{
+    static const Real32 framePositions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    static const Real32 frameNormals[9] = { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f };
+    /* Ten units along x, so the bounding box says plainly whether these arrived. */
+    static const Real32 beddingPositions[12] = { 10.0f, 0.0f, 0.0f, 11.0f, 0.0f, 0.0f,
+                                                 10.0f, 1.0f, 0.0f, 11.0f, 1.0f, 0.0f };
+    static const Real32 beddingNormals[12] = { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                                               0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f };
+    static const Unsigned32 frameElements[2] = { 0U, 1U };
+    static const Unsigned32 beddingElements[2] = { 2U, 3U };
+    static const Unsigned32 frameFaces[3] = { 0U, 1U, 2U };
+    /* Numbered from zero within their own component, as the file does it. */
+    static const Unsigned32 beddingFaces[6] = { 0U, 1U, 2U, 1U, 3U, 2U };
+
+    builder->length = 0UL;
+
+    putUnsigned32(builder, 0xFFFF0001UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 1U);
+    putUnsigned32(builder, 0xAC4F8687UL);
+
+    putTypeInformation(builder, "cGeometryDataContainer", 0xAC4F8687UL, blockVersion);
+    putTypeInformation(builder, "cSGResource", 0xACE46235UL, 2U);
+    putString(builder, "bed_tslocator_gmdc");
+
+    putUnsigned32(builder, 4U);
+    putFloatElement(builder, 0x5B830781UL, framePositions, 3U, 3U, blockVersion);
+    putFloatElement(builder, 0x3B83078BUL, frameNormals, 3U, 3U, blockVersion);
+    putFloatElement(builder, 0x5B830781UL, beddingPositions, 4U, 3U, blockVersion);
+    putFloatElement(builder, 0x3B83078BUL, beddingNormals, 4U, 3U, blockVersion);
+
+    putUnsigned32(builder, 2U);
+    putComponent(builder, frameElements, 2U, 3U, blockVersion);
+    putComponent(builder, beddingElements, 2U, 4U, blockVersion);
+
+    putUnsigned32(builder, 3U);
+    putPrimitive(builder, 0U, "frame", frameFaces, 3U, blockVersion);
+    putPrimitive(builder, 1U, "bedding", beddingFaces, 6U, blockVersion);
+    /* Names a component that does not exist. */
+    putPrimitive(builder, 9U, "ghost", frameFaces, 3U, blockVersion);
+}
+
 /* Elements the reader does not use, to push the count past any ceiling. Tangents
    are real and ignored, which makes them the honest thing to pad with. */
 static void putIgnoredElement(Builder *builder, Unsigned32 version)
@@ -222,11 +310,23 @@ static void buildContainer(Builder *builder, Unsigned32 blockVersion, Unsigned32
     putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
     putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
 
+    /* A primitive is six fields, not four: a type, the component it draws from,
+       a name, its faces, the order it is drawn in among transparent parts, and
+       the bone indices it remaps. This fixture used to write the first four,
+       which matched a reader that only ever looked at primitive zero and so
+       never had to find primitive one. Both were wrong in the same way, which
+       is the failure mode of writing a fixture from the same understanding as
+       the code it checks. */
     putUnsigned32(builder, 1U); /* one primitive */
-    putUnsigned32(builder, 0U);
-    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U); /* type */
+    putUnsigned32(builder, 0U); /* the component it draws from */
     putString(builder, "body");
     putIndexArray(builder, faces, 3U, blockVersion);
+    putUnsigned32(builder, 0U); /* draw order */
+    if (blockVersion > 1U)
+    {
+        putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    }
 }
 
 int main(void)
@@ -401,6 +501,89 @@ int main(void)
                           nearly(maximum[0], 1.0f) && nearly(maximum[1], 2.0f) &&
                               nearly(maximum[2], 0.0f));
             }
+        }
+    }
+
+    printf("\n-- a model in two parts --\n");
+    {
+        static Builder builder;
+        GeometryMesh model;
+
+        /* Two components with separate vertex arrays, and three primitives: one
+           per component plus one naming a component that is not there. This is
+           the shape of a real assembled model — a bed's frame and its bedding —
+           and the case the reader used to answer by drawing the first part and
+           reporting the count of the rest. */
+        buildTwoPartContainer(&builder, 4U);
+        result = geometryReaderOpen(&model, builder.bytes, builder.length, &arena);
+        checkThat(&failureCount, "reads a container in two parts", result == GEOMETRY_READ_OK);
+        if (result != GEOMETRY_READ_OK)
+        {
+            printf("  result: %s\n", geometryReadResultGetName(result));
+            return checkSummarize(failureCount, "geometry reader");
+        }
+
+        checkThat(&failureCount, "reports two components", model.componentCount == 2U);
+        checkThat(&failureCount, "and the three primitives the file held",
+                  model.primitiveCount == 3U);
+        /* The third names component nine, which does not exist. Dropped rather
+           than pointed at component zero, which would put one part's faces onto
+           another part's vertices and look almost right. */
+        checkThat(&failureCount, "keeping the two that name a real component",
+                  model.storedPrimitiveCount == 2U);
+
+        checkThat(&failureCount, "merging both vertex arrays", model.vertexCount == 7U);
+        checkThat(&failureCount, "and both face arrays", model.indexCount == 9U);
+        checkThat(&failureCount, "naming the first part frame",
+                  stringEquals(model.primitives[0].name, "frame"));
+        checkThat(&failureCount, "and the second bedding",
+                  stringEquals(model.primitives[1].name, "bedding"));
+
+        printf("\n-- do the parts tile the index array --\n");
+        checkThat(&failureCount, "the first part starts at the beginning",
+                  model.primitives[0].firstIndex == 0U && model.primitives[0].indexCount == 3U);
+        checkThat(&failureCount, "the second picks up where it left off",
+                  model.primitives[1].firstIndex == 3U && model.primitives[1].indexCount == 6U);
+
+        printf("\n-- are the second part's indices moved to match --\n");
+        {
+            Unsigned32 inner;
+            Boolean firstInRange = BOOLEAN_TRUE;
+            Boolean secondMoved = BOOLEAN_TRUE;
+
+            /* The file numbers each part's faces from zero. Merged into one
+               array they have to be shifted, or the bedding draws itself on the
+               frame's vertices. */
+            for (inner = 0U; inner < 3U; inner++)
+            {
+                if (model.indices[inner] >= 3U)
+                {
+                    firstInRange = BOOLEAN_FALSE;
+                }
+            }
+            for (inner = 3U; inner < 9U; inner++)
+            {
+                if (model.indices[inner] < 3U || model.indices[inner] >= 7U)
+                {
+                    secondMoved = BOOLEAN_FALSE;
+                }
+            }
+            checkThat(&failureCount, "the first part's indices address its own vertices",
+                      firstInRange);
+            checkThat(&failureCount, "and the second part's are shifted past them", secondMoved);
+        }
+
+        printf("\n-- did the second part's vertices actually arrive --\n");
+        {
+            Real32 minimum[3];
+            Real32 maximum[3];
+
+            /* The second component sits ten units along x. If only the first
+               had been read the box would stop at one, which is exactly what
+               the old reader produced and called a model. */
+            geometryMeshGetBounds(&model, minimum, maximum);
+            checkThat(&failureCount, "the box spans both parts",
+                      nearly(minimum[0], 0.0f) && nearly(maximum[0], 11.0f));
         }
     }
 
