@@ -37,6 +37,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/resourceCollection.c engine/source/geometryReader.c \
                   engine/source/scenegraph.c engine/source/resourceNode.c \
                   engine/source/textureReader.c engine/source/textureDecode.c \
+                  engine/source/material.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -255,11 +256,11 @@ $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
-		engine/source/textureDecode.c engine/source/resourceCollection.c \
+		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyTexture.c engine/source/textureReader.c \
-		engine/source/textureDecode.c engine/source/resourceCollection.c \
+		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
 		$(VERIFIER_SUPPORT) -o $@
 

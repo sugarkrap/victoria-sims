@@ -4,7 +4,9 @@
 #include "victoria/coreTypes.h"
 #include "victoria/geometryReader.h"
 #include "victoria/memoryArena.h"
+#include "victoria/material.h"
 #include "victoria/resourceNode.h"
+#include "victoria/textureReader.h"
 #include "victoria/scenegraph.h"
 #include "victoria/virtualFileSystem.h"
 
@@ -67,6 +69,17 @@ typedef struct DiscContentSearch
     ResourceNodeDescription modelTree;
     Boolean modelHasTree;
     Unsigned32 modelNodeIndex;
+
+    /* The material the model's first part wears, and the texture that material
+       paints with. Both are found by name — nothing in this chain is numbered —
+       so a missing one means a name that did not match, not a broken file.
+
+       The texture's bytes point into the arena, so they are only valid while
+       the found package's allocation stands. */
+    char materialName[RESOURCE_NAME_LIMIT];
+    Boolean materialFound;
+    Boolean textureFound;
+    TextureDescription texture;
 
     /* What the search met on the way, so a report can be specific. */
     Unsigned32 packagesOpened;

@@ -43,6 +43,9 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesWithTrees = 0U;
     search->modelHasTree = BOOLEAN_FALSE;
     search->modelNodeIndex = 0U;
+    search->materialName[0] = '\0';
+    search->materialFound = BOOLEAN_FALSE;
+    search->textureFound = BOOLEAN_FALSE;
     search->modelsResolved = 0U;
     search->modelName[0] = '\0';
     search->foundThroughScenegraph = BOOLEAN_FALSE;
@@ -189,11 +192,106 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     {
         search->modelName[0] = '\0';
         stringAppend(search->modelName, RESOURCE_NAME_LIMIT, shape.resourceName);
+        /* Kept before the shape's bytes are given back. The material is looked
+           up later, once the geometry has been read and the arena is settled. */
+        search->materialName[0] = '\0';
+        if (shape.storedMaterialCount > 0U)
+        {
+            stringAppend(search->materialName, RESOURCE_NAME_LIMIT, shape.materials[0].materialName);
+        }
     }
     /* The shape's own bytes are done with either way; the container is found by
      * index entry, which outlives them. */
     memoryArenaRewindToMarker(search->arena, marker);
     return geometry;
+}
+
+/* The material a part wears, and the texture it paints with.
+ *
+ * Every hop here is a string. A part wearing "ufocrash_cabin" wants the
+ * resource named "ufocrash_cabin_txmt", which names a texture "ufocrash-cabin",
+ * which lives in "ufocrash-cabin_txtr". Nothing is numbered, so a miss means a
+ * name that did not match rather than a file that would not read — worth
+ * keeping separate, because they call for opposite fixes.
+ *
+ * Called only once a package has been settled on, so what it allocates stays:
+ * the texture's bytes are pointed at, not copied. */
+static void findTextureForMaterial(DiscContentSearch *search, const Package *package)
+{
+    char wanted[RESOURCE_NAME_LIMIT];
+    MaterialDescription material;
+    Unsigned32 index;
+
+    search->materialFound = BOOLEAN_FALSE;
+    search->textureFound = BOOLEAN_FALSE;
+    if (search->materialName[0] == '\0')
+    {
+        return;
+    }
+
+    materialBuildResourceName(wanted, sizeof(wanted), search->materialName, "_txmt");
+    for (index = 0U; index < package->resourceCount && !search->materialFound; index++)
+    {
+        const PackageResource *candidate = &package->resources[index];
+        MemorySize marker;
+        const Unsigned8 *materialBytes;
+        MemorySize materialSize;
+        Boolean compressed;
+
+        if (candidate->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_TXMT)
+        {
+            continue;
+        }
+        marker = memoryArenaGetMarker(search->arena);
+        materialBytes =
+            scenegraphReadResourceBytes(search->arena, package, candidate, &materialSize, &compressed);
+        if (materialBytes != NULL_POINTER &&
+            materialRead(&material, materialBytes, materialSize) == MATERIAL_READ_OK &&
+            stringEquals(material.resourceName, wanted))
+        {
+            search->materialFound = BOOLEAN_TRUE;
+        }
+        /* The description is copied out by value, so its bytes are done with
+         * either way and a material that did not match costs nothing. */
+        memoryArenaRewindToMarker(search->arena, marker);
+    }
+    if (!search->materialFound || material.baseTextureName[0] == '\0')
+    {
+        return;
+    }
+
+    materialBuildResourceName(wanted, sizeof(wanted), material.baseTextureName, "_txtr");
+    for (index = 0U; index < package->resourceCount && !search->textureFound; index++)
+    {
+        const PackageResource *candidate = &package->resources[index];
+        MemorySize marker;
+        const Unsigned8 *textureBytes;
+        MemorySize textureSize;
+        Boolean compressed;
+        TextureDescription texture;
+
+        if (candidate->key.typeIdentifier != (Unsigned32)PACKAGE_TYPE_TXTR)
+        {
+            continue;
+        }
+        marker = memoryArenaGetMarker(search->arena);
+        textureBytes =
+            scenegraphReadResourceBytes(search->arena, package, candidate, &textureSize, &compressed);
+        if (textureBytes != NULL_POINTER &&
+            textureReaderOpen(&texture, textureBytes, textureSize) == TEXTURE_READ_OK &&
+            stringEquals(texture.resourceName, wanted))
+        {
+            /* Kept, so its bytes must be kept too: the description points into
+             * them rather than owning them. This is the one place here that
+             * deliberately does not rewind. */
+            search->texture = texture;
+            search->textureFound = BOOLEAN_TRUE;
+        }
+        else
+        {
+            memoryArenaRewindToMarker(search->arena, marker);
+        }
+    }
 }
 
 DiscContentStatus discContentStep(DiscContentSearch *search)
@@ -335,6 +433,8 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
             return DISC_CONTENT_PENDING;
         }
     }
+
+    findTextureForMaterial(search, &package);
 
     search->packagePath[0] = '\0';
     stringAppend(search->packagePath, DISC_CONTENT_PATH_LIMIT, entry->path);

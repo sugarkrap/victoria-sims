@@ -347,6 +347,47 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
         }
 
+        /* The material and its texture. Nothing samples it yet, so this reports
+           what was found rather than what is on screen — but a name that failed
+           to match and a file that would not read are different problems, and
+           this is where the difference shows. */
+        if (discSearch.materialName[0] != '\0')
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: material ");
+            stringAppend(message, sizeof(message), discSearch.materialName);
+            if (!discSearch.materialFound)
+            {
+                stringAppend(message, sizeof(message), " — no _txmt of that name in the package");
+            }
+            else if (!discSearch.textureFound)
+            {
+                stringAppend(message, sizeof(message), " — read, but its texture is not here");
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), " — texture ");
+                stringAppend(message, sizeof(message), discSearch.texture.resourceName);
+                stringAppend(message, sizeof(message), " ");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.width);
+                stringAppend(message, sizeof(message), "x");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.height);
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message),
+                             textureFormatGetName(discSearch.texture.format));
+                stringAppend(message, sizeof(message), ", level ");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
+                stringAppend(message, sizeof(message), "x");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
+                if (discSearch.texture.largestIsElsewhere)
+                {
+                    stringAppend(message, sizeof(message), ", top level in ");
+                    stringAppend(message, sizeof(message), discSearch.texture.lifoName);
+                }
+            }
+            platformLogMessage(message);
+        }
+
         /* Each part by name. A model that arrives as one silhouette is hard to
            tell from a model that arrived as one part, and the difference
            matters as soon as materials do. */

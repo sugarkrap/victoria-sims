@@ -22,6 +22,7 @@
 #include "utils/strings.h"
 #include "victoria/memoryArena.h"
 #include "victoria/packageReader.h"
+#include "victoria/material.h"
 #include "victoria/textureDecode.h"
 #include "victoria/textureReader.h"
 
@@ -211,15 +212,90 @@ int main(void)
         checkThat(&failureCount, "writing only the four pixels that exist", pixels[8] == 255U);
     }
 
+    printf("\n-- the material, and the name it gives its texture --\n");
+    {
+        /* A shape says a part wears "ufocrash_cabin". Nothing numbers these:
+           the whole hop is spelling. The material lives in the resource named
+           for it with _txmt on the end, and names its texture in a property,
+           which in turn lives in a resource with _txtr on the end. */
+        Package materialPackage;
+        MaterialDescription material;
+        const PackageResource *resource;
+        MaterialReadResult result;
+        MemorySize materialSize;
+        char expected[RESOURCE_NAME_LIMIT];
+
+        inputFile = fopen("testAssets/scenegraph/material_definition.package", "rb");
+        if (inputFile == NULL)
+        {
+            printf("FAIL  cannot open the material fixture\n");
+            return checkSummarize(failureCount + 1, "texture");
+        }
+        materialSize = (MemorySize)fread(fileBuffer, 1, FILE_BUFFER_CAPACITY, inputFile);
+        fclose(inputFile);
+
+        if (packageReaderOpen(&materialPackage, fileBuffer, materialSize, &arena) != PACKAGE_READ_OK)
+        {
+            printf("FAIL  the material fixture would not open\n");
+            return checkSummarize(failureCount + 1, "texture");
+        }
+        resource = packageReaderFindFirstOfType(&materialPackage, (Unsigned32)PACKAGE_TYPE_TXMT);
+        checkThat(&failureCount, "the fixture holds a material", resource != NULL_POINTER);
+        if (resource == NULL_POINTER)
+        {
+            return checkSummarize(failureCount, "texture");
+        }
+
+        result = materialRead(&material, packageReaderGetResourceBytes(&materialPackage, resource),
+                              (MemorySize)resource->sizeInBytes);
+        checkThat(&failureCount, "the material reader accepts it", result == MATERIAL_READ_OK);
+        if (result != MATERIAL_READ_OK)
+        {
+            printf("  result: %s\n", materialReadResultGetName(result));
+            return checkSummarize(failureCount, "texture");
+        }
+
+        checkThat(&failureCount, "at block version 11", material.blockVersion == 11U);
+        checkThat(&failureCount, "named ufocrash_cabin_txmt",
+                  stringEquals(material.resourceName, "ufocrash_cabin_txmt"));
+        /* This is the name a shape's material binding uses, and it is the
+           resource name without its suffix rather than a separate identifier. */
+        checkThat(&failureCount, "which a shape refers to as ufocrash_cabin",
+                  stringEquals(material.materialName, "ufocrash_cabin"));
+        checkThat(&failureCount, "a standard material",
+                  stringEquals(material.definitionType, "StandardMaterial"));
+
+        /* Forty properties in this material and one of them matters. Reading
+           the wrong one, or losing count part way through the list, lands on a
+           culling mode or an animation waveform rather than a texture. */
+        checkThat(&failureCount, "naming its base texture ufocrash-cabin",
+                  stringEquals(material.baseTextureName, "ufocrash-cabin"));
+        checkThat(&failureCount, "and listing exactly one texture", material.textureCount == 1U);
+        checkThat(&failureCount, "which is the same one",
+                  stringEquals(material.textureNames[0], "ufocrash-cabin"));
+
+        materialBuildResourceName(expected, sizeof(expected), material.baseTextureName, "_txtr");
+        checkThat(&failureCount, "so the texture it wants is ufocrash-cabin_txtr",
+                  stringEquals(expected, "ufocrash-cabin_txtr"));
+        materialBuildResourceName(expected, sizeof(expected), "ufocrash_cabin", "_txmt");
+        checkThat(&failureCount, "and the material a shape asks for is ufocrash_cabin_txmt",
+                  stringEquals(expected, "ufocrash_cabin_txmt"));
+    }
+
     printf("\n-- refusing what it should --\n");
     {
         TextureDescription texture;
         static const Unsigned8 notAResource[16] = { 0 };
         static const Unsigned8 block[8] = { 0 };
 
+        MaterialDescription material;
+
         checkThat(&failureCount, "rejects bytes that are not a collection",
                   textureReaderOpen(&texture, notAResource, sizeof(notAResource)) ==
                       TEXTURE_READ_NOT_A_RESOURCE);
+        checkThat(&failureCount, "a material reader refuses them too",
+                  materialRead(&material, notAResource, sizeof(notAResource)) ==
+                      MATERIAL_READ_NOT_A_RESOURCE);
         checkThat(&failureCount, "refuses to decode into somewhere too small",
                   textureDecodeLevel(pixels, 16UL, block, sizeof(block), TEXTURE_FORMAT_DXT1, 4, 4) ==
                       TEXTURE_DECODE_DESTINATION_TOO_SMALL);
