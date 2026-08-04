@@ -56,7 +56,8 @@ These two are settled. They are the minimum, not the finish line.
 
 | Target | Graphics | Notes |
 | --- | --- | --- |
-| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv4 and up, EABI and OABI. Kernels as old as 2.4. |
+| Linux | OpenGL ES 2.0 via EGL + X11 | ARMv5TE and up, EABI and OABI. Kernels as old as 2.4. |
+| Linux | Software rasterizer via X11 | Same, for hardware with no programmable shaders. |
 | WebAssembly | WebGPU, no wrapper library | `wasm32`, freestanding, no Emscripten. |
 
 ### The device ladder
@@ -69,14 +70,19 @@ VFPv3 and NEON, so `make armv7` builds `softfp` with NEON enabled — *soft*fp,
 not hard float, because that machine's userland is armel and predates armhf
 entirely.
 
-**The floor is the old handhelds**, the HP iPAQ family among them, and it is
-not going away. That family spans two architectures:
+**The floor is ARMv5TE**, and it is not going away. Concretely: handhelds whose
+graphics is an Intel 2700G or an NVIDIA GoForce, which in practice means the
+PXA27x-era machines such as the Dell Axim X50v/X51v and the HP iPAQ hx4700.
+Their userlands are frequently pre-EABI, which is what `make oabi` is for.
+ARMv4 StrongARM machines are below the floor and not a target.
 
-* StrongARM SA-1110 models (h3600, h3800) are **ARMv4** — build with
-  `make armv5 ARM_ARCHITECTURE=armv4t`.
-* PXA25x/27x models (h3900, h5500, hx4700) are ARMv5TE, the default.
-
-Those userlands are frequently pre-EABI, which is what `make oabi` is for.
+Those two graphics parts matter for more than their age. **Both are OpenGL
+ES 1.x class**: the 2700G is PowerVR MBX Lite, and the GoForce 5500's
+programmable pixel shading is reachable only through proprietary NVIDIA
+extensions. Neither can run a GLSL ES 1.00 shader, so neither can run the
+OpenGL ES 2.0 backend at all. That is why the software renderer exists, and why
+it is not a fallback of last resort but the expected backend at the bottom of
+the ladder.
 
 The Sharp Zaurus SL-C760 that [piko](https://github.com/sugarkrap/piko) targets
 is explicitly **not** a goal: 64 MB of RAM is half the ceiling, so the engine
@@ -243,6 +249,59 @@ very different amounts of trust.
 abort the resource, not be logged and ignored. Releases are clamped rather than
 trusted, so a double release cannot wrap the counter and make the ledger read
 as almost entirely free.
+
+## The software renderer
+
+`render/software/`. Not a fallback of last resort — the expected backend at the
+bottom of the device ladder, where the graphics hardware has no programmable
+shaders at all.
+
+Selected at build time, `make linux RENDER_BACKEND=software`, deliberately not
+at run time: a machine with no usable OpenGL ES 2.0 driver should not have to
+link `libEGL` and `libGLESv2` merely to discover it cannot use them. The
+software build links `libX11` and nothing else, and continuous integration
+fails if a GL library ever appears in its `ldd` output.
+
+Presentation is split behind `platform/linux/linuxPresenter.h` so the entry
+point does not care which backend is running: EGL swaps buffers, software blits
+with `XPutImage`. The image borrows the engine's framebuffer rather than
+copying it, so presenting is one blit with no conversion — which is also why it
+must never be handed to `XDestroyImage` while still holding that pointer.
+
+The framebuffer is reserved once from the arena at the maximum supported size
+and never grows; a resize past it clamps. There is no allocator to grow with,
+and pretending otherwise is how the no-allocation rule gets quietly broken.
+Note that it is charged to the *system* arena, not to the graphics ledger:
+under software rendering it really is ordinary memory, and counting it in both
+places would make both wrong.
+
+Both windings are drawn. OpenGL ES leaves face culling disabled unless asked,
+so the shader backends draw a back-facing triangle and the software path has to
+agree — a signed-area early-out that rejects one winding is a bug, not an
+optimisation.
+
+## Assembly and NEON
+
+The rasterizer's span fill is the first thing in this project to earn hand
+vectorisation, and it sets the pattern for anything that follows.
+
+* **The portable C path is not optional.** Nothing below ARMv7 has NEON, and
+  that is most of the device ladder. `rasterizer.c` and `rasterizerNEON.c`
+  compile each other out, so exactly one is ever linked.
+* **The contract is byte-identical output, not approximately equal.** Both
+  paths use the same 16.16 fixed point, the same arithmetic shift, and the same
+  clamp. Continuous integration renders the same scene with each, under
+  `qemu-arm-static`, and compares the results byte for byte.
+* **Fixed point, not floating point**, because the floor of the ladder has no
+  floating point unit and a per-pixel float multiply there is a library call.
+* The vector loop's tail is recomputed from the span start rather than read out
+  of the vector registers, so the remainder cannot drift from the scalar
+  result.
+
+Measured on the span fill inner loop: 12 instructions per pixel portable
+against 4.25 per pixel with NEON, so 2.82× fewer. That is a static instruction
+count, which is an honest thing to claim; a throughput figure needs real
+hardware and nobody has run this on any.
 
 ## Shaders
 

@@ -19,23 +19,27 @@ constraints that currently govern the code.
 
 ```sh
 make linux    # native OpenGL ES 2.0 build
+make linux RENDER_BACKEND=software   # no GL at all, for pre-shader hardware
 make web      # WebAssembly + WebGPU build
 make armv7    # Cortex-A8 with NEON, the reference handheld
-make armv5    # the portability floor (ARM_ARCHITECTURE=armv4t for StrongARM)
+make armv5    # the ARMv5TE portability floor
 make oabi     # the same, as genuine ARM old-ABI
+make verify   # rasterizer checks
 make check    # enforce the no-dynamic-allocation rule
 ```
 
 The machine this is meant to run on is the Sharp NetWalker PC-Z1 — i.MX515
-Cortex-A8, 512 MB of RAM, Ubuntu 9.04. Older ARM handhelds such as the HP iPAQ
-family remain the supported floor, which is why the old-ABI target exists.
+Cortex-A8, 512 MB of RAM, Ubuntu 9.04. ARMv5TE handhelds remain the supported
+floor, which is why the old-ABI target exists. Their graphics hardware — Intel
+2700G, NVIDIA GoForce — is OpenGL ES 1.x class and cannot run shaders at all,
+so those machines use the software renderer.
 
 ## Status
 
-Early. Both targets build and draw a triangle, and there is a hierarchical
-frame profiler that reports zone timings alongside arena usage — printed to the
-terminal on Linux, shown as an overlay on the web. There is no gameplay and no
-asset loading yet.
+Early. Three renderers — OpenGL ES 2.0, WebGPU, and a software rasterizer with
+a NEON path — all drawing the same triangle, plus a hierarchical frame profiler
+reporting zone timings alongside arena and graphics memory usage. There is no
+gameplay and no asset loading yet.
 
 ## Assets
 

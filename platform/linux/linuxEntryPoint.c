@@ -1,10 +1,10 @@
-#include <EGL/egl.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <stdio.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "platform/linux/linuxPresenter.h"
 #include "victoria/engineCore.h"
 #include "victoria/freestandingRuntime.h"
 #include "victoria/memoryBudget.h"
@@ -19,9 +19,6 @@ typedef struct LinuxWindowState
     Display *displayConnection;
     Window windowHandle;
     Atom deleteWindowAtom;
-    EGLDisplay displayEGL;
-    EGLSurface surfaceEGL;
-    EGLContext contextEGL;
     Unsigned32 widthInPixels;
     Unsigned32 heightInPixels;
     Unsigned64 profilerReportIntervalMicroseconds;
@@ -85,22 +82,6 @@ static void printProfilerReportPeriodically(void)
 
 static Boolean createWindowAndContext(void)
 {
-    static const EGLint configurationAttributes[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_DEPTH_SIZE, 16,
-        EGL_NONE
-    };
-    static const EGLint contextAttributes[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
-
-    EGLConfig chosenConfiguration;
-    EGLint matchingConfigurationCount = 0;
     Window rootWindow;
     XSetWindowAttributes windowAttributes;
 
@@ -126,78 +107,22 @@ static Boolean createWindowAndContext(void)
     windowState.deleteWindowAtom = XInternAtom(windowState.displayConnection, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(windowState.displayConnection, windowState.windowHandle, &windowState.deleteWindowAtom, 1);
 
-    windowState.displayEGL = eglGetDisplay((EGLNativeDisplayType)windowState.displayConnection);
-    if (windowState.displayEGL == EGL_NO_DISPLAY)
-    {
-        platformLogMessage("platform: no EGL display available");
-        return BOOLEAN_FALSE;
-    }
-
-    if (eglInitialize(windowState.displayEGL, NULL_POINTER, NULL_POINTER) == EGL_FALSE)
-    {
-        platformLogMessage("platform: eglInitialize failed");
-        return BOOLEAN_FALSE;
-    }
-
-    eglBindAPI(EGL_OPENGL_ES_API);
-
-    if (eglChooseConfig(windowState.displayEGL, configurationAttributes, &chosenConfiguration, 1,
-                        &matchingConfigurationCount) == EGL_FALSE ||
-        matchingConfigurationCount == 0)
-    {
-        platformLogMessage("platform: no matching EGL configuration");
-        return BOOLEAN_FALSE;
-    }
-
-    windowState.surfaceEGL = eglCreateWindowSurface(windowState.displayEGL, chosenConfiguration,
-                                                    (EGLNativeWindowType)windowState.windowHandle,
-                                                    NULL_POINTER);
-    if (windowState.surfaceEGL == EGL_NO_SURFACE)
-    {
-        platformLogMessage("platform: eglCreateWindowSurface failed");
-        return BOOLEAN_FALSE;
-    }
-
-    windowState.contextEGL = eglCreateContext(windowState.displayEGL, chosenConfiguration, EGL_NO_CONTEXT,
-                                              contextAttributes);
-    if (windowState.contextEGL == EGL_NO_CONTEXT)
-    {
-        platformLogMessage("platform: eglCreateContext failed");
-        return BOOLEAN_FALSE;
-    }
-
-    if (eglMakeCurrent(windowState.displayEGL, windowState.surfaceEGL, windowState.surfaceEGL,
-                       windowState.contextEGL) == EGL_FALSE)
-    {
-        platformLogMessage("platform: eglMakeCurrent failed");
-        return BOOLEAN_FALSE;
-    }
-
     windowState.widthInPixels = WINDOW_INITIAL_WIDTH;
     windowState.heightInPixels = WINDOW_INITIAL_HEIGHT;
-    return BOOLEAN_TRUE;
+
+    return linuxPresenterCreate(windowState.displayConnection, windowState.windowHandle,
+                                windowState.widthInPixels, windowState.heightInPixels);
 }
 
 static void destroyWindowAndContext(void)
 {
-    if (windowState.displayEGL != EGL_NO_DISPLAY)
-    {
-        eglMakeCurrent(windowState.displayEGL, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (windowState.contextEGL != EGL_NO_CONTEXT)
-        {
-            eglDestroyContext(windowState.displayEGL, windowState.contextEGL);
-        }
-        if (windowState.surfaceEGL != EGL_NO_SURFACE)
-        {
-            eglDestroySurface(windowState.displayEGL, windowState.surfaceEGL);
-        }
-        eglTerminate(windowState.displayEGL);
-    }
+    linuxPresenterDestroy();
 
     if (windowState.displayConnection != NULL_POINTER)
     {
         XDestroyWindow(windowState.displayConnection, windowState.windowHandle);
         XCloseDisplay(windowState.displayConnection);
+        windowState.displayConnection = NULL_POINTER;
     }
 }
 
@@ -217,6 +142,7 @@ static void pumpWindowEvents(void)
             {
                 windowState.widthInPixels = (Unsigned32)event.xconfigure.width;
                 windowState.heightInPixels = (Unsigned32)event.xconfigure.height;
+                linuxPresenterResize(windowState.widthInPixels, windowState.heightInPixels);
                 engineResize(windowState.widthInPixels, windowState.heightInPixels);
             }
             break;
@@ -362,9 +288,6 @@ int main(int argumentCount, char **argumentValues)
     }
 
     windowState.displayConnection = NULL_POINTER;
-    windowState.displayEGL = EGL_NO_DISPLAY;
-    windowState.surfaceEGL = EGL_NO_SURFACE;
-    windowState.contextEGL = EGL_NO_CONTEXT;
     windowState.shouldQuit = BOOLEAN_FALSE;
 
     if (createWindowAndContext() == BOOLEAN_FALSE)
@@ -376,6 +299,8 @@ int main(int argumentCount, char **argumentValues)
     configuration.widthInPixels = windowState.widthInPixels;
     configuration.heightInPixels = windowState.heightInPixels;
     configuration.graphicsMemoryLimitBytes = graphicsMemoryLimitBytes;
+
+    platformLogMessage(linuxPresenterGetName());
 
     if (engineInitialize(&configuration) == BOOLEAN_FALSE)
     {
@@ -396,7 +321,7 @@ int main(int argumentCount, char **argumentValues)
         /* Almost always the whole frame: with vertical sync on, this is where
            the wait for the display lands. */
         VICTORIA_PROFILE_ZONE_BEGIN("platformPresent");
-        eglSwapBuffers(windowState.displayEGL, windowState.surfaceEGL);
+        linuxPresenterPresent();
         VICTORIA_PROFILE_ZONE_END();
 
         engineEndFrame();

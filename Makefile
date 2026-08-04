@@ -5,6 +5,7 @@
 #   make armv5    ARMv5TE cross build of the portable engine core (EABI)
 #   make oabi     the same, built as genuine ARM OABI
 #   make armv7    Cortex-A8 with NEON, the reference handheld
+#   make verify   run the rasterizer checks on the host
 #   make check    static enforcement of the no-dynamic-allocation rule
 #   make clean
 #
@@ -17,7 +18,7 @@ ARM_COMPILER ?= arm-linux-gnueabi-gcc
 ARCHIVER ?= ar
 
 BUILD_DIRECTORY ?= build
-INCLUDE_FLAGS := -Iengine/include
+INCLUDE_FLAGS := -Iengine/include -I.
 
 WARNING_FLAGS := -Wall -Wextra -Wshadow -Wstrict-prototypes -Wmissing-prototypes \
                  -Wpointer-arith -Wcast-qual -Wwrite-strings
@@ -34,8 +35,27 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/engineCore.c
 
+# Which renderer the native build uses. openGLES2 needs a driver with
+# programmable shaders; software needs nothing but a framebuffer, which is the
+# only option on hardware of the Intel 2700G / NVIDIA GoForce generation. The
+# choice is made here rather than at run time so a software build does not link
+# libEGL and libGLESv2 at all.
+RENDER_BACKEND ?= openGLES2
+
+ifeq ($(RENDER_BACKEND),software)
+LINUX_RENDER_SOURCES := render/software/renderSoftware.c \
+                        render/software/rasterizer.c \
+                        render/software/rasterizerNEON.c \
+                        platform/linux/linuxPresenterSoftware.c
+LINUX_LIBRARIES := -lX11
+else
+LINUX_RENDER_SOURCES := render/openGLES2/renderOpenGLES2.c \
+                        platform/linux/linuxPresenterEGL.c
+LINUX_LIBRARIES := -lEGL -lGLESv2 -lX11
+endif
+
 LINUX_SOURCES := $(ENGINE_SOURCES) \
-                 render/openGLES2/renderOpenGLES2.c \
+                 $(LINUX_RENDER_SOURCES) \
                  platform/linux/linuxEntryPoint.c
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
@@ -50,7 +70,6 @@ LINUX_EXECUTABLE := $(LINUX_OUTPUT_DIRECTORY)/victoriaSims
 WEB_MODULE := $(WEB_OUTPUT_DIRECTORY)/victoriaSims.wasm
 ARM_LIBRARY := $(ARM_OUTPUT_DIRECTORY)/libVictoriaEngine.a
 
-LINUX_LIBRARIES := -lEGL -lGLESv2 -lX11
 
 # The wasm module owns exactly the reserved budget plus a fixed slack for the
 # shadow stack and static data. Both bounds are pinned so the module can never
@@ -84,11 +103,19 @@ WEB_LINK_FLAGS := -Wl,--no-entry -Wl,--allow-undefined \
 # cross-compiled EGL or X11 libraries here, and the point is to prove the
 # portable core stays portable.
 #
-#   armv5  the floor. No floating point unit assumed, soft-float ABI.
-#          ARM_ARCHITECTURE=armv4t covers the StrongARM iPAQs (h3600, h3800);
-#          the default armv5te covers the PXA25x/27x ones (h3900, hx4700).
+#   armv5  the floor: ARMv5TE, no floating point unit assumed, soft-float ABI.
+#          Covers the PXA25x/27x handhelds, whose graphics hardware predates
+#          programmable shaders and so runs the software renderer.
 #   oabi   the same code as genuine old-ABI, for pre-EABI userlands.
 #   armv7  the reference device: Sharp NetWalker PC-Z1, i.MX515 Cortex-A8.
+
+# The ARM tiers build the software renderer too: it is the backend the older
+# devices in the ladder will actually run, so compiling only the core would
+# leave the interesting half unchecked.
+ARM_LIBRARY_SOURCES := $(ENGINE_SOURCES) \
+                       render/software/renderSoftware.c \
+                       render/software/rasterizer.c \
+                       render/software/rasterizerNEON.c
 
 ARM_ARCHITECTURE ?= armv5te
 ARM_FLAGS := -march=$(ARM_ARCHITECTURE) -mfloat-abi=soft -ffreestanding \
@@ -115,7 +142,7 @@ ARMV7_ARCHITECTURE ?= armv7-a
 ARMV7_TUNE ?= cortex-a8
 ARMV7_FLAGS := -march=$(ARMV7_ARCHITECTURE) -mtune=$(ARMV7_TUNE) \
                -mfpu=neon -mfloat-abi=softfp -ffreestanding \
-               -DVICTORIA_FREESTANDING_BUILTINS=1
+               -DVICTORIA_FREESTANDING_BUILTINS=1 -DVICTORIA_HAS_NEON=1
 ARMV7_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/armv7
 ARMV7_LIBRARY := $(ARMV7_OUTPUT_DIRECTORY)/libVictoriaEngine.a
 ARMV7_READELF ?= arm-linux-gnueabi-readelf
@@ -124,7 +151,7 @@ ARMV7_READELF ?= arm-linux-gnueabi-readelf
 #   $(1) compiler   $(2) output directory   $(3) flags   $(4) library
 define buildEngineLibrary
 @mkdir -p $(2)
-@for source in $(ENGINE_SOURCES); do \
+@for source in $(ARM_LIBRARY_SOURCES); do \
 	objectName=$(2)/`basename $$source .c`.o; \
 	echo "$(1) -c $$source -o $$objectName"; \
 	$(1) $(COMMON_FLAGS) $(3) -c $$source -o $$objectName || exit 1; \
@@ -132,7 +159,7 @@ done
 $(ARCHIVER) rcs $(4) $(2)/*.o
 endef
 
-.PHONY: all linux web armv5 armv7 oabi check clean
+.PHONY: all linux web armv5 armv7 oabi verify check clean
 
 all: linux
 
@@ -151,12 +178,12 @@ $(WEB_MODULE): $(WEB_SOURCES) platform/web/index.html platform/web/victoriaRunti
 
 armv5: $(ARM_LIBRARY)
 
-$(ARM_LIBRARY): $(ENGINE_SOURCES)
+$(ARM_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	$(call buildEngineLibrary,$(ARM_COMPILER),$(ARM_OUTPUT_DIRECTORY),$(ARM_FLAGS),$@)
 
 armv7: $(ARMV7_LIBRARY)
 
-$(ARMV7_LIBRARY): $(ENGINE_SOURCES)
+$(ARMV7_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	$(call buildEngineLibrary,$(ARMV7_COMPILER),$(ARMV7_OUTPUT_DIRECTORY),$(ARMV7_FLAGS),$@)
 	@attributes=`$(ARMV7_READELF) -A $(ARMV7_OUTPUT_DIRECTORY)/memoryArena.o`; \
 	echo "$$attributes" | grep -q 'Tag_CPU_arch: v7' || \
@@ -167,13 +194,23 @@ $(ARMV7_LIBRARY): $(ENGINE_SOURCES)
 
 oabi: $(OABI_LIBRARY)
 
-$(OABI_LIBRARY): $(ENGINE_SOURCES)
+$(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	$(call buildEngineLibrary,$(OABI_COMPILER),$(OABI_OUTPUT_DIRECTORY),$(OABI_FLAGS),$@)
 	@flags=`$(OABI_READELF) -h $(OABI_OUTPUT_DIRECTORY)/memoryArena.o | grep -i '^ *Flags:'`; \
 	case "$$flags" in \
 		*0x600*) echo "verified genuine OABI ($$flags)" ;; \
 		*) echo "ERROR: not OABI, got $$flags" >&2; exit 1 ;; \
 	esac
+
+RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tools/verifyRasterizer
+
+verify: $(RASTERIZER_VERIFIER)
+	@$(RASTERIZER_VERIFIER)
+
+$(RASTERIZER_VERIFIER): tools/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
+	@mkdir -p $(BUILD_DIRECTORY)/tools
+	$(HOST_COMPILER) $(COMMON_FLAGS) tools/verifyRasterizer.c render/software/rasterizer.c \
+		render/software/rasterizerNEON.c -o $@
 
 check:
 	@tools/checkNoDynamicAllocation.sh

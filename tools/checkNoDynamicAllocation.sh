@@ -38,9 +38,9 @@ if command -v nm >/dev/null 2>&1; then
     trap 'rm -rf "$scratchDirectory"' EXIT
 
     HOST_COMPILER=${HOST_COMPILER:-clang}
-    for source in engine/source/*.c render/openGLES2/*.c platform/linux/*.c; do
+    for source in engine/source/*.c render/openGLES2/*.c render/software/*.c platform/linux/*.c; do
         objectName="$scratchDirectory/$(basename "$source" .c).o"
-        "$HOST_COMPILER" -std=c99 -Iengine/include -c "$source" -o "$objectName"
+        "$HOST_COMPILER" -std=c99 -I. -Iengine/include -c "$source" -o "$objectName"
     done
 
     if nm --undefined-only "$scratchDirectory"/*.o 2>/dev/null \
