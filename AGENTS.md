@@ -361,14 +361,24 @@ relaxed:
 
 What does **not** relax: no retail game data, in any repository, ever.
 
-Because they are submodules, a clone needs `--recursive`, and anything in
-continuous integration that touches a tool needs `submodules: true` on its
-checkout step. The engine's own jobs do not, and deliberately do not, so a
-submodule outage cannot break the engine build.
+Tools are built by their own workflow, not the engine's, so a tool breaking
+never gates the engine build.
 
 | Tool | Purpose |
 | --- | --- |
-| [`vic-extractor`](https://github.com/sugarkrap/vic-extractor) | Reads a Sims 2 retail ISO and lists the DBPF packages on it. Does not extract yet. |
+| `vic-extractor` | Reads a Sims 2 retail ISO and lists the DBPF packages on it, as a command line tool and as a web page. Does not extract yet. |
+
+**One implementation of a format, always.** A tool must not reimplement
+something the engine already parses. `vic-extractor` compiles
+`engine/source/packageReader.c` through its `build.rs` and calls it over FFI,
+including in its WebAssembly build. Two parsers drift the moment either changes,
+and then disagree about a real disc.
+
+That sharing is why tools live in this repository rather than one repository
+each. A tool in its own repository cannot reach the engine's sources at build
+time without either circular submodules or its continuous integration cloning
+the engine, and neither is worth the separation. `git subtree` splits one out
+later with its history intact if that changes.
 
 ## Layout
 
@@ -384,7 +394,7 @@ render/          one directory per graphics backend
   webGPU/
 scripts/         repository hygiene checks, run by make and by CI
 tests/           test programs for the engine
-tools/           one submodule per standalone tool, relaxed rules
+tools/           one directory per standalone tool, relaxed rules
 docs/formats/    reverse-engineering notes, and formats decoded here
 legacy/          upstream C# and Unity shaders, reference only, never built
 ```
