@@ -17,7 +17,7 @@
 
 set -eu
 
-DATA_EXTENSIONS='\.(package|dds|tga|xa|far|iff|bmp|jpg|jpeg|mp3|wav)$'
+DATA_EXTENSIONS='\.(package|dds|tga|xa|far|iff|bmp|jpg|jpeg|mp3|wav|iso|img|bin|cue|nrg|mdf)$'
 FIXTURE_DIRECTORY="testAssets"
 MANIFEST="$FIXTURE_DIRECTORY/manifest.sha256"
 

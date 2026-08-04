@@ -5,10 +5,17 @@ build/
 *.so
 *.out
 
-# Extracted game data. Never commit anything the retail installer produced.
+# Extracted game data. Never commit anything the retail installer produced,
+# and no disc image either — a retail ISO is the whole game in one file.
 assets/
 extracted/
 *.package
+*.iso
+*.img
+*.cue
+*.bin
+*.nrg
+*.mdf
 
 # ...except the purpose-built fixtures, which are pinned by hash in
 # testAssets/manifest.sha256 and checked by tools/checkNoGameData.sh.

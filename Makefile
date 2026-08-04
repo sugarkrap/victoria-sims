@@ -205,10 +205,20 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 
 RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
+DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
 
-verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER)
+verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
+	@$(DISC_READER_VERIFIER)
+
+$(DISC_READER_VERIFIER): tests/verifyDiscReader.c engine/source/discReader.c \
+		engine/source/virtualFileSystem.c engine/source/packageReader.c \
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscReader.c engine/source/discReader.c \
+		engine/source/virtualFileSystem.c engine/source/packageReader.c \
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c -o $@
 
 $(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c engine/source/memoryArena.c
 	@mkdir -p $(BUILD_DIRECTORY)/tests
