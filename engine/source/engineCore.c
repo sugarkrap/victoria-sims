@@ -107,6 +107,49 @@ static void appendByteSize(char *destination, MemorySize capacity, Unsigned64 by
    of loose files buries everything else. */
 #define CATALOGUE_LISTING_LIMIT 12U
 
+/* The next largest file that is not a package, after the one at
+   (ceilingSize, ceilingIndex). False when there is no next.
+ *
+ * Largest first, because a file big enough to hold a disc's worth of art is the
+ * only one worth looking at. Ties break by position, so a run of identically
+ * sized files is walked rather than the first of them being picked over and
+ * over — which is not hypothetical: a disc's loose files include several that
+ * are exactly one sector.
+ *
+ * A selection scan rather than a sort: nothing may be moved, because the
+ * catalogue's order is the file index every read is addressed by. */
+static Boolean findNextLargestOther(const VirtualFileSystem *fileSystem, Unsigned64 ceilingSize,
+                                    Unsigned32 ceilingIndex, Unsigned64 *foundSize,
+                                    Unsigned32 *foundIndex)
+{
+    Unsigned32 which;
+    Boolean found = BOOLEAN_FALSE;
+
+    for (which = 0U; which < fileSystem->entryCount; which++)
+    {
+        const VirtualFileEntry *entry = virtualFileSystemGetEntry(fileSystem, which);
+        Boolean belowCeiling;
+
+        if (entry == NULL_POINTER || stringEndsWithIgnoringCase(entry->path, ".package"))
+        {
+            continue;
+        }
+        belowCeiling = (Boolean)(entry->sizeInBytes < ceilingSize ||
+                                 (entry->sizeInBytes == ceilingSize && which > ceilingIndex));
+        if (!belowCeiling)
+        {
+            continue;
+        }
+        if (!found || entry->sizeInBytes > *foundSize)
+        {
+            *foundSize = entry->sizeInBytes;
+            *foundIndex = which;
+            found = BOOLEAN_TRUE;
+        }
+    }
+    return found;
+}
+
 /* What is on the disc besides packages.
  *
  * Six hundred packages hold a hundred and twenty seven images between them,
@@ -160,39 +203,12 @@ void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem)
     appendByteSize(message, sizeof(message), otherBytes);
     platformLogMessage(message);
 
-    /* Largest first, because a file big enough to hold a disc's worth of art is
-       the only one worth recognising by name. Ties are broken by position so a
-       run of identically sized files is listed rather than the first of them
-       being picked over and over. */
     for (listed = 0U; listed < CATALOGUE_LISTING_LIMIT; listed++)
     {
         Unsigned64 bestSize = 0ULL;
-        Unsigned32 bestIndex = fileSystem->entryCount;
-        Boolean found = BOOLEAN_FALSE;
+        Unsigned32 bestIndex = 0U;
 
-        for (which = 0U; which < fileSystem->entryCount; which++)
-        {
-            const VirtualFileEntry *entry = virtualFileSystemGetEntry(fileSystem, which);
-            Boolean belowCeiling;
-
-            if (entry == NULL_POINTER || stringEndsWithIgnoringCase(entry->path, ".package"))
-            {
-                continue;
-            }
-            belowCeiling = (Boolean)(entry->sizeInBytes < ceilingSize ||
-                                     (entry->sizeInBytes == ceilingSize && which > ceilingIndex));
-            if (!belowCeiling)
-            {
-                continue;
-            }
-            if (!found || entry->sizeInBytes > bestSize)
-            {
-                bestSize = entry->sizeInBytes;
-                bestIndex = which;
-                found = BOOLEAN_TRUE;
-            }
-        }
-        if (!found)
+        if (!findNextLargestOther(fileSystem, ceilingSize, ceilingIndex, &bestSize, &bestIndex))
         {
             break;
         }
@@ -235,6 +251,7 @@ static Boolean discCatalogueIsBuilt = BOOLEAN_FALSE;
 typedef enum DiscPhase
 {
     DISC_PHASE_CONTENT = 0,
+    DISC_PHASE_PROBE,
     DISC_PHASE_INDEX,
     DISC_PHASE_FETCH_TEXTURE,
     DISC_PHASE_DONE
@@ -242,6 +259,80 @@ typedef enum DiscPhase
 
 static DiscPhase discPhase = DISC_PHASE_CONTENT;
 static ResourceIndex textureIndex;
+
+/* Where the probe has got to. The ceiling is the last file it looked at, in the
+   (size, position) order the listing uses, so the two walk the same files in the
+   same order and a probe line can be read against a listing line. */
+static Unsigned64 probeCeilingSize = 0xFFFFFFFFFFFFFFFFULL;
+static Unsigned32 probeCeilingIndex = 0U;
+static Unsigned32 probesDone = 0U;
+
+/* How many files get identified. The largest are probed first, so this bounds
+   the log rather than the search: the file that matters on a disc whose game is
+   sealed inside one archive is, by definition, the biggest one there. */
+#define PROBE_LIMIT 12U
+
+/* The first bytes of a file, and what they mean.
+ *
+ * This disc's entire game is inside a single two point seven gigabyte file that
+ * is not a package, and the extension says only that somebody meant it to be
+ * run. What it actually is decides whether the data inside it can be reached at
+ * all, and the first four bytes are usually the whole answer.
+ *
+ * Not a decoder and not the beginning of one — a name for what was found, so
+ * the next decision is made against evidence rather than against the file
+ * extension. */
+typedef struct FileSignature
+{
+    const char *bytes;
+    MemorySize length;
+    const char *name;
+} FileSignature;
+
+static const FileSignature fileSignatures[] = {
+    { "DBPF", 4UL, "a package by content, whatever it is called" },
+    { "MSCF", 4UL, "a Microsoft cabinet" },
+    { "ISc(", 4UL, "an InstallShield cabinet" },
+    { "Rar!", 4UL, "a RAR archive" },
+    { "PK\x03\x04", 4UL, "a zip archive" },
+    { "PK\x05\x06", 4UL, "an empty zip archive" },
+    { "7z\xBC\xAF", 4UL, "a 7-zip archive" },
+    { "\x1F\x8B", 2UL, "gzip" },
+    { "BSDIFF", 6UL, "a binary patch" },
+    /* Last, because a self-extracting archive of any of the above is also a
+       Windows program, and the specific answer is the useful one. */
+    { "MZ", 2UL, "a Windows program — anything inside is appended, not at the front" }
+};
+
+static const char *identifySignature(const Unsigned8 *bytes, MemorySize byteCount)
+{
+    MemorySize which;
+
+    for (which = 0UL; which < VICTORIA_ARRAY_LENGTH(fileSignatures); which++)
+    {
+        const FileSignature *signature = &fileSignatures[which];
+        MemorySize index;
+        Boolean matches = BOOLEAN_TRUE;
+
+        if (byteCount < signature->length)
+        {
+            continue;
+        }
+        for (index = 0UL; index < signature->length; index++)
+        {
+            if (bytes[index] != (Unsigned8)signature->bytes[index])
+            {
+                matches = BOOLEAN_FALSE;
+                break;
+            }
+        }
+        if (matches)
+        {
+            return signature->name;
+        }
+    }
+    return "unrecognised";
+}
 
 static void reportDiscFailure(const char *what)
 {
@@ -272,6 +363,10 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
     {
         discCatalogueIsBuilt = BOOLEAN_TRUE;
         engineReportDiscCatalogue(fileSystem);
+        probeCeilingSize = 0xFFFFFFFFFFFFFFFFULL;
+        probeCeilingIndex = 0U;
+        probesDone = 0U;
+        discPhase = DISC_PHASE_PROBE;
         discContentBegin(&discSearch, fileSystem, globalArena);
     }
     else if (discReaderBegin(&discReader, fileSystem, globalArena, DISC_FILE_LIMIT) !=
@@ -550,6 +645,86 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         return discLoadStatus;
     }
 
+    /* Says what the disc's large non-package files actually are, before any of
+       the work that assumes the answer is "nothing that matters". Sixteen bytes
+       apiece; the phase exists at all because on the web even sixteen bytes have
+       to go back to the event loop. */
+    if (discPhase == DISC_PHASE_PROBE)
+    {
+        const VirtualFileEntry *entry;
+        Unsigned8 head[16];
+        MemorySize headSize;
+        VirtualReadResult read;
+        Unsigned64 nextSize = 0ULL;
+        Unsigned32 nextIndex = 0U;
+
+        if (probesDone >= PROBE_LIMIT ||
+            !findNextLargestOther(discFileSystem, probeCeilingSize, probeCeilingIndex, &nextSize,
+                                  &nextIndex))
+        {
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        entry = virtualFileSystemGetEntry(discFileSystem, nextIndex);
+        if (entry == NULL_POINTER)
+        {
+            probeCeilingSize = nextSize;
+            probeCeilingIndex = nextIndex;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Whatever the file holds, capped at what it holds: a file shorter than
+           the head buffer still has a signature, and asking for more than exists
+           is refused outright rather than answered short. */
+        headSize = (entry->sizeInBytes < (Unsigned64)sizeof(head)) ? (MemorySize)entry->sizeInBytes
+                                                                  : sizeof(head);
+        read = virtualFileSystemReadFile(discFileSystem, nextIndex, 0U, headSize, head);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+
+        probeCeilingSize = nextSize;
+        probeCeilingIndex = nextIndex;
+        probesDone++;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message), entry->path);
+        stringAppend(message, sizeof(message), " — ");
+        if (read != VIRTUAL_READ_OK)
+        {
+            /* Said rather than skipped. A probe that goes quiet on a file it
+               could not read looks exactly like a disc with nothing on it. */
+            stringAppend(message, sizeof(message), "would not read: ");
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+            platformLogMessage(message);
+            return ENGINE_DISC_WORKING;
+        }
+        stringAppend(message, sizeof(message), identifySignature(head, headSize));
+        stringAppend(message, sizeof(message), ", starting ");
+        {
+            /* The bytes as well as the verdict. A name this reader does not know
+               is exactly the case where the bytes themselves are what somebody
+               needs to see. */
+            MemorySize index;
+
+            for (index = 0UL; index < headSize && index < 8UL; index++)
+            {
+                char digits[8];
+
+                if (stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)head[index], 2UL) > 0UL)
+                {
+                    stringAppend(message, sizeof(message), digits + 2UL);
+                    stringAppend(message, sizeof(message), " ");
+                }
+            }
+        }
+        platformLogMessage(message);
+        return ENGINE_DISC_WORKING;
+    }
+
     if (!discCatalogueIsBuilt)
     {
         DiscReadStatus walk = discReaderStep(&discReader);
@@ -574,6 +749,10 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         engineReportDiscCatalogue(discFileSystem);
 
         discCatalogueIsBuilt = BOOLEAN_TRUE;
+        probeCeilingSize = 0xFFFFFFFFFFFFFFFFULL;
+        probeCeilingIndex = 0U;
+        probesDone = 0U;
+        discPhase = DISC_PHASE_PROBE;
         discContentBegin(&discSearch, discFileSystem, globalArena);
         return ENGINE_DISC_WORKING;
     }

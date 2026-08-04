@@ -29,9 +29,17 @@ let frameCostMilliseconds = 0;
 const reportedGraphicsKibibytes = 32 * 1024;
 const shaderCompileMilliseconds = 50;
 
+// Kept as well as printed, so a line the engine is supposed to emit can be
+// asserted on rather than looked for by eye.
+const loggedMessages = [];
+
 const imports = {
     victoriaPlatform: {
-        logMessage: (pointer, length) => console.log(`      engine: ${decodeUTF8(pointer, length)}`),
+        logMessage: (pointer, length) => {
+            const text = decodeUTF8(pointer, length);
+            loggedMessages.push(text);
+            console.log(`      engine: ${text}`);
+        },
         getMilliseconds: () => simulatedMilliseconds
     },
     victoriaRender: {
@@ -298,6 +306,24 @@ calls.length = 0;
         check("with 13248 vertices", upload.vertexCount === 13248);
         check("and 18960 indices", upload.indexCount === 18960);
     }
+    // What the disc holds besides packages, and what those files actually are.
+    // The fixture carries a file named like an installer cabinet that is not
+    // one, so the probe has something to be wrong about: it reports what the
+    // bytes say, not what the extension claims.
+    check("counts packages against everything else",
+          loggedMessages.some((text) =>
+              text.includes("5 package(s)") && text.includes("2 other file(s)")));
+    check("names the largest non-package file first",
+          loggedMessages.some((text) => text.includes("28 bytes  Support/data1.cab")));
+    const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
+    check("probes it for a signature", Boolean(probe));
+    if (probe) {
+        // "placehol", which is neither a cabinet nor anything else known.
+        check("reporting the bytes it read", probe.includes("70 6C 61 63 65 68 6F 6C"));
+        check("and refusing to name a format it does not recognise",
+              probe.includes("unrecognised"));
+    }
+
     console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);
 }
 
