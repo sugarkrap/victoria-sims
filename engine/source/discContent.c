@@ -46,6 +46,8 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->materialName[0] = '\0';
     search->materialFound = BOOLEAN_FALSE;
     search->textureFound = BOOLEAN_FALSE;
+    search->materialsInPackage = 0U;
+    search->texturesInPackage = 0U;
     search->modelsResolved = 0U;
     search->modelName[0] = '\0';
     search->foundThroughScenegraph = BOOLEAN_FALSE;
@@ -224,6 +226,8 @@ static void findTextureForMaterial(DiscContentSearch *search, const Package *pac
 
     search->materialFound = BOOLEAN_FALSE;
     search->textureFound = BOOLEAN_FALSE;
+    search->materialsInPackage = 0U;
+    search->texturesInPackage = 0U;
     if (search->materialName[0] == '\0')
     {
         return;
@@ -245,9 +249,16 @@ static void findTextureForMaterial(DiscContentSearch *search, const Package *pac
         marker = memoryArenaGetMarker(search->arena);
         materialBytes =
             scenegraphReadResourceBytes(search->arena, package, candidate, &materialSize, &compressed);
+        search->materialsInPackage++;
         if (materialBytes != NULL_POINTER &&
             materialRead(&material, materialBytes, materialSize) == MATERIAL_READ_OK &&
-            stringEquals(material.resourceName, wanted))
+            /* Either spelling. The convention is that a binding "x" is the
+             * resource "x_txmt", but the material also carries the binding name
+             * in a field of its own, and trusting only the convention means a
+             * material that names itself correctly is missed for having been
+             * filed under something else. */
+            (stringEquals(material.resourceName, wanted) ||
+             stringEquals(material.materialName, search->materialName)))
         {
             search->materialFound = BOOLEAN_TRUE;
         }
@@ -274,6 +285,7 @@ static void findTextureForMaterial(DiscContentSearch *search, const Package *pac
         {
             continue;
         }
+        search->texturesInPackage++;
         marker = memoryArenaGetMarker(search->arena);
         textureBytes =
             scenegraphReadResourceBytes(search->arena, package, candidate, &textureSize, &compressed);

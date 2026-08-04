@@ -78,6 +78,12 @@ typedef struct DiscContentSearch
        the found package's allocation stands. */
     char materialName[RESOURCE_NAME_LIMIT];
     Boolean materialFound;
+    /* How many materials and textures the package held at all. "Not found" and
+       "none here to find" are different answers: the first is a name that did
+       not match, the second means the resource lives in another package and the
+       fix is a wider search rather than a better comparison. */
+    Unsigned32 materialsInPackage;
+    Unsigned32 texturesInPackage;
     Boolean textureFound;
     TextureDescription texture;
 

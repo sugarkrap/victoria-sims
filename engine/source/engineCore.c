@@ -359,11 +359,20 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             stringAppend(message, sizeof(message), discSearch.materialName);
             if (!discSearch.materialFound)
             {
-                stringAppend(message, sizeof(message), " — no _txmt of that name in the package");
+                /* The count separates a name that did not match from a package
+                   with no materials in it at all. The second is not a lookup
+                   bug: a Sim's face material is built from shared resources
+                   that live elsewhere on the disc, and finding it needs a
+                   wider search rather than a better comparison. */
+                stringAppend(message, sizeof(message), " — not among the ");
+                appendCount(message, sizeof(message), discSearch.materialsInPackage);
+                stringAppend(message, sizeof(message), " material(s) in this package");
             }
             else if (!discSearch.textureFound)
             {
-                stringAppend(message, sizeof(message), " — read, but its texture is not here");
+                stringAppend(message, sizeof(message), " — read, but its texture is not among the ");
+                appendCount(message, sizeof(message), discSearch.texturesInPackage);
+                stringAppend(message, sizeof(message), " here");
             }
             else
             {
