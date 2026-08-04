@@ -120,6 +120,18 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 }
 
 
+void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    /* Accepted and ignored. This backend exists for hardware whose graphics
+       predates programmable shaders, where the cost of sampling per pixel in
+       software is the whole frame budget. Refusing to build would be worse
+       than shading flat: the model still draws, and the ladder still holds. */
+    (void)rgbaPixels;
+    (void)widthInPixels;
+    (void)heightInPixels;
+}
+
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 {
     Real32 minimum[3];

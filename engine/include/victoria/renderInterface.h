@@ -23,6 +23,20 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
    Called after renderInitialize, because a backend may want to upload it. */
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena);
 
+/* Hands the backend the image the mesh is painted with: eight bit RGBA, red
+   first, top row first, width * height * 4 bytes.
+
+   Call it before renderSetMesh. A backend needs to know the vertex layout and
+   the bindings before it builds a pipeline, and rebuilding one afterwards to
+   add a texture is work nobody needs.
+
+   Never calling it is not an error. A backend that has no image paints with
+   white, so an untextured mesh comes out exactly as it did before there was
+   any of this — which is also what a mesh with no texture coordinates gets,
+   since sampling one without them would be worse than not sampling. */
+void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels);
+
 void renderDrawFrame(Real32 elapsedSeconds);
 void renderShutdown(void);
 

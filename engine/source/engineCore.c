@@ -7,6 +7,7 @@
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
+#include "victoria/textureDecode.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
    and nothing reads it faster than a human can. */
@@ -407,6 +408,51 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message), " triangles);");
             }
             platformLogMessage(message);
+        }
+
+        /* The texture goes first: a backend has to know the bindings before it
+           builds a pipeline, and rebuilding one afterwards to add a texture is
+           work nobody needs.
+
+           The decoded pixels are staged in the arena and given straight back.
+           Every backend copies during the call — the graphics driver owns the
+           image afterwards — so holding it here would be two of everything, and
+           a 256 by 256 image decoded to RGBA is a quarter of a megabyte. */
+        if (discSearch.textureFound && discSearch.mesh.textureCoordinates != NULL_POINTER)
+        {
+            MemorySize marker = memoryArenaGetMarker(globalArena);
+            MemorySize wantedBytes = textureDecodeGetRequiredBytes(discSearch.texture.levelWidth,
+                                                                  discSearch.texture.levelHeight);
+            Unsigned8 *decoded = (Unsigned8 *)memoryArenaAllocate(globalArena, wantedBytes, 4UL);
+            TextureDecodeResult decodeResult = TEXTURE_DECODE_DESTINATION_TOO_SMALL;
+
+            if (decoded != NULL_POINTER)
+            {
+                decodeResult = textureDecodeLevel(
+                    decoded, wantedBytes, discSearch.texture.bytes, discSearch.texture.byteCount,
+                    discSearch.texture.format, discSearch.texture.levelWidth,
+                    discSearch.texture.levelHeight);
+            }
+            if (decodeResult == TEXTURE_DECODE_OK)
+            {
+                renderSetTexture(decoded, (Unsigned32)discSearch.texture.levelWidth,
+                                 (Unsigned32)discSearch.texture.levelHeight);
+            }
+            else
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: the texture would not decode — ");
+                stringAppend(message, sizeof(message), textureDecodeResultGetName(decodeResult));
+                platformLogMessage(message);
+            }
+            memoryArenaRewindToMarker(globalArena, marker);
+        }
+        else if (discSearch.textureFound)
+        {
+            /* Sampling an image with no coordinates to sample it at would paint
+               every vertex with the same pixel, which looks like a bug in the
+               decoder rather than a mesh without texture coordinates. */
+            platformLogMessage("engine: the mesh has no texture coordinates, so it is left unpainted");
         }
 
         renderSetMesh(&discSearch.mesh, globalArena);

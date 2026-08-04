@@ -26,6 +26,8 @@ function check(description, condition) {
 
 const writes = [];
 const buffers = [];
+const textures = [];
+const textureWrites = [];
 
 // Enough of a browser for the file to load, and no more. Anything it reaches
 // for that is not here is something this test should be told about.
@@ -37,9 +39,29 @@ function makeRecordingDevice() {
             return buffer;
         },
         createBindGroup: () => ({}),
+        createSampler: () => ({ kind: "sampler" }),
+        createShaderModule: () => ({ kind: "shader" }),
+        createRenderPipeline: (descriptor) => ({
+            descriptor,
+            getBindGroupLayout: () => ({ kind: "layout" })
+        }),
+        createTexture(descriptor) {
+            const texture = { ...descriptor, createView: () => ({ kind: "view" }) };
+            textures.push(texture);
+            return texture;
+        },
         queue: {
             writeBuffer(buffer, offset, source) {
                 writes.push({ buffer, offset, byteLength: source.byteLength, bytes: Uint8Array.from(source) });
+            },
+            writeTexture(destination, source, layout, size) {
+                textureWrites.push({
+                    bytesPerRow: layout.bytesPerRow,
+                    rowsPerImage: layout.rowsPerImage,
+                    size,
+                    byteLength: source.byteLength,
+                    bytes: Uint8Array.from(source)
+                });
             }
         }
     };
@@ -61,7 +83,7 @@ const context = createContext({
     Uint16Array,
     Float32Array,
     GPUBufferUsage: { VERTEX: 1, INDEX: 2, UNIFORM: 4, COPY_DST: 8 },
-    GPUTextureUsage: { RENDER_ATTACHMENT: 16 }
+    GPUTextureUsage: { RENDER_ATTACHMENT: 16, TEXTURE_BINDING: 32, COPY_DST: 64 }
 });
 
 // A trailing expression, because the file's top level declarations are const and
@@ -137,6 +159,62 @@ console.log("\n-- and an even one is left alone --");
     uploadMesh(VERTEX_POINTER, VERTEX_COUNT, INDEX_POINTER, 2210);
     const indexWrite = writes.find((write) => write.byteLength === 4420);
     check("a mesh already on a word boundary is not padded", indexWrite !== undefined);
+}
+
+console.log("\n-- uploading a texture whose rows are not a multiple of 256 --");
+{
+    // WebGPU requires each row of a texture write to begin on a 256 byte
+    // boundary. A 3 pixel wide image is 12 bytes a row, so the write has to be
+    // staged into padded rows rather than passed through — and passing the
+    // module's memory straight in would be accepted by the type system and
+    // rejected by the browser.
+    const createMeshPipeline = runtime.importObject.victoriaRender.createMeshPipeline;
+    const uploadTexture = runtime.importObject.victoriaRender.uploadTexture;
+
+    check("the page exposes uploadTexture", typeof uploadTexture === "function");
+
+    const shaderMemory = new ArrayBuffer(4096);
+    runtime.runtimeState.instance = { exports: { memory: { buffer: shaderMemory } } };
+    // readUTF8 reads through runtimeState.memory rather than the instance, so
+    // the shader source the pipeline is built from comes from here.
+    runtime.runtimeState.memory = { buffer: shaderMemory };
+    runtime.runtimeState.device = makeRecordingDevice();
+    runtime.runtimeState.canvasFormat = "bgra8unorm";
+    runtime.runtimeState.meshTexture = null;
+
+    check("the mesh pipeline builds", createMeshPipeline(0, 0) === 1);
+    // Built before any image arrives, so the bind group is complete and a mesh
+    // with no texture is lit exactly as it was before textures existed.
+    check("with a single white pixel standing in for a texture",
+          textures.length === 1 && textures[0].size.width === 1 && textures[0].size.height === 1);
+    check("and the vertex layout carries a texture coordinate",
+          runtime.runtimeState.meshPipeline.descriptor.vertex.buffers[0].arrayStride === 32);
+    check("as a third attribute",
+          runtime.runtimeState.meshPipeline.descriptor.vertex.buffers[0].attributes.length === 3);
+
+    // Three pixels across, four rows: rows of 12 bytes padded to 256.
+    const PIXELS = 3 * 4;
+    const pixelMemory = new ArrayBuffer(1024);
+    new Uint8Array(pixelMemory).fill(0x7F, 0, PIXELS * 4);
+    runtime.runtimeState.instance = { exports: { memory: { buffer: pixelMemory } } };
+    runtime.runtimeState.memory = { buffer: pixelMemory };
+
+    textureWrites.length = 0;
+    check("the texture uploads", uploadTexture(0, 3, 4) === 1);
+    const write = textureWrites[0];
+    check("a row starts on a 256 byte boundary", write && write.bytesPerRow % 256 === 0);
+    check("and the staging buffer is a whole number of those rows",
+          write && write.byteLength === write.bytesPerRow * 4);
+    // The first twelve bytes of each row are the image; the rest is padding
+    // that the write's own layout tells the device to skip.
+    check("each row begins with its own pixels",
+          write && write.bytes[0] === 0x7F && write.bytes[11] === 0x7F &&
+          write.bytes[write.bytesPerRow] === 0x7F);
+    check("and the padding after them is not image data",
+          write && write.bytes[12] === 0);
+
+    check("a texture reaching past the end of memory is refused",
+          uploadTexture(1000, 64, 64) === 0);
 }
 
 if (failureCount === 0) {

@@ -15,6 +15,8 @@ const runtimeState = {
     meshBindGroup: null,
     meshVertexBuffer: null,
     meshIndexBuffer: null,
+    meshTexture: null,
+    meshSampler: null,
     meshIndexCount: 0,
     depthTexture: null,
     bindGroup: null,
@@ -28,6 +30,39 @@ const runtimeState = {
 // work without telling anyone anything new.
 const OVERLAY_INTERVAL_MILLISECONDS = 250;
 const SPARKLINE_SAMPLE_COUNT = 120;
+
+// Creates the device texture and copies the pixels in. WebGPU wants each row of
+// a write to start on a 256 byte boundary, so a row that is not a multiple of
+// that has to be padded — which is why this stages rather than writing the
+// module's memory straight through.
+function setMeshTexture(pixels, width, height) {
+    const bytesPerRow = (width * 4 + 255) & ~255;
+    const staging = new Uint8Array(bytesPerRow * height);
+
+    for (let row = 0; row < height; row += 1) {
+        staging.set(pixels.subarray(row * width * 4, (row + 1) * width * 4), row * bytesPerRow);
+    }
+
+    runtimeState.meshTexture = runtimeState.device.createTexture({
+        size: { width, height },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+    runtimeState.device.queue.writeTexture(
+        { texture: runtimeState.meshTexture }, staging,
+        { bytesPerRow, rowsPerImage: height }, { width, height });
+}
+
+function rebuildMeshBindGroup() {
+    runtimeState.meshBindGroup = runtimeState.device.createBindGroup({
+        layout: runtimeState.meshPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } },
+            { binding: 1, resource: runtimeState.meshSampler },
+            { binding: 2, resource: runtimeState.meshTexture.createView() }
+        ]
+    });
+}
 
 // The depth attachment has to match the canvas, and the canvas resizes with
 // the window. Kept until the size changes rather than made every frame, since
@@ -141,11 +176,12 @@ const importObject = {
                     module: shaderModule,
                     entryPoint: "vertexMain",
                     buffers: [{
-                        // Position then normal, three floats each.
-                        arrayStride: 24,
+                        // Position, normal, texture coordinate: 3 + 3 + 2 floats.
+                        arrayStride: 32,
                         attributes: [
                             { shaderLocation: 0, offset: 0, format: "float32x3" },
-                            { shaderLocation: 1, offset: 12, format: "float32x3" }
+                            { shaderLocation: 1, offset: 12, format: "float32x3" },
+                            { shaderLocation: 2, offset: 24, format: "float32x2" }
                         ]
                     }]
                 },
@@ -167,10 +203,36 @@ const importObject = {
                 size: 80,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
             });
-            runtimeState.meshBindGroup = runtimeState.device.createBindGroup({
-                layout: runtimeState.meshPipeline.getBindGroupLayout(0),
-                entries: [{ binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } }]
+
+            runtimeState.meshSampler = runtimeState.device.createSampler({
+                magFilter: "linear",
+                minFilter: "linear",
+                addressModeU: "repeat",
+                addressModeV: "repeat"
             });
+            // A single white pixel, so the bind group is complete before any
+            // texture arrives and a mesh with no image is lit exactly as it was
+            // before textures existed. Without it the shader could not sample
+            // unconditionally, and the pipeline would need two variants.
+            if (!runtimeState.meshTexture) {
+                setMeshTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+            }
+            rebuildMeshBindGroup();
+            return 1;
+        },
+
+        // Replaces the image the mesh is painted with. The bind group holds the
+        // old texture by reference, so it has to be built again — cheap, and
+        // done here rather than per frame.
+        uploadTexture(pixelPointer, width, height) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const byteCount = width * height * 4;
+
+            if (byteCount <= 0 || pixelPointer + byteCount > memory.byteLength) {
+                return 0;
+            }
+            setMeshTexture(new Uint8Array(memory, pixelPointer, byteCount), width, height);
+            rebuildMeshBindGroup();
             return 1;
         },
 
@@ -179,7 +241,7 @@ const importObject = {
         // reuse its staging space the moment this returns.
         uploadMesh(vertexPointer, vertexCount, indexPointer, indexCount) {
             const memory = runtimeState.instance.exports.memory.buffer;
-            const vertexBytes = vertexCount * 24;
+            const vertexBytes = vertexCount * 32;
             // Both the buffer and the write have to be a multiple of four bytes,
             // and an odd number of sixteen-bit indices is neither. A mesh of 737
             // triangles is 4422 bytes of indices; the teapot's 6320 happen to

@@ -57,6 +57,10 @@ const imports = {
             calls.push({ name: "uploadMesh", vertexCount, indexCount });
             return 1;
         },
+        uploadTexture: (pixelPointer, width, height) => {
+            calls.push({ name: "uploadTexture", width, height });
+            return 1;
+        },
         setMeshUniforms: () => calls.push({ name: "setMeshUniforms" }),
         submitFrame: () => {
             calls.push({ name: "submitFrame" });
@@ -221,6 +225,7 @@ const refusalImports = {
         setTriangleTint: () => {},
         createMeshPipeline: () => 1,
         uploadMesh: () => 1,
+        uploadTexture: () => 1,
         setMeshUniforms: () => {},
         submitFrame: () => {},
         queryGraphicsMemoryKibibytes: () => reportedGraphicsKibibytes,

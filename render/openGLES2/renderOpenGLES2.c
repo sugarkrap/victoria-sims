@@ -52,18 +52,23 @@ static const GLfloat triangleVertices[] = {
 static const char *meshVertexShaderSource =
     "attribute vec3 vertexPosition;\n"
     "attribute vec3 vertexNormal;\n"
+    "attribute vec2 vertexTextureCoordinate;\n"
     "uniform mat4 modelViewProjection;\n"
     "varying vec3 interpolatedNormal;\n"
+    "varying vec2 interpolatedTextureCoordinate;\n"
     "void main()\n"
     "{\n"
     "    interpolatedNormal = vertexNormal;\n"
+    "    interpolatedTextureCoordinate = vertexTextureCoordinate;\n"
     "    gl_Position = modelViewProjection * vec4(vertexPosition, 1.0);\n"
     "}\n";
 
 static const char *meshFragmentShaderSource =
     "precision mediump float;\n"
     "varying vec3 interpolatedNormal;\n"
+    "varying vec2 interpolatedTextureCoordinate;\n"
     "uniform vec3 lightDirection;\n"
+    "uniform sampler2D meshTexture;\n"
     "void main()\n"
     "{\n"
     "    vec3 normal = normalize(interpolatedNormal);\n"
@@ -71,12 +76,19 @@ static const char *meshFragmentShaderSource =
        an unlit interior reads as a hole in the model rather than as shadow. */
     "    float lambert = abs(dot(normal, lightDirection));\n"
     "    float shade = 0.28 + (0.72 * lambert);\n"
-    "    gl_FragColor = vec4(shade, shade * 0.93, shade * 0.84, 1.0);\n"
+    /* White when there is no image, so an untextured mesh is lit exactly as it
+       was before any of this existed. */
+    "    vec4 painted = texture2D(meshTexture, interpolatedTextureCoordinate);\n"
+    "    gl_FragColor = vec4(painted.rgb * vec3(shade, shade * 0.93, shade * 0.84), 1.0);\n"
     "}\n";
 
 static GLuint meshProgram = 0;
 static GLuint meshVertexBuffer = 0;
 static GLuint meshIndexBuffer = 0;
+static GLuint meshTextureName = 0;
+static MemorySize textureChargedBytes = 0UL;
+static GLint meshTextureCoordinateLocation = -1;
+static GLint meshSamplerLocation = -1;
 static GLint meshPositionLocation = -1;
 static GLint meshNormalLocation = -1;
 static GLint meshMatrixLocation = -1;
@@ -343,7 +355,10 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         return;
     }
 
-    vertexBytes = (MemorySize)mesh->vertexCount * 6UL * sizeof(GLfloat);
+    /* Position, normal and texture coordinate: eight floats a vertex. Carried
+       even when the mesh has no coordinates, because a layout that changes
+       shape per mesh means a program per mesh. */
+    vertexBytes = (MemorySize)mesh->vertexCount * 8UL * sizeof(GLfloat);
     indexBytes = (MemorySize)mesh->indexCount * sizeof(GLushort);
 
     /* Charged before anything is created, so a device that cannot afford the
@@ -381,8 +396,26 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     }
     shaderProgramCount += 1U;
 
+    if (meshTextureName == 0U)
+    {
+        /* One white pixel. A sampler with nothing bound reads as black on some
+           drivers and as undefined on others, so an untextured mesh would go
+           dark rather than staying as it was. */
+        static const GLubyte whitePixel[4] = { 255U, 255U, 255U, 255U };
+
+        glGenTextures(1, &meshTextureName);
+        glBindTexture(GL_TEXTURE_2D, meshTextureName);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, whitePixel);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
     meshPositionLocation = glGetAttribLocation(meshProgram, "vertexPosition");
     meshNormalLocation = glGetAttribLocation(meshProgram, "vertexNormal");
+    meshTextureCoordinateLocation = glGetAttribLocation(meshProgram, "vertexTextureCoordinate");
+    meshSamplerLocation = glGetUniformLocation(meshProgram, "meshTexture");
     meshMatrixLocation = glGetUniformLocation(meshProgram, "modelViewProjection");
     meshLightLocation = glGetUniformLocation(meshProgram, "lightDirection");
 
@@ -402,7 +435,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     {
         const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
         const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
-        GLfloat *target = &interleaved[(MemorySize)index * 6UL];
+        GLfloat *target = &interleaved[(MemorySize)index * 8UL];
 
         target[0] = (GLfloat)position[0];
         target[1] = (GLfloat)position[1];
@@ -410,6 +443,16 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         target[3] = (GLfloat)normal[0];
         target[4] = (GLfloat)normal[1];
         target[5] = (GLfloat)normal[2];
+        if (mesh->textureCoordinates != NULL_POINTER)
+        {
+            target[6] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL];
+            target[7] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
+        }
+        else
+        {
+            target[6] = 0.0f;
+            target[7] = 0.0f;
+        }
     }
 
     glGenBuffers(1, &meshVertexBuffer);
@@ -436,7 +479,7 @@ static void drawMesh(Real32 elapsedSeconds)
     Real32 matrix[16];
     Real32 light[3];
     Real32 angle = elapsedSeconds * 0.6f;
-    const GLsizei vertexStride = (GLsizei)(6 * sizeof(GLfloat));
+    const GLsizei vertexStride = (GLsizei)(8 * sizeof(GLfloat));
 
     meshCameraBuildMatrix(&meshCamera, angle, viewportAspect, matrix);
     meshCameraGetLightDirection(angle, light);
@@ -447,6 +490,12 @@ static void drawMesh(Real32 elapsedSeconds)
     glUseProgram(meshProgram);
     glUniformMatrix4fv(meshMatrixLocation, 1, GL_FALSE, matrix);
     glUniform3f(meshLightLocation, light[0], light[1], light[2]);
+    if (meshSamplerLocation >= 0)
+    {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, meshTextureName);
+        glUniform1i(meshSamplerLocation, 0);
+    }
 
     glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, meshIndexBuffer);
@@ -456,12 +505,71 @@ static void drawMesh(Real32 elapsedSeconds)
     glEnableVertexAttribArray((GLuint)meshNormalLocation);
     glVertexAttribPointer((GLuint)meshNormalLocation, 3, GL_FLOAT, GL_FALSE, vertexStride,
                           (const void *)(3 * sizeof(GLfloat)));
+    if (meshTextureCoordinateLocation >= 0)
+    {
+        glEnableVertexAttribArray((GLuint)meshTextureCoordinateLocation);
+        glVertexAttribPointer((GLuint)meshTextureCoordinateLocation, 2, GL_FLOAT, GL_FALSE,
+                              vertexStride, (const void *)(6 * sizeof(GLfloat)));
+    }
 
     glDrawElements(GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_SHORT, (const void *)0);
 
     glDisableVertexAttribArray((GLuint)meshPositionLocation);
     glDisableVertexAttribArray((GLuint)meshNormalLocation);
+    if (meshTextureCoordinateLocation >= 0)
+    {
+        glDisableVertexAttribArray((GLuint)meshTextureCoordinateLocation);
+    }
     glDisable(GL_DEPTH_TEST);
+}
+
+static Boolean isPowerOfTwo(Unsigned32 value)
+{
+    return (value != 0U && (value & (value - 1U)) == 0U) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+}
+
+void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    MemorySize wantedBytes;
+    GLint wrapMode;
+
+    if (rgbaPixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        return;
+    }
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold this texture");
+        return;
+    }
+
+    if (meshTextureName == 0U)
+    {
+        glGenTextures(1, &meshTextureName);
+    }
+    glBindTexture(GL_TEXTURE_2D, meshTextureName);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)widthInPixels, (GLsizei)heightInPixels, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+
+    /* OpenGL ES 2.0 will not repeat a texture whose sides are not powers of
+       two, and a driver handed one anyway is entitled to sample black. Retail
+       textures are almost always powers of two; the ones that are not get
+       clamped rather than dropped. */
+    wrapMode = (isPowerOfTwo(widthInPixels) && isPowerOfTwo(heightInPixels)) ? GL_REPEAT
+                                                                            : GL_CLAMP_TO_EDGE;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapMode);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapMode);
+
+    if (textureChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, textureChargedBytes);
+    }
+    textureChargedBytes = wantedBytes;
+    platformLogMessage("render: texture uploaded to the OpenGL ES backend");
 }
 
 void renderDrawFrame(Real32 elapsedSeconds)

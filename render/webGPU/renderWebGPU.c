@@ -53,6 +53,12 @@ extern Integer32 hostUploadMesh(const Real32 *interleavedVertices, Unsigned32 ve
 WEB_IMPORT("setMeshUniforms")
 extern void hostSetMeshUniforms(const Real32 *values);
 
+/* The image the mesh is painted with. Sent before the pipeline is built, so the
+   host has a texture to bind rather than having to rebuild the binding later. */
+WEB_IMPORT("uploadTexture")
+extern Integer32 hostUploadTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
+                                   Unsigned32 heightInPixels);
+
 #define TRIANGLE_UNIFORM_BUFFER_BYTES 16UL
 
 static Unsigned32 shaderProgramCount = 0;
@@ -60,6 +66,7 @@ static Boolean uniformBufferIsCharged = BOOLEAN_FALSE;
 
 static Boolean meshIsReady = BOOLEAN_FALSE;
 static MemorySize meshChargedBytes = 0UL;
+static MemorySize textureChargedBytes = 0UL;
 static MeshCamera meshCamera;
 static Real32 viewportAspect = 1.0f;
 
@@ -72,16 +79,21 @@ static const char *meshShaderSource =
     "    lightDirection : vec4<f32>,\n"
     "};\n"
     "@group(0) @binding(0) var<uniform> uniforms : Uniforms;\n"
+    "@group(0) @binding(1) var meshSampler : sampler;\n"
+    "@group(0) @binding(2) var meshTexture : texture_2d<f32>;\n"
     "struct VertexOutput {\n"
     "    @builtin(position) position : vec4<f32>,\n"
     "    @location(0) normal : vec3<f32>,\n"
+    "    @location(1) textureCoordinate : vec2<f32>,\n"
     "};\n"
     "@vertex\n"
     "fn vertexMain(@location(0) vertexPosition : vec3<f32>,\n"
-    "              @location(1) vertexNormal : vec3<f32>) -> VertexOutput {\n"
+    "              @location(1) vertexNormal : vec3<f32>,\n"
+    "              @location(2) vertexTextureCoordinate : vec2<f32>) -> VertexOutput {\n"
     "    var output : VertexOutput;\n"
     "    output.position = uniforms.modelViewProjection * vec4<f32>(vertexPosition, 1.0);\n"
     "    output.normal = vertexNormal;\n"
+    "    output.textureCoordinate = vertexTextureCoordinate;\n"
     "    return output;\n"
     "}\n"
     "@fragment\n"
@@ -89,7 +101,10 @@ static const char *meshShaderSource =
     "    let normal = normalize(input.normal);\n"
     "    let lambert = abs(dot(normal, uniforms.lightDirection.xyz));\n"
     "    let shade = 0.28 + (0.72 * lambert);\n"
-    "    return vec4<f32>(shade, shade * 0.93, shade * 0.84, 1.0);\n"
+    /* White when there is no image, so an untextured mesh is lit exactly as it
+       was before any of this existed. */
+    "    let painted = textureSample(meshTexture, meshSampler, input.textureCoordinate);\n"
+    "    return vec4<f32>(painted.rgb * vec3<f32>(shade, shade * 0.93, shade * 0.84), 1.0);\n"
     "}\n";
 
 static const char *triangleShaderSource =
@@ -182,7 +197,10 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         return;
     }
 
-    vertexBytes = (MemorySize)mesh->vertexCount * 6UL * sizeof(Real32);
+    /* Position, normal and texture coordinate: eight floats a vertex. The
+       coordinate is carried even when the mesh has none, because a vertex
+       layout that changes shape per mesh means a pipeline per mesh. */
+    vertexBytes = (MemorySize)mesh->vertexCount * 8UL * sizeof(Real32);
     indexBytes = (MemorySize)mesh->indexCount * sizeof(Unsigned16);
 
     if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_BUFFER, vertexBytes + indexBytes) ==
@@ -216,7 +234,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     {
         const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
         const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
-        Real32 *target = &interleaved[(MemorySize)index * 6UL];
+        Real32 *target = &interleaved[(MemorySize)index * 8UL];
 
         target[0] = position[0];
         target[1] = position[1];
@@ -224,6 +242,16 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         target[3] = normal[0];
         target[4] = normal[1];
         target[5] = normal[2];
+        if (mesh->textureCoordinates != NULL_POINTER)
+        {
+            target[6] = mesh->textureCoordinates[(MemorySize)index * 2UL];
+            target[7] = mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
+        }
+        else
+        {
+            target[6] = 0.0f;
+            target[7] = 0.0f;
+        }
     }
 
     /* The host copies during this call, so the scratch can go back straight
@@ -241,6 +269,38 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     meshCameraFrame(&meshCamera, mesh);
     meshIsReady = BOOLEAN_TRUE;
     platformLogMessage("render: mesh uploaded to the WebGPU backend");
+}
+
+void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    MemorySize wantedBytes;
+
+    if (rgbaPixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        return;
+    }
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold this texture");
+        return;
+    }
+    if (hostUploadTexture(rgbaPixels, widthInPixels, heightInPixels) == 0)
+    {
+        platformLogMessage("render: the host would not take the texture");
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes);
+        return;
+    }
+    /* Released before charging again, so loading a second model does not leave
+       the first model's texture counted against the ceiling forever. */
+    if (textureChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, textureChargedBytes);
+    }
+    textureChargedBytes = wantedBytes;
+    platformLogMessage("render: texture uploaded to the WebGPU backend");
 }
 
 void renderDrawFrame(Real32 elapsedSeconds)
@@ -282,6 +342,11 @@ void renderShutdown(void)
     {
         graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
         meshChargedBytes = 0UL;
+    }
+    if (textureChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, textureChargedBytes);
+        textureChargedBytes = 0UL;
     }
     meshIsReady = BOOLEAN_FALSE;
     shaderProgramCount = 0U;
