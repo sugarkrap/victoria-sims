@@ -46,6 +46,18 @@ const imports = {
         },
         setClearColor: (red, green, blue) => calls.push({ name: "setClearColor", red, green, blue }),
         setTriangleTint: (tint) => calls.push({ name: "setTriangleTint", tint }),
+        // Mesh drawing. Nothing in this file gives the engine a disc, so these
+        // stand ready and stay unused — which is itself worth asserting, since
+        // a build with no disc must still draw its triangle.
+        createMeshPipeline: (pointer, length) => {
+            calls.push({ name: "createMeshPipeline", shaderSource: decodeUTF8(pointer, length) });
+            return 1;
+        },
+        uploadMesh: (vertexPointer, vertexCount, indexPointer, indexCount) => {
+            calls.push({ name: "uploadMesh", vertexCount, indexCount });
+            return 1;
+        },
+        setMeshUniforms: () => calls.push({ name: "setMeshUniforms" }),
         submitFrame: () => {
             calls.push({ name: "submitFrame" });
             // Advancing the clock mid-frame is what the engine measures: it
@@ -131,6 +143,15 @@ const tints = calls.filter((call) => call.name === "setTriangleTint").map((call)
 check("tint stays inside its intended range", tints.every((tint) => tint >= 0.29 && tint <= 1.01));
 check("tint actually animates", new Set(tints.map((tint) => tint.toFixed(4))).size > 1);
 
+// A build that was never given a disc must still draw. The mesh imports exist
+// from the moment the module is linked, and a backend that reached for them
+// unprompted would take the page from "no disc yet" to a blank canvas.
+check("draws the triangle when no disc was given",
+      calls.some((call) => call.name === "setTriangleTint"));
+check("and does not build a mesh pipeline it was never given a mesh for",
+      !calls.some((call) => call.name === "createMeshPipeline"));
+check("nor uploads one", !calls.some((call) => call.name === "uploadMesh"));
+
 const lastMicroseconds = instance.exports.victoriaWebGetFrameMicroseconds();
 const worstMicroseconds = instance.exports.victoriaWebGetWorstFrameMicroseconds();
 const averageMicroseconds = instance.exports.victoriaWebGetAverageFrameMicroseconds();
@@ -198,6 +219,9 @@ const refusalImports = {
         createTrianglePipeline: () => { refusalCalls.push({ name: "createTrianglePipeline" }); return 1; },
         setClearColor: () => {},
         setTriangleTint: () => {},
+        createMeshPipeline: () => 1,
+        uploadMesh: () => 1,
+        setMeshUniforms: () => {},
         submitFrame: () => {},
         queryGraphicsMemoryKibibytes: () => reportedGraphicsKibibytes,
         warmUpPipeline: () => refusalCalls.push({ name: "warmUpPipeline" })

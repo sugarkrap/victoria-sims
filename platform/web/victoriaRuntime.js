@@ -10,6 +10,13 @@ const runtimeState = {
     canvasFormat: null,
     pipeline: null,
     uniformBuffer: null,
+    meshPipeline: null,
+    meshUniformBuffer: null,
+    meshBindGroup: null,
+    meshVertexBuffer: null,
+    meshIndexBuffer: null,
+    meshIndexCount: 0,
+    depthTexture: null,
     bindGroup: null,
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
     startTimestamp: 0,
@@ -21,6 +28,30 @@ const runtimeState = {
 // work without telling anyone anything new.
 const OVERLAY_INTERVAL_MILLISECONDS = 250;
 const SPARKLINE_SAMPLE_COUNT = 120;
+
+// The depth attachment has to match the canvas, and the canvas resizes with
+// the window. Kept until the size changes rather than made every frame, since
+// allocating a full screen texture per frame is exactly the sort of thing that
+// looks fine at sixty frames a second on a desktop and is not.
+function ensureDepthTexture() {
+    const width = runtimeState.canvas.width;
+    const height = runtimeState.canvas.height;
+
+    if (runtimeState.depthTexture &&
+        runtimeState.depthTexture.width === width &&
+        runtimeState.depthTexture.height === height) {
+        return runtimeState.depthTexture;
+    }
+    if (runtimeState.depthTexture) {
+        runtimeState.depthTexture.destroy();
+    }
+    runtimeState.depthTexture = runtimeState.device.createTexture({
+        size: { width, height },
+        format: "depth24plus",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    return runtimeState.depthTexture;
+}
 
 function readUTF8(pointer, length) {
     const bytes = new Uint8Array(runtimeState.memory.buffer, pointer, length);
@@ -97,19 +128,121 @@ const importObject = {
                 runtimeState.uniformBuffer, 0, new Float32Array([tint, 0, 0, 0]));
         },
 
+        // Builds the pipeline a mesh is drawn with. Separate from the triangle's
+        // because it takes vertex buffers and tests depth, and because the
+        // triangle has to keep working on a build with no disc.
+        createMeshPipeline(shaderPointer, shaderLength) {
+            const shaderSource = readUTF8(shaderPointer, shaderLength);
+            const shaderModule = runtimeState.device.createShaderModule({ code: shaderSource });
+
+            runtimeState.meshPipeline = runtimeState.device.createRenderPipeline({
+                layout: "auto",
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: "vertexMain",
+                    buffers: [{
+                        // Position then normal, three floats each.
+                        arrayStride: 24,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: "float32x3" },
+                            { shaderLocation: 1, offset: 12, format: "float32x3" }
+                        ]
+                    }]
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: "fragmentMain",
+                    targets: [{ format: runtimeState.canvasFormat }]
+                },
+                primitive: { topology: "triangle-list" },
+                depthStencil: {
+                    format: "depth24plus",
+                    depthWriteEnabled: true,
+                    depthCompare: "less-equal"
+                }
+            });
+
+            // Sixteen floats of matrix and four of light direction.
+            runtimeState.meshUniformBuffer = runtimeState.device.createBuffer({
+                size: 80,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+            runtimeState.meshBindGroup = runtimeState.device.createBindGroup({
+                layout: runtimeState.meshPipeline.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } }]
+            });
+            return 1;
+        },
+
+        // Copies the mesh out of linear memory into buffers the device owns.
+        // The copy happens here, synchronously, which is what lets the module
+        // reuse its staging space the moment this returns.
+        uploadMesh(vertexPointer, vertexCount, indexPointer, indexCount) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const vertexBytes = vertexCount * 24;
+            // Index buffers must be a multiple of four bytes, and an odd number
+            // of sixteen-bit indices is not. Padding is cheaper than refusing.
+            const indexBytes = (indexCount * 2 + 3) & ~3;
+
+            runtimeState.meshVertexBuffer = runtimeState.device.createBuffer({
+                size: vertexBytes,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshVertexBuffer, 0,
+                new Uint8Array(memory, vertexPointer, vertexBytes));
+
+            runtimeState.meshIndexBuffer = runtimeState.device.createBuffer({
+                size: indexBytes,
+                usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshIndexBuffer, 0,
+                new Uint8Array(memory, indexPointer, indexCount * 2));
+
+            runtimeState.meshIndexCount = indexCount;
+            return 1;
+        },
+
+        setMeshUniforms(valuePointer) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshUniformBuffer, 0, new Uint8Array(memory, valuePointer, 80));
+        },
+
         submitFrame() {
+            const drawingMesh = runtimeState.meshIndexCount > 0;
             const encoder = runtimeState.device.createCommandEncoder();
-            const pass = encoder.beginRenderPass({
+            const descriptor = {
                 colorAttachments: [{
                     view: runtimeState.context.getCurrentTexture().createView(),
                     clearValue: runtimeState.clearColor,
                     loadOp: "clear",
                     storeOp: "store"
                 }]
-            });
-            pass.setPipeline(runtimeState.pipeline);
-            pass.setBindGroup(0, runtimeState.bindGroup);
-            pass.draw(3, 1, 0, 0);
+            };
+
+            if (drawingMesh) {
+                descriptor.depthStencilAttachment = {
+                    view: ensureDepthTexture().createView(),
+                    depthClearValue: 1,
+                    depthLoadOp: "clear",
+                    depthStoreOp: "store"
+                };
+            }
+
+            const pass = encoder.beginRenderPass(descriptor);
+            if (drawingMesh) {
+                pass.setPipeline(runtimeState.meshPipeline);
+                pass.setBindGroup(0, runtimeState.meshBindGroup);
+                pass.setVertexBuffer(0, runtimeState.meshVertexBuffer);
+                pass.setIndexBuffer(runtimeState.meshIndexBuffer, "uint16");
+                pass.drawIndexed(runtimeState.meshIndexCount, 1, 0, 0, 0);
+            } else {
+                pass.setPipeline(runtimeState.pipeline);
+                pass.setBindGroup(0, runtimeState.bindGroup);
+                pass.draw(3, 1, 0, 0);
+            }
             pass.end();
             runtimeState.device.queue.submit([encoder.finish()]);
         },

@@ -65,7 +65,7 @@ LINUX_SOURCES := $(ENGINE_SOURCES) \
                  platform/linux/linuxDiscStore.c platform/linux/linuxEntryPoint.c
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
-               render/webGPU/renderWebGPU.c \
+               render/webGPU/renderWebGPU.c render/meshCamera.c \
                platform/web/webEntryPoint.c
 
 LINUX_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/linux
