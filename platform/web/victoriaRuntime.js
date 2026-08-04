@@ -53,7 +53,15 @@ function setMeshTexture(pixels, width, height) {
         { bytesPerRow, rowsPerImage: height }, { width, height });
 }
 
+// A texture binds to the layout the mesh's pipeline defines, so there is
+// nothing to bind it to until a mesh has been uploaded. That ordering held by
+// accident for as long as no texture was ever found; the first disc that
+// yielded one arrived here with a null pipeline. The engine now sets the mesh
+// first, and this refuses rather than throwing if it ever does not.
 function rebuildMeshBindGroup() {
+    if (!runtimeState.meshPipeline || !runtimeState.meshTexture) {
+        return false;
+    }
     runtimeState.meshBindGroup = runtimeState.device.createBindGroup({
         layout: runtimeState.meshPipeline.getBindGroupLayout(0),
         entries: [
@@ -62,6 +70,7 @@ function rebuildMeshBindGroup() {
             { binding: 2, resource: runtimeState.meshTexture.createView() }
         ]
     });
+    return true;
 }
 
 // The depth attachment has to match the canvas, and the canvas resizes with
@@ -232,8 +241,7 @@ const importObject = {
                 return 0;
             }
             setMeshTexture(new Uint8Array(memory, pixelPointer, byteCount), width, height);
-            rebuildMeshBindGroup();
-            return 1;
+            return rebuildMeshBindGroup() ? 1 : 0;
         },
 
         // Copies the mesh out of linear memory into buffers the device owns.

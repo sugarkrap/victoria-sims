@@ -791,6 +791,12 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message), " was indexed but would not read");
             }
             platformLogMessage(message);
+            /* The mesh before the texture. A backend binds an image to the
+               pipeline the mesh created, so there is nothing to bind it to
+               until the mesh has been uploaded — an ordering that held by
+               accident for as long as no texture was ever found, and broke on
+               the first disc that yielded one. */
+            renderSetMesh(&discSearch.mesh, globalArena);
             uploadFoundTexture();
             /* Held until the upload has copied it, then given back. */
             memoryArenaRewindToMarker(globalArena, marker);
@@ -802,9 +808,9 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             stringAppend(message, sizeof(message), wanted);
             stringAppend(message, sizeof(message), " is nowhere on this disc");
             platformLogMessage(message);
+            renderSetMesh(&discSearch.mesh, globalArena);
         }
 
-        renderSetMesh(&discSearch.mesh, globalArena);
         discPhase = DISC_PHASE_DONE;
         discLoadStatus = ENGINE_DISC_READY;
         return discLoadStatus;
@@ -1778,8 +1784,10 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage("engine: not enough room to index the disc for a texture");
         }
 
-        uploadFoundTexture();
+        /* The mesh first here too, for the same reason: this is the path taken
+           when a package held its own texture, and it had the same ordering. */
         renderSetMesh(&discSearch.mesh, globalArena);
+        uploadFoundTexture();
         discPhase = DISC_PHASE_DONE;
         discLoadStatus = ENGINE_DISC_READY;
     }

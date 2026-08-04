@@ -217,6 +217,33 @@ console.log("\n-- uploading a texture whose rows are not a multiple of 256 --");
           uploadTexture(1000, 64, 64) === 0);
 }
 
+console.log("\n-- uploading a texture before there is a mesh to put it on --");
+{
+    // An image binds to the layout the mesh's pipeline defines, so there is
+    // nothing to bind it to until a mesh has been uploaded. The engine sets the
+    // mesh first; this is what happens if it ever does not, and for as long as
+    // no disc yielded a texture the answer was an exception from a null
+    // pipeline rather than a refusal.
+    const uploadTexture = runtime.importObject.victoriaRender.uploadTexture;
+    const pixelMemory = new ArrayBuffer(1024);
+
+    runtime.runtimeState.instance = { exports: { memory: { buffer: pixelMemory } } };
+    runtime.runtimeState.memory = { buffer: pixelMemory };
+    runtime.runtimeState.device = makeRecordingDevice();
+    runtime.runtimeState.meshPipeline = null;
+    runtime.runtimeState.meshTexture = null;
+
+    let threw = false;
+    let answer = 1;
+    try {
+        answer = uploadTexture(0, 2, 2);
+    } catch (error) {
+        threw = true;
+    }
+    check("it does not throw", !threw);
+    check("and says it could not", answer === 0);
+}
+
 if (failureCount === 0) {
     console.log("\nall runtime upload checks passed");
     process.exit(0);
