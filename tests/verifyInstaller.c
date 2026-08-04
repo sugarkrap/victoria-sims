@@ -204,6 +204,64 @@ int main(void)
                   installerReadOffsetTable(fileHead, 8UL, 0U, &table) == INSTALLER_READ_TRUNCATED);
     }
 
+    printf("\n-- finding a table that is not where the old loaders keep it --\n");
+    {
+        static const Unsigned32 words[6] = { 1UL, 2UL, 3UL, 4UL, 0x111UL, 0x222UL };
+        const MemorySize tableAt = 0xC0UL;
+        const MemorySize versionAt = 0x60UL;
+        Unsigned64 found;
+        InstallerOffsetTable table;
+
+        clearHead();
+        buildTable(&fileHead[tableAt], "rDlPtS06\207eVx", words, 6UL);
+        {
+            static const char version[] = "Inno Setup Setup Data (5.5.0)";
+            MemorySize index;
+
+            for (index = 0UL; index < stringLength(version); index += 1UL)
+            {
+                fileHead[versionAt + index] = (Unsigned8)version[index];
+            }
+        }
+
+        found = installerFindTableMarker(fileHead, sizeof(fileHead), 0U);
+        checkThat(&failureCount, "the table is found by looking for it", found == (Unsigned64)tableAt);
+        checkThat(&failureCount, "and reads once found",
+                  installerReadOffsetTable(&fileHead[found], sizeof(fileHead) - (MemorySize)found,
+                                           found, &table) == INSTALLER_READ_OK &&
+                      table.dataOffsetInBytes == 0x222UL);
+        checkThat(&failureCount, "the version string is found too",
+                  installerFindVersionMarker(fileHead, sizeof(fileHead), 0U) ==
+                      (Unsigned64)versionAt);
+
+        /* A chunk's own offset is added, so the answer is where the thing is in
+           the file rather than where it is in the buffer. */
+        checkThat(&failureCount, "an offset is reported against the file, not the chunk",
+                  installerFindTableMarker(&fileHead[0x80], 0x80UL, 0x80ULL) ==
+                      (Unsigned64)tableAt);
+
+        /* The reason chunks overlap. Cut the buffer so the identifier straddles
+           the cut: the first half must not claim to have found it, and a second
+           chunk that begins one overlap back must. */
+        checkThat(&failureCount, "a mark cut in half is not found in the first half",
+                  installerFindTableMarker(fileHead, tableAt + 4UL, 0U) ==
+                      (Unsigned64)INSTALLER_MARKER_NOT_FOUND);
+        {
+            MemorySize resumeAt = (tableAt + 4UL) - INSTALLER_MARKER_OVERLAP_BYTES;
+
+            checkThat(&failureCount, "but is found once the next chunk steps back by the overlap",
+                      installerFindTableMarker(&fileHead[resumeAt], sizeof(fileHead) - resumeAt,
+                                               (Unsigned64)resumeAt) == (Unsigned64)tableAt);
+        }
+
+        clearHead();
+        checkThat(&failureCount, "and a file with neither says so",
+                  installerFindTableMarker(fileHead, sizeof(fileHead), 0U) ==
+                          (Unsigned64)INSTALLER_MARKER_NOT_FOUND &&
+                      installerFindVersionMarker(fileHead, sizeof(fileHead), 0U) ==
+                          (Unsigned64)INSTALLER_MARKER_NOT_FOUND);
+    }
+
     printf("\n-- the version the installer was built with --\n");
     {
         /* The fixed field as Inno writes it: the string, then padding. Which

@@ -41,8 +41,8 @@ printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 # The disc this was built for turned out to be a repack with the whole game —
 # 2.7 gibibytes of it — sealed inside one of these, so the engine has to be able
 # to find its way around one. What that takes is a Delphi MZP stub, an offset
-# table at 0x30 with a checksum the reader uses to work out the field layout,
-# and the version string the table's first offset points at.
+# table with a checksum the reader uses to work out the field layout, and the
+# version string the table's first offset points at.
 #
 # No payload: nothing here is compressed, and a fixture that pretended to be
 # would be testing a decompressor that does not exist yet. What this does test
@@ -51,7 +51,11 @@ printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 python3 - "$buildRoot/TSData.exe" <<'PYTHON'
 import binascii, struct, sys
 
-TABLE_AT = 0x30
+# Not at 0x30. The disc this fixture grew for keeps zeros there — its loader is
+# a newer one that hides the table inside a resource — so the table has to be
+# found by looking for it, and a fixture that put it at 0x30 would test the one
+# path the real file does not take.
+TABLE_AT = 0x140
 HEADER_AT = 0x100
 DATA_AT = 0x180
 TOTAL = 0x200

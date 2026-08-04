@@ -110,6 +110,59 @@ InstallerReadResult installerFindOffsetTable(const Unsigned8 *head, MemorySize h
     return INSTALLER_READ_OK;
 }
 
+Unsigned64 installerFindTableMarker(const Unsigned8 *bytes, MemorySize byteCount,
+                                    Unsigned64 chunkOffset)
+{
+    MemorySize at;
+
+    if (byteCount < INSTALLER_TABLE_IDENTIFIER_BYTES)
+    {
+        return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+    }
+    for (at = 0UL; at + INSTALLER_TABLE_IDENTIFIER_BYTES <= byteCount; at += 1UL)
+    {
+        /* The same test the inline case uses, digits and all, rather than the
+           six letters alone. Six letters occur in a gigabyte of compressed data
+           by chance; six letters followed by two digits do not. */
+        if (looksLikeTableIdentifier(&bytes[at], byteCount - at))
+        {
+            return chunkOffset + (Unsigned64)at;
+        }
+    }
+    return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+}
+
+Unsigned64 installerFindVersionMarker(const Unsigned8 *bytes, MemorySize byteCount,
+                                      Unsigned64 chunkOffset)
+{
+    MemorySize prefixLength = stringLength(versionStringPrefix);
+    MemorySize at;
+
+    if (byteCount < prefixLength)
+    {
+        return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+    }
+    for (at = 0UL; at + prefixLength <= byteCount; at += 1UL)
+    {
+        MemorySize index;
+        Boolean matches = BOOLEAN_TRUE;
+
+        for (index = 0UL; index < prefixLength; index += 1UL)
+        {
+            if (bytes[at + index] != (Unsigned8)versionStringPrefix[index])
+            {
+                matches = BOOLEAN_FALSE;
+                break;
+            }
+        }
+        if (matches)
+        {
+            return chunkOffset + (Unsigned64)at;
+        }
+    }
+    return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+}
+
 InstallerReadResult installerReadOffsetTable(const Unsigned8 *bytes, MemorySize byteCount,
                                              Unsigned64 tableOffsetInBytes,
                                              InstallerOffsetTable *table)

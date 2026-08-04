@@ -93,6 +93,35 @@ typedef struct InstallerOffsetTable
 InstallerReadResult installerFindOffsetTable(const Unsigned8 *head, MemorySize headSize,
                                              Unsigned64 *tableOffsetInBytes);
 
+/* Neither of those, and the table is somewhere in the file.
+ *
+ * Newer loaders keep it in one of the program's resources rather than at a
+ * fixed place, and reaching it that way means walking a PE header, its section
+ * table, and a resource tree — three formats deep, for an address. But the
+ * table says what it is in its first eight bytes, and so does the version
+ * string, so both can be found by looking for them.
+ *
+ * That is not a shortcut around parsing the program properly; it is a way of
+ * finding out what is actually in the file before writing a parser on the
+ * strength of a guess about what should be. */
+
+#define INSTALLER_MARKER_NOT_FOUND 0xFFFFFFFFFFFFFFFFULL
+
+/* Bytes of overlap a caller must keep between consecutive chunks, so a marker
+   lying across a boundary is still met whole. One less than the longest thing
+   looked for. */
+#define INSTALLER_MARKER_OVERLAP_BYTES 24UL
+
+/* The first offset table identifier in this chunk, as an offset into the file,
+   or NOT_FOUND. chunkOffset is where the chunk starts in the file. */
+Unsigned64 installerFindTableMarker(const Unsigned8 *bytes, MemorySize byteCount,
+                                    Unsigned64 chunkOffset);
+
+/* The same for the version string, which is stored uncompressed and so can be
+   found this way even when nothing else can. */
+Unsigned64 installerFindVersionMarker(const Unsigned8 *bytes, MemorySize byteCount,
+                                      Unsigned64 chunkOffset);
+
 /* Reads the table, given the bytes at that offset.
  *
  * The field list is established by checksum rather than assumed: every

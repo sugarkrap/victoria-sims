@@ -324,10 +324,12 @@ calls.length = 0;
     const installer = loggedMessages.find((text) => text.includes("TSData.exe —"));
     check("probes the installer for a signature", Boolean(installer));
     if (installer) {
-        check("naming it from the mark at 0x30, not the stub at the front",
-              installer.includes("Inno Setup"));
-        check("and printing both", installer.includes("4D 5A 50 00") &&
-              installer.includes("72 44 6C 50 74 53 30 32"));
+        check("naming Delphi's stub, which is what marks it out",
+              installer.includes("Delphi-built"));
+        // Printed whether or not they mean anything to the reader: on the disc
+        // this grew for, 0x30 being zeros is what said the table was elsewhere.
+        check("and printing the front and 0x30 both",
+              installer.includes("4D 5A 50 00") && installer.includes("and at 0x30"));
     }
 
     // Having named it, the load goes on to open it: the table's own checksum
@@ -335,8 +337,12 @@ calls.length = 0;
     // reading further would need. Nothing is decompressed — this is navigation,
     // and a reader that claimed to open an archive before it could find its way
     // around one would be claiming nothing.
-    check("finds the offset table",
-          loggedMessages.some((text) => text.includes("offset table at 0x00000030")));
+    // Not at 0x30 — the real installer keeps zeros there, so the fixture does
+    // too, and the table has to be found by looking for it.
+    check("says the table is not where the old loaders keep it",
+          loggedMessages.some((text) => text.includes("keeps no table at 0x30")));
+    check("and finds it by searching",
+          loggedMessages.some((text) => text.includes("found an offset table at 0x00000140")));
     const offsetTable = loggedMessages.find((text) => text.includes("table revision"));
     check("reads it", Boolean(offsetTable));
     if (offsetTable) {

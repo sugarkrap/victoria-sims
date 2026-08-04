@@ -300,6 +300,20 @@ static Unsigned32 installerFileIndex = (Unsigned32)NO_INSTALLER;
 static Unsigned32 installerStage = 0U;
 static InstallerOffsetTable installerTable;
 
+/* How much of an installer gets searched when its table is not where the older
+   loaders put it, and how much is read at a time.
+ *
+ * A newer loader keeps the table in one of the program's resources, which is
+ * inside the program, which is at the front of the file. Thirty-two mebibytes
+ * of a two point seven gibibyte installer is generous for something that lives
+ * in the first one — and a limit that is reported when it is reached, rather
+ * than a search that quietly stops. */
+#define INSTALLER_SCAN_LIMIT_BYTES (32ULL * 1024ULL * 1024ULL)
+#define INSTALLER_SCAN_CHUNK_BYTES (256UL * 1024UL)
+
+static Unsigned64 installerScanOffset = 0ULL;
+static Unsigned64 installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+
 /* The first bytes of a file, and what they mean.
  *
  * This disc's entire game is inside a single two point seven gigabyte file that
@@ -826,6 +840,20 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             message[0] = '\0';
             stringAppend(message, sizeof(message), "engine: ");
             stringAppend(message, sizeof(message), entry->path);
+            if (opened == INSTALLER_READ_NOT_AN_INSTALLER)
+            {
+                /* Not where the older loaders keep it. A newer one keeps it in
+                   a resource inside the program, which is three formats deep
+                   from here — so it gets looked for instead, because the table
+                   says what it is and can be recognised on sight. */
+                stringAppend(message, sizeof(message),
+                             " keeps no table at 0x30, searching the front of it");
+                platformLogMessage(message);
+                installerScanOffset = 0ULL;
+                installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+                installerStage = 3U;
+                return ENGINE_DISC_WORKING;
+            }
             if (opened != INSTALLER_READ_OK)
             {
                 stringAppend(message, sizeof(message), " — ");
@@ -838,6 +866,106 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             appendHexadecimal(message, sizeof(message), (Unsigned32)tableOffsetInBytes);
             platformLogMessage(message);
             installerStage = 1U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Reading the front of the installer a chunk at a time, looking for
+           either mark. Chunks overlap, so a mark lying across a boundary is
+           still met whole — a search that reads adjacent blocks and finds
+           nothing at the seam is a search that reports "not there" about
+           something that is. */
+        if (installerStage == 3U)
+        {
+            MemorySize marker = memoryArenaGetMarker(globalArena);
+            Unsigned8 *chunk;
+            MemorySize wanted = INSTALLER_SCAN_CHUNK_BYTES;
+            Unsigned64 foundTable;
+            Unsigned64 foundVersion;
+
+            if (installerScanOffset >= entry->sizeInBytes ||
+                installerScanOffset >= (Unsigned64)INSTALLER_SCAN_LIMIT_BYTES)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: no offset table in the first ");
+                appendByteSize(message, sizeof(message), installerScanOffset);
+                stringAppend(message, sizeof(message), " of it");
+                if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                {
+                    /* Worth saying even so: the version string is stored plain,
+                       so finding it proves what built the file even when the
+                       table has not been found. */
+                    stringAppend(message, sizeof(message), ", but a version string at ");
+                    appendHexadecimal(message, sizeof(message), (Unsigned32)installerVersionOffset);
+                }
+                platformLogMessage(message);
+                if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                {
+                    installerTable.headerOffsetInBytes = (Unsigned32)installerVersionOffset;
+                    installerStage = 2U;
+                    return ENGINE_DISC_WORKING;
+                }
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+
+            if (installerScanOffset + (Unsigned64)wanted > entry->sizeInBytes)
+            {
+                wanted = (MemorySize)(entry->sizeInBytes - installerScanOffset);
+            }
+            chunk = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
+            if (chunk == NULL_POINTER)
+            {
+                platformLogMessage("engine: no room to search the installer");
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
+                                             installerScanOffset, wanted, chunk);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+            if (read != VIRTUAL_READ_OK)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: the search stopped at ");
+                appendByteSize(message, sizeof(message), installerScanOffset);
+                stringAppend(message, sizeof(message), " — ");
+                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+
+            foundTable = installerFindTableMarker(chunk, wanted, installerScanOffset);
+            foundVersion = installerFindVersionMarker(chunk, wanted, installerScanOffset);
+            memoryArenaRewindToMarker(globalArena, marker);
+
+            if (foundVersion != (Unsigned64)INSTALLER_MARKER_NOT_FOUND &&
+                installerVersionOffset == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                installerVersionOffset = foundVersion;
+            }
+            if (foundTable != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                tableOffsetInBytes = foundTable;
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: found an offset table at ");
+                appendHexadecimal(message, sizeof(message), (Unsigned32)foundTable);
+                platformLogMessage(message);
+                installerStage = 1U;
+                return ENGINE_DISC_WORKING;
+            }
+
+            /* Back by the overlap, so nothing is missed at the seam. */
+            installerScanOffset += (Unsigned64)wanted;
+            if (installerScanOffset > (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES &&
+                wanted > INSTALLER_MARKER_OVERLAP_BYTES)
+            {
+                installerScanOffset -= (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES;
+            }
             return ENGINE_DISC_WORKING;
         }
 
