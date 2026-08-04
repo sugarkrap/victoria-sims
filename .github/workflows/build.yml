@@ -159,10 +159,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang
+      # The symbol half of the allocation check compiles every backend to
+      # inspect its undefined references, so it needs the same headers the
+      # normal builds do — clang alone is not enough.
+      - name: Install clang and the graphics headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang libegl1-mesa-dev libgles2-mesa-dev libx11-dev
 
       - name: No dynamic allocation
         run: make check
