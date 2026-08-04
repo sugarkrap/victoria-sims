@@ -165,17 +165,34 @@ otherwise want to "fix".
 ## Assets and the law
 
 The upstream project reads assets straight out of a retail install. This one
-must not ship, vendor, or commit any game data — no `.package` files, no
-textures, no audio, not even for tests. The original `TestAssets/` directory
-was deleted in the fork for exactly this reason.
+must never ship, vendor, or commit **retail-derived** game data.
 
-The plan is custom extraction tooling written in C, living in `tools/`, that
-reads a user's own legitimate installation at run time. **No artifacts in the
-repository, ever.** If a test needs data, it either generates it or is written
-so it does not need it.
+Note the wording. An earlier version of this rule banned `.package` files
+outright, "not even for tests", and that was a mistake: it threw away a set of
+purpose-built fixtures that carry no rights at all — a Utah teapot and the
+Creative Commons Zero mark, authored upstream specifically for unit testing.
+The distinction that matters is provenance, not file extension.
 
-Format documentation reverse-engineered upstream is kept under `docs/formats/`.
-Notes are fine; data is not.
+So:
+
+* **Retail-derived data: never.** Not textures, not audio, not packages, not
+  "just for a test". If its provenance cannot be established, treat it as
+  retail-derived.
+* **Purpose-built fixtures: yes, under `testAssets/`,** pinned by SHA-256 in
+  `testAssets/manifest.sha256`. `tools/checkNoGameData.sh` enforces both halves
+  and runs in continuous integration: nothing game-data-shaped may be tracked
+  outside that directory, every manifest entry must actually be committed, and
+  nothing may be tracked there that the manifest does not list. Changing a
+  fixture means changing the manifest in a diff a reviewer can see.
+
+The check consults git rather than the filesystem on purpose. The first version
+hashed what was on disk while listing what git knew about, and so passed
+happily while `.gitignore`'s `*.package` line silently kept four fixtures out
+of the commit entirely.
+
+Real content still comes from the user's own installation at run time, read by
+extraction tooling in `tools/`. Format documentation reverse-engineered
+upstream lives in `docs/formats/`; notes are fine, retail data is not.
 
 ## The profiler
 
