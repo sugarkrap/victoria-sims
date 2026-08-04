@@ -163,6 +163,40 @@ Unsigned64 installerFindVersionMarker(const Unsigned8 *bytes, MemorySize byteCou
     return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
 }
 
+Unsigned64 installerFindMark(const Unsigned8 *bytes, MemorySize byteCount, Unsigned64 chunkOffset,
+                             const char *mark, MemorySize markLength)
+{
+    MemorySize at;
+
+    if (markLength == 0UL || byteCount < markLength)
+    {
+        return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+    }
+    for (at = 0UL; at + markLength <= byteCount; at += 1UL)
+    {
+        MemorySize index;
+
+        /* The first byte decides almost every position, so the inner loop is
+           entered once in two hundred and fifty six rather than every time. */
+        if (bytes[at] != (Unsigned8)mark[0])
+        {
+            continue;
+        }
+        for (index = 1UL; index < markLength; index += 1UL)
+        {
+            if (bytes[at + index] != (Unsigned8)mark[index])
+            {
+                break;
+            }
+        }
+        if (index == markLength)
+        {
+            return chunkOffset + (Unsigned64)at;
+        }
+    }
+    return (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+}
+
 InstallerReadResult installerReadOffsetTable(const Unsigned8 *bytes, MemorySize byteCount,
                                              Unsigned64 tableOffsetInBytes,
                                              InstallerOffsetTable *table)

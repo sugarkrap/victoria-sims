@@ -314,7 +314,7 @@ calls.length = 0;
           loggedMessages.some((text) =>
               text.includes("5 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
-          loggedMessages.some((text) => text.includes("512 bytes  TSData.exe")));
+          loggedMessages.some((text) => text.includes("768 bytes  TSData.exe")));
 
     // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
     // Setup installer, copied from the shape a real repack has: a Delphi MZP
@@ -341,8 +341,21 @@ calls.length = 0;
     // too, and the table has to be found by looking for it.
     check("says the table is not where the old loaders keep it",
           loggedMessages.some((text) => text.includes("keeps no table at 0x30")));
-    check("and finds it by searching",
-          loggedMessages.some((text) => text.includes("found an offset table at 0x00000140")));
+    // The real file's front is a program, and a program says where it stops.
+    // Searching from there rather than from zero is the difference between
+    // looking in the payload and looking in the executable.
+    check("reads the program's own section table to find where it ends",
+          loggedMessages.some((text) =>
+              text.includes("1 section(s) ending at 0x00000200") &&
+              text.includes("256 bytes appended past it")));
+    check("and names what is appended there",
+          loggedMessages.some((text) => text.includes("what is appended starts 49 6E 6E 6F")));
+    // Reported the moment it is met: the search stops at the offset table, so a
+    // summary printed afterwards would never be printed at all.
+    check("reporting marks it meets on the way",
+          loggedMessages.some((text) => text.includes("a package stored whole at 0x00000230")));
+    check("and finds the table by searching",
+          loggedMessages.some((text) => text.includes("found an offset table at 0x00000240")));
     const offsetTable = loggedMessages.find((text) => text.includes("table revision"));
     check("reads it", Boolean(offsetTable));
     if (offsetTable) {
@@ -350,9 +363,9 @@ calls.length = 0;
         // off the end where every layout keeps them.
         check("working out the layout from the checksum", offsetTable.includes("6 fields"));
         check("with the offsets it ends with",
-              offsetTable.includes("header at 0x00000100") && offsetTable.includes("data at 0x00000180"));
+              offsetTable.includes("header at 0x00000200") && offsetTable.includes("data at 0x000002C0"));
         check("and the size it claims matching the file",
-              offsetTable.includes("512 bytes of 512 bytes"));
+              offsetTable.includes("768 bytes of 768 bytes"));
     }
     check("and reads the version that built it",
           loggedMessages.some((text) => text.includes("Inno Setup Setup Data (5.5.0) (u)")));

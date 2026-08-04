@@ -51,31 +51,45 @@ printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 python3 - "$buildRoot/TSData.exe" <<'PYTHON'
 import binascii, struct, sys
 
-# Not at 0x30. The disc this fixture grew for keeps zeros there — its loader is
-# a newer one that hides the table inside a resource — so the table has to be
-# found by looking for it, and a fixture that put it at 0x30 would test the one
-# path the real file does not take.
-TABLE_AT = 0x140
-HEADER_AT = 0x100
-DATA_AT = 0x180
-TOTAL = 0x200
+# A real program at the front, and the payload appended past the end of it.
+#
+# That is the shape the disc's own TSData.exe has: nothing identifying an
+# installer in its first thirty-three mebibytes, because the front is a program
+# and the program says where it stops. A fixture with the table at 0x30, or with
+# no section table at all, would test neither of the paths the real file takes.
+HEADER_AT = 0x80          # where the DOS stub points
+SECTION_TABLE_AT = HEADER_AT + 4 + 20 + 224
+PROGRAM_ENDS_AT = 0x200   # the one section's bytes end here
+VERSION_AT = 0x200        # appended: the version string...
+PACKAGE_MARK_AT = 0x230   # ...a package mark, which the search reports...
+TABLE_AT = 0x240          # ...and the offset table
+DATA_AT = 0x2C0
+TOTAL = 0x300
 
 image = bytearray(TOTAL)
 # Delphi's stub, which is what separates an installer from every other program
 # on a disc: Microsoft's linker writes MZ, Borland's writes MZP.
 image[0:4] = b"MZP\x00"
+image[0x3C:0x40] = struct.pack("<I", HEADER_AT)
+image[HEADER_AT:HEADER_AT + 4] = b"PE\x00\x00"
+image[HEADER_AT + 4 + 2:HEADER_AT + 4 + 4] = struct.pack("<H", 1)     # one section
+image[HEADER_AT + 4 + 16:HEADER_AT + 4 + 18] = struct.pack("<H", 224)  # optional header size
+# That section covers the program and nothing after it.
+image[SECTION_TABLE_AT + 16:SECTION_TABLE_AT + 20] = struct.pack("<I", PROGRAM_ENDS_AT)
+image[SECTION_TABLE_AT + 20:SECTION_TABLE_AT + 24] = struct.pack("<I", 0)
+
+version = b"Inno Setup Setup Data (5.5.0) (u)"
+image[VERSION_AT:VERSION_AT + len(version)] = version
+image[PACKAGE_MARK_AT:PACKAGE_MARK_AT + 4] = b"DBPF"
 
 # Six fields, which is the oldest layout: how much of the file the installer
 # accounts for, then four about the program it carries, then the two offsets
 # every layout ends with. The reader is not told there are six — it tries each
 # length until the checksum agrees, so this fixture is a real test of that.
-words = [TOTAL, 0, 0, 0, HEADER_AT, DATA_AT]
+words = [TOTAL, 0, 0, 0, VERSION_AT, DATA_AT]
 table = b"rDlPtS02\x87eVx" + b"".join(struct.pack("<I", word) for word in words)
 table += struct.pack("<I", binascii.crc32(table) & 0xFFFFFFFF)
 image[TABLE_AT:TABLE_AT + len(table)] = table
-
-version = b"Inno Setup Setup Data (5.5.0) (u)"
-image[HEADER_AT:HEADER_AT + len(version)] = version
 
 open(sys.argv[1], "wb").write(image)
 PYTHON

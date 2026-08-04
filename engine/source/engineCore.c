@@ -10,6 +10,7 @@
 #include "victoria/compression.h"
 #include "victoria/resourceIndex.h"
 #include "victoria/installerReader.h"
+#include "victoria/programReader.h"
 #include "victoria/textureDecode.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
@@ -312,7 +313,33 @@ static InstallerOffsetTable installerTable;
 #define INSTALLER_SCAN_CHUNK_BYTES (256UL * 1024UL)
 
 static Unsigned64 installerScanOffset = 0ULL;
+static Unsigned64 installerScanFrom = 0ULL;
 static Unsigned64 installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+
+/* Marks worth looking for in whatever an installer carries.
+ *
+ * Not a list of things this engine can read. A cabinet found here would still
+ * have to be decoded, and DBPF found here would mean the packages were stored
+ * whole — which would make everything downstream of this unnecessary. Either
+ * answer is worth a pass over the bytes, and neither is worth guessing at. */
+typedef struct SearchedMark
+{
+    const char *bytes;
+    MemorySize length;
+    const char *name;
+} SearchedMark;
+
+static const SearchedMark searchedMarks[] = {
+    { "DBPF", 4UL, "a package stored whole" },
+    { "MSCF", 4UL, "a Microsoft cabinet" },
+    { "ISc(", 4UL, "an InstallShield cabinet" },
+    { "PK\x03\x04", 4UL, "a zip archive" },
+    { "Rar!", 4UL, "a RAR archive" },
+    { "7z\xBC\xAF", 4UL, "a 7-zip archive" },
+    { "ArC\x01", 4UL, "a FreeArc archive" }
+};
+
+static Unsigned64 searchedMarkOffsets[VICTORIA_ARRAY_LENGTH(searchedMarks)];
 
 /* The first bytes of a file, and what they mean.
  *
@@ -847,7 +874,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                    from here — so it gets looked for instead, because the table
                    says what it is and can be recognised on sight. */
                 stringAppend(message, sizeof(message),
-                             " keeps no table at 0x30, searching the front of it");
+                             " keeps no table at 0x30, so its payload is appended");
                 platformLogMessage(message);
                 installerScanOffset = 0ULL;
                 installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
@@ -869,35 +896,142 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             return ENGINE_DISC_WORKING;
         }
 
-        /* Reading the front of the installer a chunk at a time, looking for
-           either mark. Chunks overlap, so a mark lying across a boundary is
-           still met whole — a search that reads adjacent blocks and finds
-           nothing at the seam is a search that reports "not there" about
-           something that is. */
+        /* Where the program stops.
+         *
+         * Nothing that identifies an installer is in the first thirty-three
+         * mebibytes of this one, which is not evidence that there is nothing
+         * there — it is evidence that the thing is not at the front. A program
+         * carrying an archive has to start with a real program, so the payload
+         * is past the end of it, and the section table says where that is. */
         if (installerStage == 3U)
+        {
+            MemorySize marker = memoryArenaGetMarker(globalArena);
+            /* However much of the front there is. Asking for more than the file
+               holds is refused outright rather than answered short, and a small
+               program is still a program. */
+            MemorySize frontBytes = (entry->sizeInBytes < (Unsigned64)PROGRAM_LAYOUT_BYTES_NEEDED)
+                                        ? (MemorySize)entry->sizeInBytes
+                                        : PROGRAM_LAYOUT_BYTES_NEEDED;
+            Unsigned8 *front = (Unsigned8 *)memoryArenaAllocate(globalArena, frontBytes, 4UL);
+            ProgramLayout layout;
+            ProgramReadResult layoutResult;
+
+            if (front == NULL_POINTER)
+            {
+                platformLogMessage("engine: no room to read the program's layout");
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U, frontBytes,
+                                             front);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+            layoutResult = (read == VIRTUAL_READ_OK)
+                               ? programReadLayout(front, frontBytes, entry->sizeInBytes, &layout)
+                               : PROGRAM_READ_TRUNCATED;
+            memoryArenaRewindToMarker(globalArena, marker);
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            if (layoutResult != PROGRAM_READ_OK)
+            {
+                stringAppend(message, sizeof(message), "its layout — ");
+                stringAppend(message, sizeof(message), programReadResultGetName(layoutResult));
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            stringAppend(message, sizeof(message), "the program in it is ");
+            appendCount(message, sizeof(message), layout.sectionCount);
+            stringAppend(message, sizeof(message), " section(s) ending at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)layout.endOfProgramInBytes);
+            stringAppend(message, sizeof(message), ", leaving ");
+            appendByteSize(message, sizeof(message),
+                           entry->sizeInBytes - layout.endOfProgramInBytes);
+            stringAppend(message, sizeof(message), " appended past it");
+            platformLogMessage(message);
+
+            installerScanFrom = layout.endOfProgramInBytes;
+            installerScanOffset = layout.endOfProgramInBytes;
+            installerStage = 4U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* What the appended part starts with, named the same way any other file
+           is. The front of a container is where it says what it is. */
+        if (installerStage == 4U)
+        {
+            Unsigned8 appendedHead[64];
+            Unsigned32 which;
+
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, installerScanFrom,
+                                             sizeof(appendedHead), appendedHead);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: what is appended starts ");
+            if (read == VIRTUAL_READ_OK)
+            {
+                const FileSignature *signature =
+                    identifySignature(appendedHead, sizeof(appendedHead));
+
+                appendHexadecimalBytes(message, sizeof(message), appendedHead,
+                                       sizeof(appendedHead), 0UL, 16UL);
+                stringAppend(message, sizeof(message), "— ");
+                stringAppend(message, sizeof(message),
+                             (signature != NULL_POINTER) ? signature->name : "unrecognised");
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+            }
+            platformLogMessage(message);
+
+            for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
+            {
+                searchedMarkOffsets[which] = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+            }
+            installerStage = 5U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Reading the appended part a chunk at a time, looking for any mark
+           worth knowing about. Chunks overlap, so a mark lying across a boundary
+           is still met whole — a search that reads adjacent blocks and finds
+           nothing at the seam reports "not there" about something that is. */
+        if (installerStage == 5U)
         {
             MemorySize marker = memoryArenaGetMarker(globalArena);
             Unsigned8 *chunk;
             MemorySize wanted = INSTALLER_SCAN_CHUNK_BYTES;
             Unsigned64 foundTable;
-            Unsigned64 foundVersion;
+            Unsigned32 which;
 
             if (installerScanOffset >= entry->sizeInBytes ||
-                installerScanOffset >= (Unsigned64)INSTALLER_SCAN_LIMIT_BYTES)
+                installerScanOffset - installerScanFrom >= (Unsigned64)INSTALLER_SCAN_LIMIT_BYTES)
             {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: no offset table in the first ");
-                appendByteSize(message, sizeof(message), installerScanOffset);
-                stringAppend(message, sizeof(message), " of it");
-                if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                Unsigned32 found = 0U;
+
+                for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
                 {
-                    /* Worth saying even so: the version string is stored plain,
-                       so finding it proves what built the file even when the
-                       table has not been found. */
-                    stringAppend(message, sizeof(message), ", but a version string at ");
-                    appendHexadecimal(message, sizeof(message), (Unsigned32)installerVersionOffset);
+                    if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                    {
+                        found++;
+                    }
                 }
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: searched the first ");
+                appendByteSize(message, sizeof(message), installerScanOffset - installerScanFrom);
+                stringAppend(message, sizeof(message), " past the program, ");
+                appendCount(message, sizeof(message), found);
+                stringAppend(message, sizeof(message), " mark(s) found, no offset table");
                 platformLogMessage(message);
+
                 if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
                 {
                     installerTable.headerOffsetInBytes = (Unsigned32)installerVersionOffset;
@@ -931,7 +1065,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 memoryArenaRewindToMarker(globalArena, marker);
                 message[0] = '\0';
                 stringAppend(message, sizeof(message), "engine: the search stopped at ");
-                appendByteSize(message, sizeof(message), installerScanOffset);
+                appendHexadecimal(message, sizeof(message), (Unsigned32)installerScanOffset);
                 stringAppend(message, sizeof(message), " — ");
                 stringAppend(message, sizeof(message), virtualReadResultGetName(read));
                 platformLogMessage(message);
@@ -940,14 +1074,37 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             }
 
             foundTable = installerFindTableMarker(chunk, wanted, installerScanOffset);
-            foundVersion = installerFindVersionMarker(chunk, wanted, installerScanOffset);
+            if (installerVersionOffset == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                installerVersionOffset = installerFindVersionMarker(chunk, wanted, installerScanOffset);
+            }
+            for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
+            {
+                Unsigned64 at;
+
+                if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                {
+                    continue;
+                }
+                at = installerFindMark(chunk, wanted, installerScanOffset,
+                                       searchedMarks[which].bytes, searchedMarks[which].length);
+                if (at == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                {
+                    continue;
+                }
+                searchedMarkOffsets[which] = at;
+                /* Said as it is met rather than gathered for the end. The search
+                   stops the moment it finds an offset table, and a summary
+                   printed after that would never be printed at all. */
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:   ");
+                stringAppend(message, sizeof(message), searchedMarks[which].name);
+                stringAppend(message, sizeof(message), " at ");
+                appendHexadecimal(message, sizeof(message), (Unsigned32)at);
+                platformLogMessage(message);
+            }
             memoryArenaRewindToMarker(globalArena, marker);
 
-            if (foundVersion != (Unsigned64)INSTALLER_MARKER_NOT_FOUND &&
-                installerVersionOffset == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-            {
-                installerVersionOffset = foundVersion;
-            }
             if (foundTable != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
             {
                 tableOffsetInBytes = foundTable;
@@ -961,8 +1118,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
 
             /* Back by the overlap, so nothing is missed at the seam. */
             installerScanOffset += (Unsigned64)wanted;
-            if (installerScanOffset > (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES &&
-                wanted > INSTALLER_MARKER_OVERLAP_BYTES)
+            if (wanted > INSTALLER_MARKER_OVERLAP_BYTES)
             {
                 installerScanOffset -= (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES;
             }

@@ -122,6 +122,11 @@ Unsigned64 installerFindTableMarker(const Unsigned8 *bytes, MemorySize byteCount
 Unsigned64 installerFindVersionMarker(const Unsigned8 *bytes, MemorySize byteCount,
                                       Unsigned64 chunkOffset);
 
+/* And the same for any literal mark, so a caller can look for a container this
+   module knows nothing about. Every archive worth the name starts with one. */
+Unsigned64 installerFindMark(const Unsigned8 *bytes, MemorySize byteCount, Unsigned64 chunkOffset,
+                             const char *mark, MemorySize markLength);
+
 /* Reads the table, given the bytes at that offset.
  *
  * The field list is established by checksum rather than assumed: every
