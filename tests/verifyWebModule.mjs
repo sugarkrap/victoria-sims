@@ -238,6 +238,64 @@ check("no pipeline is built once the ceiling has refused",
       !refusalCalls.some((call) => call.name === "createTrianglePipeline"));
 
 
+// ---------------------------------------------------------------------------
+// Reading a disc the way the page does.
+//
+// The browser cannot answer a read on the spot, so the module asks for a range,
+// says PENDING, and waits to be asked again. That protocol is the whole reason
+// the engine's reads have a PENDING at all, and it is not exercised by anything
+// else here — a build with no disc never reaches it.
+//
+// Driving it from Node rather than a browser is deliberate. What is being
+// tested is the handshake, not WebGPU, and a headless run can assert on every
+// step of it.
+// ---------------------------------------------------------------------------
+calls.length = 0;
+{
+    const image = readFileSync("testAssets/discs/testDisc.iso");
+    const opened = instance.exports.victoriaWebOpenDisc(image.length);
+    let status = 0;
+    let steps = 0;
+    let rangesFetched = 0;
+    let bytesFetched = 0;
+
+    check("opens a disc", opened === 1);
+
+    for (steps = 0; steps < 200000; steps += 1) {
+        status = instance.exports.victoriaWebStepDiscLoad();
+        if (status !== 1) {
+            break;
+        }
+        const length = instance.exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = instance.exports.victoriaWebGetWantedOffset();
+            const pointer = instance.exports.victoriaWebGetDeliveryPointer();
+            new Uint8Array(instance.exports.memory.buffer, pointer, length)
+                .set(image.subarray(offset, offset + length));
+            instance.exports.victoriaWebDeliver();
+            rangesFetched += 1;
+            bytesFetched += length;
+        }
+    }
+
+    check("reaches a drawable state", status === 2);
+    check("asked the page for ranges rather than the image", rangesFetched > 0);
+    check(`read less than the image (${bytesFetched} of ${image.length} bytes)`,
+          bytesFetched < image.length);
+    check("built a mesh pipeline once it had geometry",
+          calls.some((call) => call.name === "createMeshPipeline"));
+
+    const upload = calls.find((call) => call.name === "uploadMesh");
+    check("uploaded the teapot", Boolean(upload));
+    if (upload) {
+        // The same numbers the native geometry test asserts, arrived at through
+        // wasm, the disc reader and the PENDING handshake.
+        check("with 13248 vertices", upload.vertexCount === 13248);
+        check("and 18960 indices", upload.indexCount === 18960);
+    }
+    console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);
+}
+
 if (failureCount > 0) {
     console.error(`\n${failureCount} check(s) failed`);
     process.exit(1);

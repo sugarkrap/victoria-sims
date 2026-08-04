@@ -75,88 +75,158 @@ static void appendCount(char *destination, MemorySize capacity, Unsigned32 value
 }
 
 
-/* Opens whatever the platform handed over and finds something to draw on it.
-   Failure is never fatal: an engine that will not start because a disc was
-   unreadable is worse than one that starts and says so. */
-static void loadDiscContent(VirtualFileSystem *fileSystem)
+/* A disc load, one step at a time.
+ *
+ * Stepped rather than run to completion because a browser cannot answer a read
+ * on the spot: it has to go back to its event loop, fetch the bytes and come
+ * back. Reads there answer PENDING, and PENDING means "call me again", which
+ * only works if there is something to call.
+ *
+ * The state lives here rather than on a caller's stack for the same reason —
+ * the caller is a frame that has already returned. */
+static VirtualFileSystem *discFileSystem = NULL_POINTER;
+static DiscReader discReader;
+static DiscContentSearch discSearch;
+static EngineDiscLoadStatus discLoadStatus = ENGINE_DISC_IDLE;
+static Boolean discCatalogueIsBuilt = BOOLEAN_FALSE;
+
+static void reportDiscFailure(const char *what)
 {
-    static DiscReader discReader;
-    static DiscContentSearch search;
     char message[192];
-    DiscContentStatus status;
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    stringAppend(message, sizeof(message), what);
+    platformLogMessage(message);
+    discLoadStatus = ENGINE_DISC_FAILED;
+}
+
+void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
+{
+    discFileSystem = fileSystem;
+    discLoadStatus = ENGINE_DISC_IDLE;
+    discCatalogueIsBuilt = BOOLEAN_FALSE;
 
     if (fileSystem == NULL_POINTER)
     {
         return;
     }
 
-    if (fileSystem->entryCount == 0U)
+    /* A catalogue that is already filled came from a host that knows what it
+       has — a chosen folder, where there is no image to walk. */
+    if (fileSystem->entryCount > 0U)
     {
-        /* No catalogue yet, so this is an image and has to be walked. */
-        DiscReadStatus walk = discReaderBegin(&discReader, fileSystem, globalArena, DISC_FILE_LIMIT);
+        discCatalogueIsBuilt = BOOLEAN_TRUE;
+        discContentBegin(&discSearch, fileSystem, globalArena);
+    }
+    else if (discReaderBegin(&discReader, fileSystem, globalArena, DISC_FILE_LIMIT) !=
+             DISC_READ_PENDING)
+    {
+        reportDiscFailure("not enough room to catalogue this disc");
+        return;
+    }
+    discLoadStatus = ENGINE_DISC_WORKING;
+}
+
+EngineDiscLoadStatus engineStepDiscLoad(void)
+{
+    char message[192];
+
+    if (discLoadStatus != ENGINE_DISC_WORKING)
+    {
+        return discLoadStatus;
+    }
+
+    if (!discCatalogueIsBuilt)
+    {
+        DiscReadStatus walk = discReaderStep(&discReader);
 
         if (walk == DISC_READ_PENDING)
         {
-            walk = discReaderRunToCompletion(&discReader);
+            return ENGINE_DISC_WORKING;
         }
         if (walk != DISC_READ_COMPLETE)
         {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: cannot read the disc — ");
-            stringAppend(message, sizeof(message), discReadStatusGetName(walk));
-            platformLogMessage(message);
-            return;
+            reportDiscFailure(discReadStatusGetName(walk));
+            return discLoadStatus;
         }
 
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine: disc ");
         stringAppend(message, sizeof(message), discReader.volumeIdentifier);
         stringAppend(message, sizeof(message), " holds ");
-        appendCount(message, sizeof(message), fileSystem->entryCount);
+        appendCount(message, sizeof(message), discFileSystem->entryCount);
         stringAppend(message, sizeof(message), " files");
         platformLogMessage(message);
+
+        discCatalogueIsBuilt = BOOLEAN_TRUE;
+        discContentBegin(&discSearch, discFileSystem, globalArena);
+        return ENGINE_DISC_WORKING;
     }
 
-    discContentBegin(&search, fileSystem, globalArena);
-    status = discContentRunToCompletion(&search);
-
-    message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine: opened ");
-    appendCount(message, sizeof(message), search.packagesOpened);
-    stringAppend(message, sizeof(message), " packages, ");
-    appendCount(message, sizeof(message), search.packagesCompressed);
-    stringAppend(message, sizeof(message), " compressed, ");
-    appendCount(message, sizeof(message), search.packagesWithGeometry);
-    stringAppend(message, sizeof(message), " with geometry");
-    platformLogMessage(message);
-
-    if (status != DISC_CONTENT_FOUND)
     {
+        DiscContentStatus status = discContentStep(&discSearch);
+
+        if (status == DISC_CONTENT_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: opened ");
+        appendCount(message, sizeof(message), discSearch.packagesOpened);
+        stringAppend(message, sizeof(message), " packages, ");
+        appendCount(message, sizeof(message), discSearch.packagesCompressed);
+        stringAppend(message, sizeof(message), " compressed, ");
+        appendCount(message, sizeof(message), discSearch.packagesWithGeometry);
+        stringAppend(message, sizeof(message), " with geometry");
+        platformLogMessage(message);
+
+        if (status != DISC_CONTENT_FOUND)
+        {
+            reportDiscFailure(discContentStatusGetName(status));
+            return discLoadStatus;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: drawing ");
+        stringAppend(message, sizeof(message), discSearch.mesh.name);
+        stringAppend(message, sizeof(message), " from ");
+        stringAppend(message, sizeof(message), discSearch.packagePath);
+        platformLogMessage(message);
+
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine: ");
-        stringAppend(message, sizeof(message), discContentStatusGetName(status));
+        appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+        stringAppend(message, sizeof(message), " vertices, ");
+        appendCount(message, sizeof(message), discSearch.mesh.indexCount / 3U);
+        stringAppend(message, sizeof(message), " triangles, ");
+        appendCount(message, sizeof(message), discSearch.mesh.primitiveCount);
+        stringAppend(message, sizeof(message), " primitive(s) in the container");
         platformLogMessage(message);
+
+        renderSetMesh(&discSearch.mesh, globalArena);
+        discLoadStatus = ENGINE_DISC_READY;
+    }
+    return discLoadStatus;
+}
+
+/* For a platform whose reads never answer PENDING. Nothing here is fatal: an
+   engine that will not start because a disc was unreadable is worse than one
+   that starts and says so. */
+static void loadDiscContent(VirtualFileSystem *fileSystem)
+{
+    Unsigned32 remaining = 1000000U;
+
+    if (fileSystem == NULL_POINTER)
+    {
         return;
     }
-
-    message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine: drawing ");
-    stringAppend(message, sizeof(message), search.mesh.name);
-    stringAppend(message, sizeof(message), " from ");
-    stringAppend(message, sizeof(message), search.packagePath);
-    platformLogMessage(message);
-
-    message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine: ");
-    appendCount(message, sizeof(message), search.mesh.vertexCount);
-    stringAppend(message, sizeof(message), " vertices, ");
-    appendCount(message, sizeof(message), search.mesh.indexCount / 3U);
-    stringAppend(message, sizeof(message), " triangles, ");
-    appendCount(message, sizeof(message), search.mesh.primitiveCount);
-    stringAppend(message, sizeof(message), " primitive(s) in the container");
-    platformLogMessage(message);
-
-    renderSetMesh(&search.mesh, globalArena);
+    engineBeginDiscLoad(fileSystem);
+    while (engineStepDiscLoad() == ENGINE_DISC_WORKING && remaining > 0U)
+    {
+        remaining--;
+    }
 }
 
 Boolean engineInitialize(const EngineConfiguration *configuration)

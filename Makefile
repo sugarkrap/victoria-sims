@@ -66,7 +66,7 @@ LINUX_SOURCES := $(ENGINE_SOURCES) \
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
                render/webGPU/renderWebGPU.c render/meshCamera.c \
-               platform/web/webEntryPoint.c
+               platform/web/webDiscStore.c platform/web/webEntryPoint.c
 
 LINUX_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/linux
 WEB_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/web
@@ -95,6 +95,12 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
                -Wl,--export=victoriaWebGetFrameIntervalMicroseconds \
                -Wl,--export=victoriaWebGetGraphicsMemoryLimitBytes \
+               -Wl,--export=victoriaWebOpenDisc \
+               -Wl,--export=victoriaWebStepDiscLoad \
+               -Wl,--export=victoriaWebGetWantedOffset \
+               -Wl,--export=victoriaWebGetWantedLength \
+               -Wl,--export=victoriaWebGetDeliveryPointer \
+               -Wl,--export=victoriaWebDeliver \
                -Wl,--export=victoriaWebGetGraphicsMemoryUsedBytes
 
 WEB_FLAGS := --target=wasm32 -ffreestanding -nostdlib -fno-builtin \

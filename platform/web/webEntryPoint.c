@@ -32,6 +32,20 @@ Unsigned32 victoriaWebGetFrameMicroseconds(void);
 Unsigned32 victoriaWebGetAverageFrameMicroseconds(void);
 Unsigned32 victoriaWebGetWorstFrameMicroseconds(void);
 Unsigned32 victoriaWebGetFrameIntervalMicroseconds(void);
+Unsigned32 victoriaWebOpenDisc(double sizeInBytes);
+Unsigned32 victoriaWebStepDiscLoad(void);
+double victoriaWebGetWantedOffset(void);
+Unsigned32 victoriaWebGetWantedLength(void);
+Unsigned32 victoriaWebGetDeliveryPointer(void);
+void victoriaWebDeliver(void);
+
+Boolean webDiscStoreOpen(VirtualFileSystem *fileSystem, Unsigned64 sizeInBytes, MemoryArena *arena);
+Real32 webDiscStoreGetWantedLength(void);
+double webDiscStoreGetWantedOffset(void);
+Unsigned32 webDiscStoreGetDeliveryPointer(void);
+void webDiscStoreDeliver(void);
+
+static VirtualFileSystem discFileSystem;
 
 void platformLogMessage(const char *message)
 {
@@ -148,4 +162,55 @@ Unsigned32 victoriaWebGetFrameIntervalMicroseconds(void)
     ProfilerFrameSummary frameSummary;
     profilerGetFrameSummary(&frameSummary);
     return (Unsigned32)frameSummary.lastIntervalMicroseconds;
+}
+
+/* Handing the engine a disc, one range at a time.
+ *
+ * The page owns the File and the event loop; the engine owns the formats. So
+ * the page drives: open, then step, and whenever a step leaves a range wanted,
+ * fetch it, deliver it, and step again. */
+WEB_EXPORT("victoriaWebOpenDisc")
+Unsigned32 victoriaWebOpenDisc(double sizeInBytes)
+{
+    if (sizeInBytes <= 0.0)
+    {
+        return 0U;
+    }
+    if (webDiscStoreOpen(&discFileSystem, (Unsigned64)sizeInBytes, engineGetGlobalArena()) ==
+        BOOLEAN_FALSE)
+    {
+        return 0U;
+    }
+    engineBeginDiscLoad(&discFileSystem);
+    return 1U;
+}
+
+WEB_EXPORT("victoriaWebStepDiscLoad")
+Unsigned32 victoriaWebStepDiscLoad(void)
+{
+    return (Unsigned32)engineStepDiscLoad();
+}
+
+WEB_EXPORT("victoriaWebGetWantedOffset")
+double victoriaWebGetWantedOffset(void)
+{
+    return webDiscStoreGetWantedOffset();
+}
+
+WEB_EXPORT("victoriaWebGetWantedLength")
+Unsigned32 victoriaWebGetWantedLength(void)
+{
+    return (Unsigned32)webDiscStoreGetWantedLength();
+}
+
+WEB_EXPORT("victoriaWebGetDeliveryPointer")
+Unsigned32 victoriaWebGetDeliveryPointer(void)
+{
+    return webDiscStoreGetDeliveryPointer();
+}
+
+WEB_EXPORT("victoriaWebDeliver")
+void victoriaWebDeliver(void)
+{
+    webDiscStoreDeliver();
 }

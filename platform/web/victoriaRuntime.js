@@ -443,3 +443,95 @@ async function start() {
 }
 
 start().catch((error) => reportStatus(`Startup failed: ${error.message}`, true));
+
+
+// Handing the engine a disc.
+//
+// The page owns the File and the event loop; the engine owns the formats. So
+// the page drives: open, then step, and whenever a step leaves a range wanted,
+// slice it out of the File, write it where the module asked, and step again.
+//
+// A File is a handle, not bytes — the browser reads ranges off disk on demand —
+// so a three gigabyte image costs the page nothing to hold. That is the same
+// property vic-extractor relies on to read a retail disc in a megabyte and a
+// half of wasm.
+const DISC_STATUS_WORKING = 1;
+const DISC_STATUS_READY = 2;
+const STEPS_BEFORE_YIELDING = 64;
+
+async function loadDisc(file) {
+    const exports = runtimeState.instance.exports;
+
+    if (!exports.victoriaWebOpenDisc(file.size)) {
+        reportDiscMessage(`could not start reading ${file.name}`);
+        return;
+    }
+    reportDiscMessage(`reading ${file.name}…`);
+
+    for (let step = 1; ; step += 1) {
+        const status = exports.victoriaWebStepDiscLoad();
+
+        if (status !== DISC_STATUS_WORKING) {
+            reportDiscMessage(status === DISC_STATUS_READY
+                ? `${file.name} loaded`
+                : `nothing on ${file.name} could be drawn — see the log`);
+            return;
+        }
+
+        const length = exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = exports.victoriaWebGetWantedOffset();
+            const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+            // Taken after the call that reports the pointer, since a growing
+            // linear memory detaches any view made before it.
+            new Uint8Array(exports.memory.buffer,
+                           exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
+            exports.victoriaWebDeliver();
+        } else if (step % STEPS_BEFORE_YIELDING === 0) {
+            // Walking a catalogue asks for nothing, and a few thousand of those
+            // in a row would hold the frame. Let the page breathe.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    }
+}
+
+function reportDiscMessage(text) {
+    const element = document.getElementById("discStatus");
+    if (element) {
+        element.textContent = text;
+    }
+    console.log(`disc: ${text}`);
+}
+
+function connectDiscPicker() {
+    const input = document.getElementById("discInput");
+    const zone = document.getElementById("discZone");
+
+    if (input) {
+        input.addEventListener("change", (event) => {
+            if (event.target.files[0]) {
+                loadDisc(event.target.files[0]);
+            }
+        });
+    }
+    if (zone) {
+        zone.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            zone.classList.add("isHot");
+        });
+        zone.addEventListener("dragleave", () => zone.classList.remove("isHot"));
+        zone.addEventListener("drop", (event) => {
+            event.preventDefault();
+            zone.classList.remove("isHot");
+            if (event.dataTransfer.files[0]) {
+                loadDisc(event.dataTransfer.files[0]);
+            }
+        });
+    }
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", connectDiscPicker);
+} else {
+    connectDiscPicker();
+}

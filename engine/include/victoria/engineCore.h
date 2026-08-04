@@ -38,6 +38,26 @@ void engineEndFrame(void);
    returns an empty string when profiling is unavailable. */
 const char *engineGetProfilerReportText(void);
 
+/* Where a disc load has got to. */
+typedef enum EngineDiscLoadStatus
+{
+    ENGINE_DISC_IDLE = 0,
+    /* Still walking or still waiting on the host. Step again next frame. */
+    ENGINE_DISC_WORKING,
+    ENGINE_DISC_READY,
+    ENGINE_DISC_FAILED
+} EngineDiscLoadStatus;
+
+/* Starts reading whatever the platform has opened. Safe to call after
+   engineInitialize, and the only way in on a platform whose reads cannot be
+   answered on the spot. */
+void engineBeginDiscLoad(VirtualFileSystem *fileSystem);
+
+/* Does one unit of work: one directory, or one package. Returns WORKING for as
+   long as it wants calling again. A platform that can answer a read
+   immediately may spin on this; a browser must call it once a frame. */
+EngineDiscLoadStatus engineStepDiscLoad(void);
+
 MemoryArena *engineGetGlobalArena(void);
 
 #endif
