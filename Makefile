@@ -45,6 +45,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/discContent.c \
                   engine/source/installerReader.c \
                   engine/source/programReader.c \
+                  engine/source/archiveReader.c \
                   engine/source/engineCore.c \
                   utils/strings.c utils/checksum.c
 
@@ -235,12 +236,13 @@ RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
+ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER) \
-		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER)
+		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -255,8 +257,15 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(RESOURCE_COLLECTION_VERIFIER)
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
+	@$(ARCHIVE_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(ARCHIVE_VERIFIER): tests/verifyArchive.c engine/source/archiveReader.c utils/strings.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyArchive.c engine/source/archiveReader.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(PROGRAM_VERIFIER): tests/verifyProgram.c engine/source/programReader.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests

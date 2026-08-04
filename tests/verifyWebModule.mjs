@@ -314,7 +314,7 @@ calls.length = 0;
           loggedMessages.some((text) =>
               text.includes("5 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
-          loggedMessages.some((text) => text.includes("768 bytes  TSData.exe")));
+          loggedMessages.some((text) => text.includes("691 bytes  TSData.exe")));
 
     // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
     // Setup installer, copied from the shape a real repack has: a Delphi MZP
@@ -347,28 +347,28 @@ calls.length = 0;
     check("reads the program's own section table to find where it ends",
           loggedMessages.some((text) =>
               text.includes("1 section(s) ending at 0x00000200") &&
-              text.includes("256 bytes appended past it")));
+              text.includes("179 bytes appended past it")));
     check("and names what is appended there",
-          loggedMessages.some((text) => text.includes("what is appended starts 49 6E 6E 6F")));
-    // Reported the moment it is met: the search stops at the offset table, so a
-    // summary printed afterwards would never be printed at all.
-    check("reporting marks it meets on the way",
-          loggedMessages.some((text) => text.includes("a package stored whole at 0x00000230")));
-    check("and finds the table by searching",
-          loggedMessages.some((text) => text.includes("found an offset table at 0x00000240")));
-    const offsetTable = loggedMessages.find((text) => text.includes("table revision"));
-    check("reads it", Boolean(offsetTable));
-    if (offsetTable) {
-        // Six fields, discovered rather than assumed, and the two offsets taken
-        // off the end where every layout keeps them.
-        check("working out the layout from the checksum", offsetTable.includes("6 fields"));
-        check("with the offsets it ends with",
-              offsetTable.includes("header at 0x00000200") && offsetTable.includes("data at 0x000002C0"));
-        check("and the size it claims matching the file",
-              offsetTable.includes("768 bytes of 768 bytes"));
-    }
-    check("and reads the version that built it",
-          loggedMessages.some((text) => text.includes("Inno Setup Setup Data (5.5.0) (u)")));
+          loggedMessages.some((text) =>
+              text.includes("what is appended starts 52 61 72 21") &&
+              text.includes("a RAR archive")));
+
+    // What everything downstream turns on. A stored entry is a range of the
+    // file and can go straight to the package reader; a packed one needs an
+    // unpacker that does not exist here. The fixture holds one of each, so a
+    // reader that called them all one thing would fail on the other.
+    check("names a stored entry, its size and where its data begins",
+          loggedMessages.some((text) =>
+              text.includes("stored 16 bytes at 0x00000254") &&
+              text.includes("Sims01.package")));
+    check("and a packed one by its unpacked size",
+          loggedMessages.some((text) =>
+              text.includes("packed 32 bytes at 0x000002A4") &&
+              text.includes("Sims02.package")));
+    check("counting both kinds separately",
+          loggedMessages.some((text) =>
+              text.includes("walked 2 archive entries") &&
+              text.includes("1 stored (16 bytes), 1 packed")));
 
     const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
     check("probes a file it cannot name", Boolean(probe));

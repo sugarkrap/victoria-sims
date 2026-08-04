@@ -10,6 +10,7 @@
 #include "victoria/compression.h"
 #include "victoria/resourceIndex.h"
 #include "victoria/installerReader.h"
+#include "victoria/archiveReader.h"
 #include "victoria/programReader.h"
 #include "victoria/textureDecode.h"
 
@@ -311,6 +312,19 @@ static InstallerOffsetTable installerTable;
  * than a search that quietly stops. */
 #define INSTALLER_SCAN_LIMIT_BYTES (32ULL * 1024ULL * 1024ULL)
 #define INSTALLER_SCAN_CHUNK_BYTES (256UL * 1024UL)
+
+/* How far into an archive the walk goes for a first look. Every entry costs a
+   read, and a 2.7 gibibyte archive holds thousands; sixty-four is enough to say
+   what kind of entries these are, which is the question. */
+#define ARCHIVE_WALK_LIMIT 64U
+/* And how many get named. The rest are counted. */
+#define ARCHIVE_NAME_LIMIT_IN_LOG 8U
+
+static Unsigned64 archiveBlockOffset = 0ULL;
+static Unsigned32 archiveEntriesWalked = 0U;
+static Unsigned32 archiveStoredCount = 0U;
+static Unsigned32 archivePackedCount = 0U;
+static Unsigned64 archiveStoredBytes = 0ULL;
 
 static Unsigned64 installerScanOffset = 0ULL;
 static Unsigned64 installerScanFrom = 0ULL;
@@ -992,11 +1006,147 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             }
             platformLogMessage(message);
 
+            /* An archive says what it is in seven bytes, and if it is one this
+               reader can walk then walking it beats searching it: the block
+               chain says where every entry is, and a search only says where one
+               mark happened to land. */
+            if (read == VIRTUAL_READ_OK &&
+                archiveReadMark(appendedHead, sizeof(appendedHead), installerScanFrom,
+                                &archiveBlockOffset) == ARCHIVE_READ_OK)
+            {
+                archiveEntriesWalked = 0U;
+                archiveStoredCount = 0U;
+                archivePackedCount = 0U;
+                archiveStoredBytes = 0ULL;
+                installerStage = 6U;
+                return ENGINE_DISC_WORKING;
+            }
+
             for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
             {
                 searchedMarkOffsets[which] = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
             }
             installerStage = 5U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Walking the archive's blocks.
+         *
+         * Each block says how long it is, so this is a matter of addition — and
+         * what it is really asking is whether the entries were stored or
+         * packed. A stored entry is a range of the file and can be handed
+         * straight to the package reader; a packed one needs an unpacker for a
+         * format whose only complete implementation cannot be borrowed from
+         * here. The answer decides how much of the rest of this there is. */
+        if (installerStage == 6U)
+        {
+            MemorySize marker = memoryArenaGetMarker(globalArena);
+            MemorySize wanted = ARCHIVE_BLOCK_BYTES_NEEDED;
+            Unsigned8 *block;
+            ArchiveEntry archiveEntry;
+            ArchiveReadResult blockResult;
+
+            if (archiveEntriesWalked >= ARCHIVE_WALK_LIMIT ||
+                archiveBlockOffset >= entry->sizeInBytes)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: walked ");
+                appendCount(message, sizeof(message), archiveEntriesWalked);
+                stringAppend(message, sizeof(message), " archive entries — ");
+                appendCount(message, sizeof(message), archiveStoredCount);
+                stringAppend(message, sizeof(message), " stored (");
+                appendByteSize(message, sizeof(message), archiveStoredBytes);
+                stringAppend(message, sizeof(message), "), ");
+                appendCount(message, sizeof(message), archivePackedCount);
+                stringAppend(message, sizeof(message), " packed");
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+
+            if (archiveBlockOffset + (Unsigned64)wanted > entry->sizeInBytes)
+            {
+                wanted = (MemorySize)(entry->sizeInBytes - archiveBlockOffset);
+            }
+            block = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
+            if (block == NULL_POINTER)
+            {
+                platformLogMessage("engine: no room to walk the archive");
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, archiveBlockOffset,
+                                             wanted, block);
+            if (read == VIRTUAL_READ_PENDING)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+            if (read != VIRTUAL_READ_OK)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: the walk stopped at ");
+                appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
+                stringAppend(message, sizeof(message), " — ");
+                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+
+            blockResult = archiveReadBlock(block, wanted, archiveBlockOffset, &archiveEntry);
+            memoryArenaRewindToMarker(globalArena, marker);
+
+            if (blockResult == ARCHIVE_READ_OK)
+            {
+                archiveEntriesWalked++;
+                if (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
+                {
+                    archiveStoredCount++;
+                    archiveStoredBytes += archiveEntry.unpackedSizeInBytes;
+                }
+                else
+                {
+                    archivePackedCount++;
+                }
+                if (archiveEntriesWalked <= ARCHIVE_NAME_LIMIT_IN_LOG)
+                {
+                    message[0] = '\0';
+                    stringAppend(message, sizeof(message), "engine:   ");
+                    stringAppend(message, sizeof(message),
+                                 (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
+                                     ? "stored "
+                                     : "packed ");
+                    appendByteSize(message, sizeof(message), archiveEntry.unpackedSizeInBytes);
+                    stringAppend(message, sizeof(message), " at ");
+                    appendHexadecimal(message, sizeof(message),
+                                      (Unsigned32)archiveEntry.dataOffsetInBytes);
+                    stringAppend(message, sizeof(message), "  ");
+                    stringAppend(message, sizeof(message), archiveEntry.name);
+                    platformLogMessage(message);
+                }
+            }
+            else if (blockResult != ARCHIVE_READ_NOT_A_FILE)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: the archive stopped making sense at ");
+                appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
+                stringAppend(message, sizeof(message), " — ");
+                stringAppend(message, sizeof(message), archiveReadResultGetName(blockResult));
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+
+            /* A block that did not advance would be walked for ever. */
+            if (archiveEntry.nextBlockOffsetInBytes <= archiveBlockOffset)
+            {
+                platformLogMessage("engine: an archive block that does not advance, stopping");
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
+            archiveBlockOffset = archiveEntry.nextBlockOffsetInBytes;
             return ENGINE_DISC_WORKING;
         }
 

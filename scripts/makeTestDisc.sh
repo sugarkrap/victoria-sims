@@ -36,35 +36,30 @@ printf 'this is not a package at all, despite the name\n' \
 printf 'placeholder cabinet payload\n' > "$buildRoot/Support/data1.cab"
 printf '[autorun]\n' > "$buildRoot/Autorun.inf"
 
-# The navigable part of an installer, and nothing else.
+# The navigable part of a repack's payload.
 #
-# The disc this was built for turned out to be a repack with the whole game —
-# 2.7 gibibytes of it — sealed inside one of these, so the engine has to be able
-# to find its way around one. What that takes is a Delphi MZP stub, an offset
-# table with a checksum the reader uses to work out the field layout, and the
-# version string the table's first offset points at.
-#
-# No payload: nothing here is compressed, and a fixture that pretended to be
-# would be testing a decompressor that does not exist yet. What this does test
-# is everything up to that point, which is the part that says whether the
-# archive can be navigated at all.
+# The disc this was built for keeps its whole game — 2.7 gibibytes of it — in a
+# file that is a program with an archive appended past the end of it, so the
+# engine has to be able to find its way from one to the other. Nothing here is
+# compressed: a fixture that pretended to be would be testing an unpacker that
+# does not exist. What it does test is everything up to that point.
 python3 - "$buildRoot/TSData.exe" <<'PYTHON'
-import binascii, struct, sys
+import struct, sys
 
-# A real program at the front, and the payload appended past the end of it.
+# A real program at the front, and an archive appended past the end of it.
 #
-# That is the shape the disc's own TSData.exe has: nothing identifying an
-# installer in its first thirty-three mebibytes, because the front is a program
-# and the program says where it stops. A fixture with the table at 0x30, or with
-# no section table at all, would test neither of the paths the real file takes.
+# That is the shape the disc's own TSData.exe has: three sections ending at
+# 0xCE00, then 2.7 gibibytes beginning "Rar!". The front holds nothing that
+# identifies an archive, which is why the engine reads the section table to find
+# out where the front stops.
+#
+# Two entries, one stored and one packed, because the difference between them
+# decides everything downstream. A stored entry is a range of the file and can
+# go straight to the package reader; a packed one cannot.
 HEADER_AT = 0x80          # where the DOS stub points
 SECTION_TABLE_AT = HEADER_AT + 4 + 20 + 224
-PROGRAM_ENDS_AT = 0x200   # the one section's bytes end here
-VERSION_AT = 0x200        # appended: the version string...
-PACKAGE_MARK_AT = 0x230   # ...a package mark, which the search reports...
-TABLE_AT = 0x240          # ...and the offset table
-DATA_AT = 0x2C0
-TOTAL = 0x300
+PROGRAM_ENDS_AT = 0x200   # the one section's bytes end here, and the archive begins
+TOTAL = 0x2B3
 
 image = bytearray(TOTAL)
 # Delphi's stub, which is what separates an installer from every other program
@@ -72,24 +67,54 @@ image = bytearray(TOTAL)
 image[0:4] = b"MZP\x00"
 image[0x3C:0x40] = struct.pack("<I", HEADER_AT)
 image[HEADER_AT:HEADER_AT + 4] = b"PE\x00\x00"
-image[HEADER_AT + 4 + 2:HEADER_AT + 4 + 4] = struct.pack("<H", 1)     # one section
-image[HEADER_AT + 4 + 16:HEADER_AT + 4 + 18] = struct.pack("<H", 224)  # optional header size
+# Two bytes of machine, then the section count; twelve bytes of symbol table
+# fields, then the optional header's size.
+image[HEADER_AT + 4 + 2:HEADER_AT + 4 + 4] = struct.pack("<H", 1)
+image[HEADER_AT + 4 + 16:HEADER_AT + 4 + 18] = struct.pack("<H", 224)
 # That section covers the program and nothing after it.
 image[SECTION_TABLE_AT + 16:SECTION_TABLE_AT + 20] = struct.pack("<I", PROGRAM_ENDS_AT)
 image[SECTION_TABLE_AT + 20:SECTION_TABLE_AT + 24] = struct.pack("<I", 0)
 
-version = b"Inno Setup Setup Data (5.5.0) (u)"
-image[VERSION_AT:VERSION_AT + len(version)] = version
-image[PACKAGE_MARK_AT:PACKAGE_MARK_AT + 4] = b"DBPF"
+# Rar!, fourth generation. The fifth writes an eighth byte and is a different
+# format; the reader refuses that one by name rather than misreading it.
+at = PROGRAM_ENDS_AT
+image[at:at + 7] = b"Rar!\x1a\x07\x00"
+at += 7
 
-# Six fields, which is the oldest layout: how much of the file the installer
-# accounts for, then four about the program it carries, then the two offsets
-# every layout ends with. The reader is not told there are six — it tries each
-# length until the checksum agrees, so this fixture is a real test of that.
-words = [TOTAL, 0, 0, 0, VERSION_AT, DATA_AT]
-table = b"rDlPtS02\x87eVx" + b"".join(struct.pack("<I", word) for word in words)
-table += struct.pack("<I", binascii.crc32(table) & 0xFFFFFFFF)
-image[TABLE_AT:TABLE_AT + len(table)] = table
+# The archive header block: a length and nothing this reader needs.
+image[at + 2] = 0x73
+image[at + 5:at + 7] = struct.pack("<H", 13)
+at += 13
+
+def fileHeader(at, name, packed, unpacked, method):
+    """One file header block, followed by its data. Returns where the next
+    block starts."""
+    name = name.encode()
+    headerSize = 32 + len(name)
+    image[at + 2] = 0x74
+    image[at + 3:at + 5] = struct.pack("<H", 0x8000)      # carries data
+    image[at + 5:at + 7] = struct.pack("<H", headerSize)
+    image[at + 7:at + 11] = struct.pack("<I", packed)
+    image[at + 11:at + 15] = struct.pack("<I", unpacked)
+    image[at + 24] = 20                                    # version needed
+    image[at + 25] = method                                # 0x30 stored
+    image[at + 26:at + 28] = struct.pack("<H", len(name))
+    image[at + 32:at + 32 + len(name)] = name
+    return at + headerSize + packed, at + headerSize
+
+# Stored, and its data really is a package: the whole reason to care which of
+# the two an entry is.
+at, dataAt = fileHeader(at, "TSData/Res/Sims3D/Sims01.package", 16, 16, 0x30)
+image[dataAt:dataAt + 4] = b"DBPF"
+
+# Packed, whose sizes differ — which is the other thing that says so.
+at, dataAt = fileHeader(at, "TSData/Res/Sims3D/Sims02.package", 8, 32, 0x35)
+
+# The end block a real archive closes with. Without it the walk runs off the
+# last entry into whatever follows and reports it as damage, which is what the
+# first version of this fixture did.
+image[at + 2] = 0x7B
+image[at + 5:at + 7] = struct.pack("<H", 7)
 
 open(sys.argv[1], "wb").write(image)
 PYTHON
