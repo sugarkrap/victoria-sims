@@ -16,8 +16,9 @@ Boolean stringEquals(const char *first, const char *second);
 
 /* Writes decimal digits plus a terminator into destination. Returns the number
    of characters written, excluding the terminator, or zero if the buffer is
-   too small. */
-MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, MemorySize value);
+   too small. Takes the widest unsigned type so timing values do not have to be
+   narrowed on 32-bit targets. */
+MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, Unsigned64 value);
 
 /* Appends as much of source as fits, always terminating. Returns the new
    length of destination. */

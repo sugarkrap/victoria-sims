@@ -26,6 +26,14 @@ jobs:
       - name: Report memory footprint
         run: size build/linux/victoriaSims
 
+      # Keeps the compiled-out path from rotting: the macros still have to
+      # vanish cleanly and the binary still has to run.
+      - name: Build with the profiler compiled out
+        run: |
+          make clean
+          make linux EXTRA_FLAGS="-Werror -DVICTORIA_PROFILER_ENABLED=0"
+          ./build/linux/victoriaSims --check
+
   web:
     name: WebAssembly (WebGPU)
     runs-on: ubuntu-latest

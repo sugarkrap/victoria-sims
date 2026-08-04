@@ -2,6 +2,7 @@
 
 #include "victoria/freestandingRuntime.h"
 #include "victoria/platformInterface.h"
+#include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
 
 static const char *vertexShaderSource =
@@ -128,6 +129,8 @@ void renderDrawFrame(Real32 elapsedSeconds)
     const GLsizei vertexStride = (GLsizei)(5 * sizeof(GLfloat));
     Real32 colorPulse = 0.65f + (0.35f * mathSine(elapsedSeconds * 1.5f));
 
+    VICTORIA_PROFILE_ZONE_BEGIN("renderDrawFrame");
+
     glClearColor(0.06f, 0.07f, 0.11f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -145,6 +148,8 @@ void renderDrawFrame(Real32 elapsedSeconds)
 
     glDisableVertexAttribArray((GLuint)vertexPositionLocation);
     glDisableVertexAttribArray((GLuint)vertexColorLocation);
+
+    VICTORIA_PROFILE_ZONE_END();
 }
 
 void renderShutdown(void)

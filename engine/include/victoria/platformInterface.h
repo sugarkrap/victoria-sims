@@ -8,4 +8,10 @@
 
 void platformLogMessage(const char *message);
 
+/* Monotonic, in microseconds, from an unspecified origin. Only differences are
+   meaningful. The profiler is the only caller that should care about the
+   resolution, and it must tolerate a coarse clock: the oldest targets cannot
+   promise better than the millisecond. */
+Unsigned64 platformGetMicroseconds(void);
+
 #endif

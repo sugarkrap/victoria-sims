@@ -1,5 +1,6 @@
 #include "victoria/freestandingRuntime.h"
 #include "victoria/platformInterface.h"
+#include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
 
 /* WebGPU has no C entry point in a bare wasm32 module, so the backend is a
@@ -74,9 +75,13 @@ void renderDrawFrame(Real32 elapsedSeconds)
 {
     Real32 colorPulse = 0.65f + (0.35f * mathSine(elapsedSeconds * 1.5f));
 
+    VICTORIA_PROFILE_ZONE_BEGIN("renderDrawFrame");
+
     hostSetClearColor(0.06f, 0.07f, 0.11f);
     hostSetTriangleTint(colorPulse);
     hostSubmitFrame();
+
+    VICTORIA_PROFILE_ZONE_END();
 }
 
 void renderShutdown(void)

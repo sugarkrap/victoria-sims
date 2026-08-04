@@ -60,7 +60,7 @@ Boolean stringEquals(const char *first, const char *second)
     return (Boolean)(first[index] == second[index]);
 }
 
-MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, MemorySize value)
+MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity, Unsigned64 value)
 {
     char reversedDigits[24];
     MemorySize digitCount = 0UL;
@@ -68,10 +68,10 @@ MemorySize stringWriteUnsigned(char *destination, MemorySize destinationCapacity
 
     do
     {
-        reversedDigits[digitCount] = (char)('0' + (char)(value % 10UL));
+        reversedDigits[digitCount] = (char)('0' + (char)(value % 10ULL));
         digitCount += 1UL;
-        value /= 10UL;
-    } while (value != 0UL && digitCount < VICTORIA_ARRAY_LENGTH(reversedDigits));
+        value /= 10ULL;
+    } while (value != 0ULL && digitCount < VICTORIA_ARRAY_LENGTH(reversedDigits));
 
     if (destinationCapacity < digitCount + 1UL)
     {

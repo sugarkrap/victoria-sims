@@ -25,8 +25,10 @@ make check    # enforce the no-dynamic-allocation rule
 
 ## Status
 
-Bootstrap only. Both targets build and draw a triangle. There is no gameplay,
-no asset loading, and no milestone schedule yet.
+Early. Both targets build and draw a triangle, and there is a hierarchical
+frame profiler that reports zone timings alongside arena usage — printed to the
+terminal on Linux, shown as an overlay on the web. There is no gameplay and no
+asset loading yet.
 
 ## Assets
 

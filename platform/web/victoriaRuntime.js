@@ -12,10 +12,17 @@ const runtimeState = {
     uniformBuffer: null,
     bindGroup: null,
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
-    startTimestamp: 0
+    startTimestamp: 0,
+    lastOverlayTimestamp: 0,
+    frameMicrosecondHistory: []
 };
 
-function readUtf8(pointer, length) {
+// Matches the engine's own report refresh interval; sampling faster only costs
+// work without telling anyone anything new.
+const OVERLAY_INTERVAL_MILLISECONDS = 250;
+const SPARKLINE_SAMPLE_COUNT = 120;
+
+function readUTF8(pointer, length) {
     const bytes = new Uint8Array(runtimeState.memory.buffer, pointer, length);
     return new TextDecoder("utf-8").decode(bytes);
 }
@@ -34,7 +41,11 @@ function reportStatus(text, isError) {
 const importObject = {
     victoriaPlatform: {
         logMessage(pointer, length) {
-            console.log(readUtf8(pointer, length));
+            console.log(readUTF8(pointer, length));
+        },
+
+        getMilliseconds() {
+            return performance.now();
         }
     },
     victoriaRender: {
@@ -50,7 +61,7 @@ const importObject = {
 
         createTrianglePipeline(shaderPointer, shaderLength) {
             const shaderModule = runtimeState.device.createShaderModule({
-                code: readUtf8(shaderPointer, shaderLength)
+                code: readUTF8(shaderPointer, shaderLength)
             });
 
             runtimeState.pipeline = runtimeState.device.createRenderPipeline({
@@ -115,12 +126,94 @@ function resizeToDisplaySize() {
     }
 }
 
+// Reads the report the engine already formatted, rather than formatting one
+// here: the same text appears on the terminal in the Linux build.
+function updateProfilerOverlay() {
+    const exports = runtimeState.instance.exports;
+    const pointer = exports.victoriaWebGetProfilerReportPointer();
+    const length = exports.victoriaWebGetProfilerReportLength();
+
+    const reportElement = document.getElementById("profilerReport");
+    if (reportElement && length > 0) {
+        reportElement.textContent = readUTF8(pointer, length);
+    }
+
+    drawFrameSparkline();
+}
+
+function drawFrameSparkline() {
+    const canvas = document.getElementById("profilerSparkline");
+    if (!canvas) {
+        return;
+    }
+
+    const pixelRatio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.floor(canvas.clientWidth * pixelRatio));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * pixelRatio));
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+    }
+
+    const context = canvas.getContext("2d");
+    const samples = runtimeState.frameMicrosecondHistory;
+    context.clearRect(0, 0, width, height);
+
+    if (samples.length < 2) {
+        return;
+    }
+
+    // Scale against the 60 Hz budget so the line's height means something
+    // absolute, not just relative to whatever the worst recent frame was.
+    const budgetMicroseconds = 16667;
+    const peak = Math.max(budgetMicroseconds, ...samples);
+    const stepX = width / (SPARKLINE_SAMPLE_COUNT - 1);
+    // Inset so a line sitting at either extreme is not clipped in half.
+    const inset = 2 * pixelRatio;
+    const plotHeight = height - (inset * 2);
+    const plotY = (microseconds) => height - inset - (microseconds / peak) * plotHeight;
+
+    const budgetY = plotY(budgetMicroseconds);
+    context.strokeStyle = "#3a4152";
+    context.lineWidth = pixelRatio;
+    context.beginPath();
+    context.moveTo(0, budgetY);
+    context.lineTo(width, budgetY);
+    context.stroke();
+
+    context.strokeStyle = "#6fd3ff";
+    context.lineWidth = 1.5 * pixelRatio;
+    context.beginPath();
+    samples.forEach((microseconds, index) => {
+        const x = index * stepX;
+        const y = plotY(microseconds);
+        if (index === 0) {
+            context.moveTo(x, y);
+        } else {
+            context.lineTo(x, y);
+        }
+    });
+    context.stroke();
+}
+
 function renderLoop(timestamp) {
     if (runtimeState.startTimestamp === 0) {
         runtimeState.startTimestamp = timestamp;
     }
     resizeToDisplaySize();
     runtimeState.instance.exports.victoriaWebRenderFrame((timestamp - runtimeState.startTimestamp) / 1000);
+
+    runtimeState.frameMicrosecondHistory.push(
+        runtimeState.instance.exports.victoriaWebGetFrameIntervalMicroseconds());
+    if (runtimeState.frameMicrosecondHistory.length > SPARKLINE_SAMPLE_COUNT) {
+        runtimeState.frameMicrosecondHistory.shift();
+    }
+
+    if (timestamp - runtimeState.lastOverlayTimestamp >= OVERLAY_INTERVAL_MILLISECONDS) {
+        runtimeState.lastOverlayTimestamp = timestamp;
+        updateProfilerOverlay();
+    }
+
     requestAnimationFrame(renderLoop);
 }
 

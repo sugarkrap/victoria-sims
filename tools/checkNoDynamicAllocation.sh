@@ -11,7 +11,11 @@
 set -eu
 
 SOURCE_DIRECTORIES="engine platform render tools"
-FORBIDDEN_PATTERN='\b(malloc|calloc|realloc|free|aligned_alloc|posix_memalign|strdup|mmap|brk|sbrk)\b'
+
+# Matched as calls rather than bare words, so prose like "cheap but not free"
+# does not trip the check. Anything that slips past this is still caught by the
+# symbol check below, which is the real backstop.
+FORBIDDEN_PATTERN='\b(malloc|calloc|realloc|free|aligned_alloc|posix_memalign|strdup|mmap|brk|sbrk)[[:space:]]*\('
 
 failureCount=0
 

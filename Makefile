@@ -28,6 +28,7 @@ COMMON_FLAGS := $(STANDARD_FLAGS) $(WARNING_FLAGS) $(OPTIMIZATION_FLAGS) $(INCLU
 ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/memoryBudget.c \
                   engine/source/freestandingRuntime.c \
+                  engine/source/profiler.c \
                   engine/source/engineCore.c
 
 LINUX_SOURCES := $(ENGINE_SOURCES) \
@@ -58,7 +59,13 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebRenderFrame \
                -Wl,--export=victoriaWebShutdown \
                -Wl,--export=victoriaWebGetBudgetTotalBytes \
-               -Wl,--export=victoriaWebGetBudgetUsedBytes
+               -Wl,--export=victoriaWebGetBudgetUsedBytes \
+               -Wl,--export=victoriaWebGetProfilerReportPointer \
+               -Wl,--export=victoriaWebGetProfilerReportLength \
+               -Wl,--export=victoriaWebGetFrameMicroseconds \
+               -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
+               -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
+               -Wl,--export=victoriaWebGetFrameIntervalMicroseconds
 
 WEB_FLAGS := --target=wasm32 -ffreestanding -nostdlib -fno-builtin \
              -DVICTORIA_FREESTANDING_BUILTINS=1

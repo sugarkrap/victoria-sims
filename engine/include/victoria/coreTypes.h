@@ -7,6 +7,8 @@ typedef signed short Integer16;
 typedef unsigned short Unsigned16;
 typedef signed int Integer32;
 typedef unsigned int Unsigned32;
+typedef signed long long Integer64;
+typedef unsigned long long Unsigned64;
 typedef float Real32;
 
 /* Widest unsigned type that still addresses a single object on every target we

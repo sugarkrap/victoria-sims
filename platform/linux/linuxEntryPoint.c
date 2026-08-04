@@ -9,6 +9,7 @@
 #include "victoria/freestandingRuntime.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
+#include "victoria/profiler.h"
 
 #define WINDOW_INITIAL_WIDTH 1024u
 #define WINDOW_INITIAL_HEIGHT 576u
@@ -23,8 +24,11 @@ typedef struct LinuxWindowState
     EGLContext contextEGL;
     Unsigned32 widthInPixels;
     Unsigned32 heightInPixels;
+    Unsigned64 profilerReportIntervalMicroseconds;
     Boolean shouldQuit;
 } LinuxWindowState;
+
+#define PROFILER_REPORT_DEFAULT_INTERVAL_MICROSECONDS 2000000ULL
 
 static LinuxWindowState windowState;
 
@@ -34,23 +38,49 @@ void platformLogMessage(const char *message)
     fputc('\n', stderr);
 }
 
-static Real32 readMonotonicSeconds(void)
+Unsigned64 platformGetMicroseconds(void)
 {
-    /* gettimeofday rather than clock_gettime: it is present on the 2.4-era
-       kernels and C libraries this target has to run on. */
-    static Boolean originIsRecorded = BOOLEAN_FALSE;
-    static struct timeval originTime;
     struct timeval currentTime;
 
     gettimeofday(&currentTime, NULL_POINTER);
+    return ((Unsigned64)currentTime.tv_sec * 1000000ULL) + (Unsigned64)currentTime.tv_usec;
+}
+
+static Real32 readMonotonicSeconds(void)
+{
+    static Boolean originIsRecorded = BOOLEAN_FALSE;
+    static Unsigned64 originMicroseconds = 0ULL;
+    Unsigned64 currentMicroseconds = platformGetMicroseconds();
+
     if (originIsRecorded == BOOLEAN_FALSE)
     {
-        originTime = currentTime;
+        originMicroseconds = currentMicroseconds;
         originIsRecorded = BOOLEAN_TRUE;
     }
 
-    return (Real32)(currentTime.tv_sec - originTime.tv_sec) +
-           ((Real32)(currentTime.tv_usec - originTime.tv_usec) / 1000000.0f);
+    return (Real32)(currentMicroseconds - originMicroseconds) / 1000000.0f;
+}
+
+/* Prints to the terminal on an interval. An on-screen overlay needs text
+   rendering, which the engine does not have yet. */
+static void printProfilerReportPeriodically(void)
+{
+    static Unsigned64 lastPrintMicroseconds = 0ULL;
+    Unsigned64 nowMicroseconds = platformGetMicroseconds();
+
+    if (windowState.profilerReportIntervalMicroseconds == 0ULL)
+    {
+        return;
+    }
+
+    if (nowMicroseconds - lastPrintMicroseconds < windowState.profilerReportIntervalMicroseconds)
+    {
+        return;
+    }
+
+    lastPrintMicroseconds = nowMicroseconds;
+    platformLogMessage("");
+    platformLogMessage(engineGetProfilerReportText());
 }
 
 static Boolean createWindowAndContext(void)
@@ -212,10 +242,95 @@ static void pumpWindowEvents(void)
     }
 }
 
+/* Busy-waits rather than calling usleep, which under -std=c99 -pedantic would
+   need a feature test macro. Spinning also exercises the same clock the
+   profiler reads, which is the point of the check. */
+static void spinForMicroseconds(Unsigned64 durationMicroseconds)
+{
+    Unsigned64 startMicroseconds = platformGetMicroseconds();
+
+    while (platformGetMicroseconds() - startMicroseconds < durationMicroseconds)
+    {
+        /* Intentionally empty. */
+    }
+}
+
+/* Runs without a display server, so continuous integration can still verify
+   that the binary links, the budget is reachable, and the profiler actually
+   measures elapsed time rather than merely compiling. */
+static int runHeadlessSelfCheck(void)
+{
+    const Unsigned32 selfCheckFrameCount = 8U;
+    const Unsigned32 spinMicrosecondsPerFrame = 2000U;
+    MemoryArena *arena = memoryBudgetGetGlobalArena();
+    ProfilerFrameSummary frameSummary;
+    char reportText[VICTORIA_PROFILER_REPORT_CAPACITY];
+    Unsigned32 frameIndex;
+
+    if (profilerInitialize(arena) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("platform: headless check failed, profiler unavailable");
+        return 1;
+    }
+
+    for (frameIndex = 0U; frameIndex < selfCheckFrameCount; frameIndex += 1U)
+    {
+        engineBeginFrame();
+        profilerBeginFrame();
+
+        VICTORIA_PROFILE_ZONE_BEGIN("selfCheckOuter");
+        VICTORIA_PROFILE_ZONE_BEGIN("selfCheckInner");
+        spinForMicroseconds((Unsigned64)spinMicrosecondsPerFrame);
+        VICTORIA_PROFILE_ZONE_END();
+        VICTORIA_PROFILE_ZONE_END();
+
+        profilerEndFrame();
+    }
+
+    profilerGetFrameSummary(&frameSummary);
+    profilerWriteReport(reportText, sizeof(reportText));
+    platformLogMessage(reportText);
+
+#if VICTORIA_PROFILER_ENABLED
+    if (frameSummary.frameIndex != (Unsigned64)selfCheckFrameCount)
+    {
+        platformLogMessage("platform: headless check failed, frame count wrong");
+        return 1;
+    }
+
+    if (frameSummary.lastMicroseconds < (Unsigned64)spinMicrosecondsPerFrame)
+    {
+        platformLogMessage("platform: headless check failed, clock did not advance");
+        return 1;
+    }
+
+    if (frameSummary.overflowCount != 0U)
+    {
+        platformLogMessage("platform: headless check failed, profiler overflowed");
+        return 1;
+    }
+#else
+    (void)frameSummary;
+    (void)selfCheckFrameCount;
+    (void)spinMicrosecondsPerFrame;
+#endif
+
+    if (memoryArenaAllocate(arena, memoryArenaGetRemainingBytes(arena), 1UL) == NULL_POINTER)
+    {
+        platformLogMessage("platform: headless check failed, budget unreachable");
+        return 1;
+    }
+
+    platformLogMessage("platform: headless check passed");
+    return 0;
+}
+
 int main(int argumentCount, char **argumentValues)
 {
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
     int argumentIndex;
+
+    windowState.profilerReportIntervalMicroseconds = PROFILER_REPORT_DEFAULT_INTERVAL_MICROSECONDS;
 
     for (argumentIndex = 1; argumentIndex < argumentCount; argumentIndex += 1)
     {
@@ -223,24 +338,15 @@ int main(int argumentCount, char **argumentValues)
         {
             runHeadlessCheck = BOOLEAN_TRUE;
         }
+        else if (stringEquals(argumentValues[argumentIndex], "--quiet") == BOOLEAN_TRUE)
+        {
+            windowState.profilerReportIntervalMicroseconds = 0ULL;
+        }
     }
 
     if (runHeadlessCheck == BOOLEAN_TRUE)
     {
-        /* Proves the binary links and the memory budget is actually reachable
-           without needing a display server, which is all continuous
-           integration can verify. */
-        MemoryArena *arena = memoryBudgetGetGlobalArena();
-        void *wholeBudget = memoryArenaAllocate(arena, VICTORIA_MEMORY_BUDGET_BYTES, 16UL);
-
-        if (wholeBudget == NULL_POINTER)
-        {
-            platformLogMessage("platform: headless check failed, budget unreachable");
-            return 1;
-        }
-
-        platformLogMessage("platform: headless check passed");
-        return 0;
+        return runHeadlessSelfCheck();
     }
 
     windowState.displayConnection = NULL_POINTER;
@@ -263,11 +369,26 @@ int main(int argumentCount, char **argumentValues)
 
     while (windowState.shouldQuit == BOOLEAN_FALSE)
     {
+        engineBeginFrame();
+
+        VICTORIA_PROFILE_ZONE_BEGIN("platformPumpEvents");
         pumpWindowEvents();
+        VICTORIA_PROFILE_ZONE_END();
+
         engineRenderFrame(readMonotonicSeconds());
+
+        /* Almost always the whole frame: with vertical sync on, this is where
+           the wait for the display lands. */
+        VICTORIA_PROFILE_ZONE_BEGIN("platformPresent");
         eglSwapBuffers(windowState.displayEGL, windowState.surfaceEGL);
+        VICTORIA_PROFILE_ZONE_END();
+
+        engineEndFrame();
+        printProfilerReportPeriodically();
     }
 
+    platformLogMessage("");
+    platformLogMessage(engineGetProfilerReportText());
     engineShutdown();
     destroyWindowAndContext();
     return 0;

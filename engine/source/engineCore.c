@@ -2,10 +2,17 @@
 #include "victoria/freestandingRuntime.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
+#include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
+
+/* How often the text report is regenerated. Formatting is cheap but not free,
+   and nothing reads it faster than a human can. */
+#define ENGINE_REPORT_INTERVAL_MICROSECONDS 250000ULL
 
 static MemoryArena *globalArena = NULL_POINTER;
 static Boolean engineIsRunning = BOOLEAN_FALSE;
+static char *profilerReportText = NULL_POINTER;
+static Unsigned64 lastReportMicroseconds = 0ULL;
 
 static void logMemoryBudget(void)
 {
@@ -33,6 +40,17 @@ Boolean engineInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 
     globalArena = memoryBudgetGetGlobalArena();
 
+    if (profilerInitialize(globalArena) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("engine: profiler unavailable, continuing without it");
+    }
+
+    profilerReportText = (char *)memoryArenaAllocate(globalArena, VICTORIA_PROFILER_REPORT_CAPACITY, 16UL);
+    if (profilerReportText != NULL_POINTER)
+    {
+        profilerReportText[0] = '\0';
+    }
+
     if (renderInitialize(globalArena, widthInPixels, heightInPixels) == BOOLEAN_FALSE)
     {
         platformLogMessage("engine: renderer failed to initialize");
@@ -54,13 +72,62 @@ void engineResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
     renderResize(widthInPixels, heightInPixels);
 }
 
+void engineBeginFrame(void)
+{
+    if (engineIsRunning == BOOLEAN_FALSE)
+    {
+        return;
+    }
+    profilerBeginFrame();
+}
+
 void engineRenderFrame(Real32 elapsedSeconds)
 {
     if (engineIsRunning == BOOLEAN_FALSE)
     {
         return;
     }
+
+    VICTORIA_PROFILE_ZONE_BEGIN("engineRenderFrame");
     renderDrawFrame(elapsedSeconds);
+    VICTORIA_PROFILE_ZONE_END();
+}
+
+void engineEndFrame(void)
+{
+    Unsigned64 nowMicroseconds;
+
+    if (engineIsRunning == BOOLEAN_FALSE)
+    {
+        return;
+    }
+
+    profilerEndFrame();
+
+    if (profilerReportText == NULL_POINTER)
+    {
+        return;
+    }
+
+    /* The first frame always produces a report. Waiting for the interval would
+       otherwise leave readers with nothing for a quarter second, and on a clock
+       whose origin is near zero it would look like the profiler was dead. */
+    nowMicroseconds = platformGetMicroseconds();
+    if (profilerReportText[0] == '\0' ||
+        nowMicroseconds - lastReportMicroseconds >= ENGINE_REPORT_INTERVAL_MICROSECONDS)
+    {
+        profilerWriteReport(profilerReportText, VICTORIA_PROFILER_REPORT_CAPACITY);
+        lastReportMicroseconds = nowMicroseconds;
+    }
+}
+
+const char *engineGetProfilerReportText(void)
+{
+    if (profilerReportText == NULL_POINTER)
+    {
+        return "";
+    }
+    return profilerReportText;
 }
 
 void engineShutdown(void)

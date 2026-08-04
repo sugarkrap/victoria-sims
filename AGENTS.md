@@ -104,8 +104,11 @@ only once a measurement justifies it.
 * **Spell things out.** `widthInPixels`, not `w`. `elapsedSeconds`, not `dt`.
   `argumentCount`, not `argc`.
 * **Acronyms keep every letter capitalised**, including at the start of an
-  identifier: `APIWanted`, `displayEGL`, `renderOpenGLES2`. An acronym at the
-  start of a variable name therefore begins with a capital — that is intended.
+  identifier: `APIWanted`, `readUTF8`, `displayEGL`, `renderOpenGLES2`. An
+  acronym at the start of a variable name therefore begins with a capital —
+  that is intended. This applies to the JavaScript glue as much as to the C.
+  Names that come from someone else's API (`Uint8Array`, `getElementById`) stay
+  spelled the way that API spells them.
 
 Prefer no comments. Write one only when the *why* is not obvious from the code:
 a hidden constraint, a subtle invariant, a deliberate choice a reader would
@@ -125,6 +128,48 @@ so it does not need it.
 
 Format documentation reverse-engineered upstream is kept under `docs/formats/`.
 Notes are fine; data is not.
+
+## The profiler
+
+`engine/include/victoria/profiler.h`. Instrumented and hierarchical: mark a
+scope by hand, and the same numbers come out of every target. Sampling was not
+an option — it needs stack unwinding and a signal or thread to sample from, and
+WebAssembly gives us neither.
+
+```c
+VICTORIA_PROFILE_ZONE_BEGIN("renderDrawFrame");
+/* ... */
+VICTORIA_PROFILE_ZONE_END();
+```
+
+The macro caches its zone identifier in a block-scoped static, so a call site
+pays for the name lookup once rather than once per frame. Every frame must be
+bracketed by exactly one `engineBeginFrame` and one `engineEndFrame`; the
+platform layer owns that boundary so work outside the engine — pumping events,
+presenting — still lands inside the profiled frame.
+
+Things worth knowing before you trust a number it prints:
+
+* **Work and interval are not the same measurement.** Work is what the engine
+  spent inside the frame. Interval is wall clock between frames, and includes
+  whatever the platform does out of our reach: a vertical sync stall, or the
+  browser waiting to present. Frames per second is derived from the interval
+  only. On the web the two differ by two orders of magnitude, and reading fps
+  off the work would have claimed 10000 fps at a real 60.
+* **Storage comes from the global arena**, so profiling lives inside the
+  128 MiB ceiling rather than beside it, and its own cost shows up in the
+  report it prints. It is about 9.5 KiB with the default limits.
+* **Capacities are fixed** — zones, nesting depth, and frame history. Raising
+  them costs arena space and nothing else. Overflow is counted and reported,
+  never silently dropped.
+* **A zone's reported depth is fixed on first entry.** One reached at two
+  different depths is shown at the first, rather than jumping between frames.
+* `-DVICTORIA_PROFILER_ENABLED=0` compiles the whole thing out, macros
+  included. Continuous integration builds that configuration so it cannot rot.
+
+The report is plain text, formatted by the engine and displayed by the
+platform: printed to the terminal on Linux, shown in an overlay on the web.
+Both show the same text because both ask the engine for it.
 
 ## Layout
 
