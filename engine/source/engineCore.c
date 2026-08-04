@@ -336,6 +336,14 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             stringAppend(message, sizeof(message), " of ");
             appendCount(message, sizeof(message), textureIndex.censusCount);
             stringAppend(message, sizeof(message), " distinct type(s)");
+            if (textureIndex.censusOverflow > 0U)
+            {
+                /* The census ran out of room. Everything above is a tally of
+                   what fitted, which is not the same as a tally of the disc. */
+                stringAppend(message, sizeof(message), ", ");
+                appendCount(message, sizeof(message), textureIndex.censusOverflow);
+                stringAppend(message, sizeof(message), " entries of untallied types");
+            }
             platformLogMessage(message);
         }
 

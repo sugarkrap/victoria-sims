@@ -30,8 +30,17 @@
 
 #define RESOURCE_INDEX_TYPE_LIMIT 8U
 
-/* Distinct resource types the census remembers. A disc uses a few dozen. */
-#define RESOURCE_INDEX_CENSUS_LIMIT 48U
+/* Distinct resource types the census remembers.
+
+   Forty eight was the first guess and a retail disc filled it exactly, which
+   is the shape of a cap being hit rather than a disc that happens to use
+   forty eight types. Whatever was first met after the forty eighth went
+   uncounted, and the count that would have said so was gathered and never
+   printed — a counter nobody reads is not a diagnostic.
+
+   The Sims 2 defines fewer than a hundred types, so this has room to spare and
+   the overflow is now reported either way. */
+#define RESOURCE_INDEX_CENSUS_LIMIT 256U
 
 /* Where one resource is. Deliberately not a PackageResource: the group is
    dropped, because a lookup by hashed name does not know it and matching on it
