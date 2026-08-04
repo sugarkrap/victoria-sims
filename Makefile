@@ -34,6 +34,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/profiler.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
+                  engine/source/geometryReader.c \
                   engine/source/engineCore.c \
                   utils/strings.c
 
@@ -207,13 +208,23 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
+GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
 
-verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER)
+verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
+		$(GEOMETRY_READER_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
+	@$(GEOMETRY_READER_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
+
+$(GEOMETRY_READER_VERIFIER): tests/verifyGeometryReader.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGeometryReader.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
 
 $(DISC_READER_VERIFIER): tests/verifyDiscReader.c engine/source/discReader.c \
 		engine/source/virtualFileSystem.c engine/source/packageReader.c \
