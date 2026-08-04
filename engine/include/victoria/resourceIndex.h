@@ -69,6 +69,12 @@ typedef struct ResourceIndex
 
     Unsigned32 wantedTypes[RESOURCE_INDEX_TYPE_LIMIT];
     Unsigned32 wantedTypeCount;
+    /* Kept per type, and a total of every entry met whether wanted or not.
+       A search that finds nothing needs to distinguish "the disc holds few of
+       these" from "the disc holds none and I am looking for the wrong thing",
+       and only a count of what was actually there can do that. */
+    Unsigned32 countByType[RESOURCE_INDEX_TYPE_LIMIT];
+    Unsigned32 entriesSeen;
 
     /* Where the walk is. */
     Unsigned32 nextFileIndex;

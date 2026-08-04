@@ -290,8 +290,12 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         stringAppend(message, sizeof(message), "engine: indexed ");
         appendCount(message, sizeof(message), textureIndex.filesIndexed);
         stringAppend(message, sizeof(message), " package(s), ");
-        appendCount(message, sizeof(message), textureIndex.count);
-        stringAppend(message, sizeof(message), " texture(s)");
+        appendCount(message, sizeof(message), textureIndex.entriesSeen);
+        stringAppend(message, sizeof(message), " resource(s): ");
+        appendCount(message, sizeof(message), textureIndex.countByType[0]);
+        stringAppend(message, sizeof(message), " image(s), ");
+        appendCount(message, sizeof(message), textureIndex.countByType[1]);
+        stringAppend(message, sizeof(message), " mip level(s)");
         if (textureIndex.dropped > 0U)
         {
             stringAppend(message, sizeof(message), ", ");
@@ -314,8 +318,28 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         char wanted[RESOURCE_NAME_LIMIT];
         const ResourceIndexEntry *found;
 
+        /* Both spellings, and both types. The suffix is a convention rather
+           than a rule, and a texture whose only copy on the disc is the mip
+           level resource is still the texture. Trying one shape and reporting
+           "nowhere on this disc" would be reporting the convention's failure
+           as the disc's. */
         materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_txtr");
         found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
+        if (found == NULL_POINTER)
+        {
+            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR,
+                                           discSearch.textureName);
+        }
+        if (found == NULL_POINTER)
+        {
+            materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_lifo");
+            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
+        }
+        if (found == NULL_POINTER)
+        {
+            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
+                                           discSearch.textureName);
+        }
 
         if (found != NULL_POINTER)
         {
@@ -641,10 +665,15 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         if (!discSearch.textureFound && discSearch.textureName[0] != '\0' &&
             discSearch.mesh.textureCoordinates != NULL_POINTER)
         {
-            static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_TXTR };
+            /* Images and the resources that hold a single mip level of one.
+               Both are indexed because a texture whose top level lives in a
+               LIFO may be filed either way, and looking for only one of them
+               and finding nothing proves nothing about the other. */
+            static const Unsigned32 wantedTypes[2] = { (Unsigned32)PACKAGE_TYPE_TXTR,
+                                                       (Unsigned32)PACKAGE_TYPE_LIFO };
 
             if (resourceIndexBegin(&textureIndex, discFileSystem, globalArena,
-                                   TEXTURE_INDEX_CAPACITY, wantedTypes, 1U))
+                                   TEXTURE_INDEX_CAPACITY, wantedTypes, 2U))
             {
                 message[0] = '\0';
                 stringAppend(message, sizeof(message), "engine: looking for ");

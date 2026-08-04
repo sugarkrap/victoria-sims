@@ -61,7 +61,8 @@ static Boolean endsWithPackage(const char *path)
     return BOOLEAN_TRUE;
 }
 
-static Boolean isWanted(const ResourceIndex *index, Unsigned32 typeIdentifier)
+/* Which slot this type occupies, or the type count when it is not wanted. */
+static Unsigned32 wantedSlot(const ResourceIndex *index, Unsigned32 typeIdentifier)
 {
     Unsigned32 which;
 
@@ -69,10 +70,10 @@ static Boolean isWanted(const ResourceIndex *index, Unsigned32 typeIdentifier)
     {
         if (index->wantedTypes[which] == typeIdentifier)
         {
-            return BOOLEAN_TRUE;
+            return which;
         }
     }
-    return BOOLEAN_FALSE;
+    return index->wantedTypeCount;
 }
 
 Boolean resourceIndexBegin(ResourceIndex *index, VirtualFileSystem *fileSystem, MemoryArena *arena,
@@ -93,11 +94,13 @@ Boolean resourceIndexBegin(ResourceIndex *index, VirtualFileSystem *fileSystem, 
     index->pendingEntryCount = 0U;
     index->pendingIndexOffset = 0U;
     index->pendingIndexSize = 0U;
+    index->entriesSeen = 0U;
     index->wantedTypeCount =
         (wantedTypeCount > RESOURCE_INDEX_TYPE_LIMIT) ? RESOURCE_INDEX_TYPE_LIMIT : wantedTypeCount;
     for (which = 0U; which < index->wantedTypeCount; which++)
     {
         index->wantedTypes[which] = wantedTypes[which];
+        index->countByType[which] = 0U;
     }
 
     index->entries = (ResourceIndexEntry *)memoryArenaAllocate(
@@ -213,12 +216,15 @@ ResourceIndexStatus resourceIndexStep(ResourceIndex *index)
         {
             MemorySize at = (MemorySize)which * entrySize;
             Unsigned32 typeIdentifier = readUnsigned32(indexBytes, at);
+            Unsigned32 slot = wantedSlot(index, typeIdentifier);
             ResourceIndexEntry *stored;
 
-            if (!isWanted(index, typeIdentifier))
+            index->entriesSeen++;
+            if (slot >= index->wantedTypeCount)
             {
                 continue;
             }
+            index->countByType[slot]++;
             if (index->count >= index->capacity)
             {
                 index->dropped++;
