@@ -87,6 +87,25 @@ static void appendHexadecimal(char *destination, MemorySize capacity, Unsigned32
     }
 }
 
+/* Bytes as hexadecimal pairs, so a reader can match them against whatever
+   reference documents the format. */
+static void appendHexadecimalBytes(char *destination, MemorySize capacity, const Unsigned8 *bytes,
+                                   MemorySize byteCount, MemorySize from, MemorySize howMany)
+{
+    MemorySize index;
+
+    for (index = 0UL; index < howMany && from + index < byteCount; index++)
+    {
+        char digits[8];
+
+        if (stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)bytes[from + index], 2UL) > 0UL)
+        {
+            stringAppend(destination, capacity, digits + 2UL);
+            stringAppend(destination, capacity, " ");
+        }
+    }
+}
+
 /* Kibibytes, except below a kibibyte, where they would all read as zero and a
    ten byte file would be indistinguishable from an empty one. */
 static void appendByteSize(char *destination, MemorySize capacity, Unsigned64 byteCount)
@@ -284,24 +303,41 @@ static Unsigned32 probesDone = 0U;
  * extension. */
 typedef struct FileSignature
 {
+    /* Where in the file the mark sits. Nearly always the very front, but a
+       program that carries an archive puts its own mark past the header it had
+       to start with — and that mark is the informative one, because "a Windows
+       program" is what every installer on every disc looks like. */
+    MemorySize offset;
     const char *bytes;
     MemorySize length;
     const char *name;
 } FileSignature;
 
+/* Installer loaders write their offset table at 0x30, past the DOS stub. Six
+   characters rather than the full mark, because the two bytes after it are a
+   format version and this only needs to say which family it is. */
+#define INSTALLER_LOADER_OFFSET 0x30UL
+
 static const FileSignature fileSignatures[] = {
-    { "DBPF", 4UL, "a package by content, whatever it is called" },
-    { "MSCF", 4UL, "a Microsoft cabinet" },
-    { "ISc(", 4UL, "an InstallShield cabinet" },
-    { "Rar!", 4UL, "a RAR archive" },
-    { "PK\x03\x04", 4UL, "a zip archive" },
-    { "PK\x05\x06", 4UL, "an empty zip archive" },
-    { "7z\xBC\xAF", 4UL, "a 7-zip archive" },
-    { "\x1F\x8B", 2UL, "gzip" },
-    { "BSDIFF", 6UL, "a binary patch" },
+    { 0UL, "DBPF", 4UL, "a package by content, whatever it is called" },
+    { 0UL, "MSCF", 4UL, "a Microsoft cabinet" },
+    { 0UL, "ISc(", 4UL, "an InstallShield cabinet" },
+    { 0UL, "Rar!", 4UL, "a RAR archive" },
+    { 0UL, "PK\x03\x04", 4UL, "a zip archive" },
+    { 0UL, "PK\x05\x06", 4UL, "an empty zip archive" },
+    { 0UL, "7z\xBC\xAF", 4UL, "a 7-zip archive" },
+    { 0UL, "\x1F\x8B", 2UL, "gzip" },
+    { 0UL, "BSDIFF", 6UL, "a binary patch" },
+    /* Before the plain program marks, because this is a program and the fact
+       that it is an installer carrying a payload is the part worth knowing. */
+    { INSTALLER_LOADER_OFFSET, "rDlPtS", 6UL,
+      "an Inno Setup installer — the payload is inside it, LZMA compressed" },
     /* Last, because a self-extracting archive of any of the above is also a
-       Windows program, and the specific answer is the useful one. */
-    { "MZ", 2UL, "a Windows program — anything inside is appended, not at the front" }
+       Windows program, and the specific answer is the useful one. Delphi's
+       linker writes MZP where Microsoft's writes MZ, which is worth separating:
+       every installer builder worth the name is a Delphi program. */
+    { 0UL, "MZP", 3UL, "a Delphi-built program, which on a file this size means an installer" },
+    { 0UL, "MZ", 2UL, "a Windows program — anything inside is appended, not at the front" }
 };
 
 static const char *identifySignature(const Unsigned8 *bytes, MemorySize byteCount)
@@ -314,13 +350,13 @@ static const char *identifySignature(const Unsigned8 *bytes, MemorySize byteCoun
         MemorySize index;
         Boolean matches = BOOLEAN_TRUE;
 
-        if (byteCount < signature->length)
+        if (byteCount < signature->offset + signature->length)
         {
             continue;
         }
         for (index = 0UL; index < signature->length; index++)
         {
-            if (bytes[index] != (Unsigned8)signature->bytes[index])
+            if (bytes[signature->offset + index] != (Unsigned8)signature->bytes[index])
             {
                 matches = BOOLEAN_FALSE;
                 break;
@@ -652,7 +688,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
     if (discPhase == DISC_PHASE_PROBE)
     {
         const VirtualFileEntry *entry;
-        Unsigned8 head[16];
+        Unsigned8 head[64];
         MemorySize headSize;
         VirtualReadResult read;
         Unsigned64 nextSize = 0ULL;
@@ -707,18 +743,14 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         {
             /* The bytes as well as the verdict. A name this reader does not know
                is exactly the case where the bytes themselves are what somebody
-               needs to see. */
-            MemorySize index;
-
-            for (index = 0UL; index < headSize && index < 8UL; index++)
+               needs to see — and the same goes for the mark at 0x30, which is
+               where a program that carries an archive says so. */
+            appendHexadecimalBytes(message, sizeof(message), head, headSize, 0UL, 8UL);
+            if (headSize >= INSTALLER_LOADER_OFFSET + 8UL)
             {
-                char digits[8];
-
-                if (stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)head[index], 2UL) > 0UL)
-                {
-                    stringAppend(message, sizeof(message), digits + 2UL);
-                    stringAppend(message, sizeof(message), " ");
-                }
+                stringAppend(message, sizeof(message), "and at 0x30 ");
+                appendHexadecimalBytes(message, sizeof(message), head, headSize,
+                                       INSTALLER_LOADER_OFFSET, 8UL);
             }
         }
         platformLogMessage(message);

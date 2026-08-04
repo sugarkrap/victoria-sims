@@ -312,11 +312,26 @@ calls.length = 0;
     // bytes say, not what the extension claims.
     check("counts packages against everything else",
           loggedMessages.some((text) =>
-              text.includes("5 package(s)") && text.includes("2 other file(s)")));
+              text.includes("5 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
-          loggedMessages.some((text) => text.includes("28 bytes  Support/data1.cab")));
+          loggedMessages.some((text) => text.includes("64 bytes  TSData.exe")));
+
+    // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
+    // Setup installer, copied from the shape a real repack has: a Delphi MZP
+    // stub, and the loader mark at 0x30 that says what the program really is.
+    // Reading only the front would call this "a Windows program", which is what
+    // every installer on every disc looks like and tells nobody anything.
+    const installer = loggedMessages.find((text) => text.includes("TSData.exe —"));
+    check("probes the installer for a signature", Boolean(installer));
+    if (installer) {
+        check("naming it from the mark at 0x30, not the stub at the front",
+              installer.includes("Inno Setup"));
+        check("and printing both", installer.includes("4D 5A 50 00") &&
+              installer.includes("72 44 6C 50 74 53 30 32"));
+    }
+
     const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
-    check("probes it for a signature", Boolean(probe));
+    check("probes a file it cannot name", Boolean(probe));
     if (probe) {
         // "placehol", which is neither a cabinet nor anything else known.
         check("reporting the bytes it read", probe.includes("70 6C 61 63 65 68 6F 6C"));

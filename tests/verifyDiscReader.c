@@ -167,13 +167,16 @@ int main(void)
 
     checkThat(&failureCount, "reads the volume identifier", stringEquals(reader.volumeIdentifier, "VICTORIA_TEST"));
     checkThat(&failureCount, "prefers the Joliet name tree", reader.usesJoliet == BOOLEAN_TRUE);
-    checkThat(&failureCount, "finds every file", fileSystem.entryCount == 7U);
+    checkThat(&failureCount, "finds every file", fileSystem.entryCount == 8U);
 
     checkThat(&failureCount, "finds a nested package", catalogueHas(&fileSystem, "TSData/Res/Sims3D/teapot_model.package"));
     checkThat(&failureCount, "finds the material definition",
           catalogueHas(&fileSystem, "TSData/Res/Materials/material_definition.package"));
     checkThat(&failureCount, "finds the root level file", catalogueHas(&fileSystem, "Autorun.inf"));
     checkThat(&failureCount, "finds the installer archive", catalogueHas(&fileSystem, "Support/data1.cab"));
+    /* The head of an installer, sitting at the root the way a repack leaves it.
+       The disc this fixture grew for kept its whole game inside one. */
+    checkThat(&failureCount, "finds the installer itself", catalogueHas(&fileSystem, "TSData.exe"));
     checkThat(&failureCount, "keeps a file that only looks like a package",
           catalogueHas(&fileSystem, "TSData/Res/NotReally.package"));
     checkThat(&failureCount, "does not invent files", catalogueHas(&fileSystem, "TSData/Res/Sims3D/nothing.package") == BOOLEAN_FALSE);
@@ -249,7 +252,7 @@ int main(void)
 
         checkThat(&failureCount, "the walk completes even so", status == DISC_READ_COMPLETE);
         checkThat(&failureCount, "it really did have to wait", stutteringStore.pendingCount > 0U);
-        checkThat(&failureCount, "finds exactly the same files", secondFileSystem.entryCount == 7U);
+        checkThat(&failureCount, "finds exactly the same files", secondFileSystem.entryCount == 8U);
         checkThat(&failureCount, "and the same nested package",
               catalogueHas(&secondFileSystem, "TSData/Res/Sims3D/teapot_model.package"));
         checkThat(&failureCount, "reads no more than it did before", stutteringStore.bytesRead == walkBytes);
