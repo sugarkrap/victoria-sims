@@ -41,7 +41,9 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->packagesWithGeometry = 0U;
     search->geometryRefused = 0U;
     search->decompressionRefused = 0U;
+    search->sawUnknownMark = BOOLEAN_FALSE;
     search->firstUnknownMark = 0U;
+    search->largestElementCount = 0U;
     for (index = 0U; index < GEOMETRY_READ_RESULT_COUNT; index++)
     {
         search->refusalsByReason[index] = 0U;
@@ -194,10 +196,14 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
             }
             search->versionsSeen[bucket]++;
         }
-        if (search->mesh.versionMark != 0U && search->mesh.versionMark != 0xFFFF0001UL &&
-            search->firstUnknownMark == 0U)
+        if (search->mesh.versionMark != 0xFFFF0001UL && !search->sawUnknownMark)
         {
+            search->sawUnknownMark = BOOLEAN_TRUE;
             search->firstUnknownMark = search->mesh.versionMark;
+        }
+        if (search->mesh.elementCount > search->largestElementCount)
+        {
+            search->largestElementCount = search->mesh.elementCount;
         }
 
         if (readResult != GEOMETRY_READ_OK)

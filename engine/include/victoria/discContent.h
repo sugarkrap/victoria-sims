@@ -64,10 +64,21 @@ typedef struct DiscContentSearch
        part no amount of reasoning about the reader can supply. Anything past
        the last bucket lands in it. */
     Unsigned32 versionsSeen[DISC_CONTENT_VERSION_BUCKETS];
-    /* Collection marks that were not 0xFFFF0001, most recent first seen. Kept
-       whole rather than bucketed: there are only a few, and knowing it was
-       0xFFFE0001 rather than "some other mark" is the whole question. */
+    /* The first collection mark that was not 0xFFFF0001. Kept whole rather than
+       bucketed: there are only a few, and knowing it was 0xFFFE0001 rather than
+       "some other mark" is the whole question.
+
+       The flag is not redundant with a zero mark. A resource beginning with
+       four zero bytes has a mark of zero, and the first version of this used
+       zero to mean "nothing recorded" — which swallowed exactly the case it was
+       added to report. */
+    Boolean sawUnknownMark;
     Unsigned32 firstUnknownMark;
+
+    /* The largest element count any container claimed, so a refusal for having
+       too many can be checked against what the disc actually holds instead of
+       argued about. */
+    Unsigned32 largestElementCount;
 } DiscContentSearch;
 
 void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, MemoryArena *arena);

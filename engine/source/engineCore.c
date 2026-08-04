@@ -258,10 +258,17 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             {
                 stringAppend(message, sizeof(message), " none reached the block header");
             }
-            if (discSearch.firstUnknownMark != 0U)
+            if (discSearch.sawUnknownMark)
             {
                 stringAppend(message, sizeof(message), " first non-0xFFFF0001 mark ");
                 appendHexadecimal(message, sizeof(message), discSearch.firstUnknownMark);
+                stringAppend(message, sizeof(message), ";");
+            }
+            if (discSearch.largestElementCount > 0U)
+            {
+                stringAppend(message, sizeof(message), " largest element count ");
+                appendCount(message, sizeof(message), discSearch.largestElementCount);
+                stringAppend(message, sizeof(message), ";");
             }
             platformLogMessage(message);
         }

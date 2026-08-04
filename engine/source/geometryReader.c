@@ -65,7 +65,7 @@ const char *geometryReadResultGetName(GeometryReadResult result)
     case GEOMETRY_READ_OLDER_COLLECTION:
         return "an older collection, laid out differently";
     case GEOMETRY_READ_TOO_MANY_ELEMENTS:
-        return "more geometry elements than this reader holds";
+        return "more geometry elements than the resource has room for";
     case GEOMETRY_READ_TOO_MANY_VERTICES:
         return "more vertices than a half word index can address";
     default:
@@ -82,7 +82,16 @@ typedef struct ElementSpan
     Unsigned32 payloadBytes;
 } ElementSpan;
 
-#define MAXIMUM_ELEMENTS 32U
+/* The smallest an element can be on disc: six words of header and the word
+ * counting its index array. A count claiming more elements than that many bytes
+ * allows is describing a resource larger than the one it arrived in, so it can
+ * be refused before anything is allocated on the strength of it.
+ *
+ * This replaces a flat ceiling of 32, which refused 238 of the 239 readable
+ * containers on a retail disc. There was never a reason for a fixed limit —
+ * a body mesh carries an element per morph target and per bone array, and
+ * thirty-two is simply fewer than the game ships. */
+#define SMALLEST_ELEMENT_BYTES 28UL
 
 static Real32 *copyRealArray(MemoryArena *arena, ResourceCursor *cursor, const ElementSpan *span,
                              Unsigned32 componentCount, Unsigned32 vertexCount)
@@ -135,7 +144,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     ResourceCollection collection;
     ResourceCollectionResult collectionResult;
     PersistTypeInfo blockType;
-    ElementSpan spans[MAXIMUM_ELEMENTS];
+    ElementSpan *spans;
     const ElementSpan *positionSpan = NULL_POINTER;
     const ElementSpan *normalSpan = NULL_POINTER;
     const ElementSpan *textureSpan = NULL_POINTER;
@@ -159,6 +168,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->primitiveCount = 0U;
     mesh->versionMark = 0U;
     mesh->containerVersion = 0U;
+    mesh->elementCount = 0U;
 
     /* The wrapper — version mark, links to resources elsewhere, the block type
      * list — is the same for every scenegraph resource and is read in one
@@ -198,9 +208,23 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     {
         return GEOMETRY_READ_TRUNCATED;
     }
-    if (elementCount > MAXIMUM_ELEMENTS)
+    mesh->elementCount = elementCount;
+    if ((MemorySize)elementCount > sizeInBytes / SMALLEST_ELEMENT_BYTES)
     {
         return GEOMETRY_READ_TOO_MANY_ELEMENTS;
+    }
+    if (elementCount == 0U)
+    {
+        return GEOMETRY_READ_NO_GEOMETRY;
+    }
+    /* From the arena rather than the stack, so the count comes from the file
+     * instead of from a number picked here. It is given back with everything
+     * else when a caller rewinds after a refusal. */
+    spans = (ElementSpan *)memoryArenaAllocate(arena, (MemorySize)elementCount * sizeof(ElementSpan),
+                                               sizeof(MemorySize));
+    if (spans == NULL_POINTER)
+    {
+        return GEOMETRY_READ_OUT_OF_ARENA;
     }
     for (index = 0U; index < elementCount; index++)
     {

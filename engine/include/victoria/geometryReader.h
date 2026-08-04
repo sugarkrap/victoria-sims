@@ -58,6 +58,9 @@ typedef enum GeometryReadResult
     /* A collection marked 0xFFFE0001 or 0xFFFD0001. Older than what is read
        here, and laid out differently, but not rubbish. */
     GEOMETRY_READ_OLDER_COLLECTION,
+    /* An element count larger than the resource has bytes to describe, which
+       means the count is not a count. Not a ceiling of this reader's choosing:
+       one of those refused 238 of 239 readable containers on a retail disc. */
     GEOMETRY_READ_TOO_MANY_ELEMENTS,
     /* More vertices than a half word index can address, which is this reader's
        limit rather than the format's. */
@@ -95,6 +98,9 @@ typedef struct GeometryMesh
        not get that far. */
     Unsigned32 versionMark;
     Unsigned32 containerVersion;
+    /* How many geometry elements the container claimed, set before it is acted
+       on so a refusal can quote it. */
+    Unsigned32 elementCount;
 } GeometryMesh;
 
 GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes, MemorySize sizeInBytes,

@@ -56,14 +56,17 @@ static Boolean nearly(Real32 value, Real32 expected)
 
 /* An authored container, for the layouts the fixture cannot reach.
 
-   The teapot is block version 4, so it exercises half word indices and nothing
-   else. Retail character meshes are older and store their indices as full
-   words — 238 of the 282 meshes on the user's disc were refused for being that
-   version — and there is no fixture on hand that is one. So one is written
-   here, byte by byte, from the layout rather than from anything this reader
-   produced. */
+   The teapot is one container: block version 4, two elements, half word
+   indices. Everything either side of that — the word wide indices of versions 1
+   and 2, and the crowded element lists a retail body mesh carries — has no
+   fixture on hand, so one is written here byte by byte from the layout rather
+   than from anything this reader produced.
 
-#define BUILT_CAPACITY 512UL
+   The index width has to be right in both directions or the fixture tests only
+   itself: word arrays labelled version 4 read back as an empty container, which
+   is indistinguishable from a reader bug until you look. */
+
+#define BUILT_CAPACITY 4096UL
 
 typedef struct Builder
 {
@@ -121,19 +124,44 @@ static void putTypeInformation(Builder *builder, const char *name, Unsigned32 id
     putUnsigned32(builder, version);
 }
 
-/* Word wide, which is what a container below block version 3 uses. */
-static void putWordIndexArray(Builder *builder, const Unsigned32 *values, Unsigned32 count)
+/* Indices are a word wide below block version 3 and a half word from 3 up. The
+   builder has to agree with the reader about that or the fixture tests nothing
+   but the builder — writing word arrays and labelling them version 4 produced a
+   container that read as empty, which is what a mismatch looks like. */
+static void putIndexArray(Builder *builder, const Unsigned32 *values, Unsigned32 count,
+                          Unsigned32 version)
 {
     Unsigned32 index;
 
     putUnsigned32(builder, count);
     for (index = 0U; index < count; index++)
     {
-        putUnsigned32(builder, values[index]);
+        if (version < 3U)
+        {
+            putUnsigned32(builder, values[index]);
+        }
+        else
+        {
+            putUnsigned8(builder, (Unsigned8)(values[index] & 0xFFU));
+            putUnsigned8(builder, (Unsigned8)((values[index] >> 8) & 0xFFU));
+        }
     }
 }
 
-static void buildWordIndexedContainer(Builder *builder, Unsigned32 blockVersion)
+/* Elements the reader does not use, to push the count past any ceiling. Tangents
+   are real and ignored, which makes them the honest thing to pad with. */
+static void putIgnoredElement(Builder *builder, Unsigned32 version)
+{
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0x89D92BA0UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 2U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U); /* no payload */
+    putIndexArray(builder, NULL_POINTER, 0U, version);
+}
+
+static void buildContainer(Builder *builder, Unsigned32 blockVersion, Unsigned32 padElements)
 {
     static const Real32 positions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f };
     static const Unsigned32 elementIndices[2] = { 0U, 1U };
@@ -151,7 +179,7 @@ static void buildWordIndexedContainer(Builder *builder, Unsigned32 blockVersion)
     putTypeInformation(builder, "cSGResource", 0xACE46235UL, 2U);
     putString(builder, "body_tslocator_gmdc");
 
-    putUnsigned32(builder, 2U); /* two elements */
+    putUnsigned32(builder, 2U + padElements);
 
     /* Positions: three vertices of three floats. */
     putUnsigned32(builder, 0U);
@@ -164,7 +192,7 @@ static void buildWordIndexedContainer(Builder *builder, Unsigned32 blockVersion)
     {
         putReal32(builder, positions[index]);
     }
-    putWordIndexArray(builder, NULL_POINTER, 0U);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
 
     /* Normals, all straight up, so unit length proves the stride. */
     putUnsigned32(builder, 0U);
@@ -179,21 +207,26 @@ static void buildWordIndexedContainer(Builder *builder, Unsigned32 blockVersion)
         putReal32(builder, 0.0f);
         putReal32(builder, 1.0f);
     }
-    putWordIndexArray(builder, NULL_POINTER, 0U);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+
+    for (index = 0U; index < padElements; index++)
+    {
+        putIgnoredElement(builder, blockVersion);
+    }
 
     putUnsigned32(builder, 1U); /* one component */
-    putWordIndexArray(builder, elementIndices, 2U);
+    putIndexArray(builder, elementIndices, 2U, blockVersion);
     putUnsigned32(builder, 3U); /* three vertices */
     putUnsigned32(builder, 0U);
-    putWordIndexArray(builder, NULL_POINTER, 0U);
-    putWordIndexArray(builder, NULL_POINTER, 0U);
-    putWordIndexArray(builder, NULL_POINTER, 0U);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
 
     putUnsigned32(builder, 1U); /* one primitive */
     putUnsigned32(builder, 0U);
     putUnsigned32(builder, 0U);
     putString(builder, "body");
-    putWordIndexArray(builder, faces, 3U);
+    putIndexArray(builder, faces, 3U, blockVersion);
 }
 
 int main(void)
@@ -338,7 +371,7 @@ int main(void)
            new width fails here rather than on one of them by luck. */
         for (version = 1U; version <= 2U; version++)
         {
-            buildWordIndexedContainer(&builder, version);
+            buildContainer(&builder, version, 0U);
             result = geometryReaderOpen(&older, builder.bytes, builder.length, &arena);
             checkThat(&failureCount, "reads a container at block version 1 or 2",
                       result == GEOMETRY_READ_OK);
@@ -368,6 +401,49 @@ int main(void)
                           nearly(maximum[0], 1.0f) && nearly(maximum[1], 2.0f) &&
                               nearly(maximum[2], 0.0f));
             }
+        }
+    }
+
+    printf("\n-- a container with more elements than a fixed array would hold --\n");
+    {
+        static Builder builder;
+        GeometryMesh crowded;
+
+        /* Sixty elements. A retail body mesh carries one per morph target and
+           per bone array, and a ceiling of thirty-two refused 238 of the 239
+           readable containers on a real disc — every one of them for this. */
+        buildContainer(&builder, 4U, 58U);
+        result = geometryReaderOpen(&crowded, builder.bytes, builder.length, &arena);
+        checkThat(&failureCount, "reads a container carrying sixty elements",
+                  result == GEOMETRY_READ_OK);
+        if (result != GEOMETRY_READ_OK)
+        {
+            printf("  result: %s\n", geometryReadResultGetName(result));
+        }
+        checkThat(&failureCount, "and reports how many it found", crowded.elementCount == 60U);
+        checkThat(&failureCount, "still finding the positions past the padding",
+                  crowded.vertexCount == 3U);
+        checkThat(&failureCount, "and the normals", crowded.normals != NULL_POINTER);
+
+        /* A count is only believable if the resource is big enough to hold that
+           many elements. Refusing on the arithmetic means a corrupt count never
+           becomes an allocation. */
+        {
+            static const Unsigned8 wildCount[] = {
+                0x01U, 0x00U, 0xFFU, 0xFFU, /* mark */
+                0x00U, 0x00U, 0x00U, 0x00U, /* no links */
+                0x01U, 0x00U, 0x00U, 0x00U, /* one block */
+                0x87U, 0x86U, 0x4FU, 0xACU, /* its type */
+                0x01U, 'x',  0x87U, 0x86U, 0x4FU, 0xACU, 0x04U, 0x00U, 0x00U, 0x00U,
+                0x01U, 'y',  0x00U, 0x00U, 0x00U, 0x00U, 0x02U, 0x00U, 0x00U, 0x00U,
+                0x01U, 'z',  /* the resource name */
+                0xFFU, 0xFFU, 0xFFU, 0x0FU  /* a quarter of a billion elements */
+            };
+            GeometryMesh other;
+
+            checkThat(&failureCount, "refuses a count the resource has no room for",
+                      geometryReaderOpen(&other, wildCount, sizeof(wildCount), &arena) ==
+                          GEOMETRY_READ_TOO_MANY_ELEMENTS);
         }
     }
 
