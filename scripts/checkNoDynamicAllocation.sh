@@ -10,7 +10,7 @@
 
 set -eu
 
-SOURCE_DIRECTORIES="engine platform render tools"
+SOURCE_DIRECTORIES="engine platform render tests"
 
 # Matched as calls rather than bare words, so prose like "cheap but not free"
 # does not trip the check. Anything that slips past this is still caught by the

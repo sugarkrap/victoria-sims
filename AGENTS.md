@@ -179,7 +179,7 @@ So:
   "just for a test". If its provenance cannot be established, treat it as
   retail-derived.
 * **Purpose-built fixtures: yes, under `testAssets/`,** pinned by SHA-256 in
-  `testAssets/manifest.sha256`. `tools/checkNoGameData.sh` enforces both halves
+  `testAssets/manifest.sha256`. `scripts/checkNoGameData.sh` enforces both halves
   and runs in continuous integration: nothing game-data-shaped may be tracked
   outside that directory, every manifest entry must actually be committed, and
   nothing may be tracked there that the manifest does not list. Changing a
@@ -341,6 +341,45 @@ attributed rather than hidden: startup shows up as frame one, and as the worst
 frame until something beats it. Zones entered outside a frame accumulate
 nothing and would have reported as zero.
 
+## Tools
+
+Everything above is about the engine. **None of it applies to `tools/`.**
+
+Each directory under `tools/` is one standalone tool, kept in its own git
+repository and included here as a submodule. Their rules are deliberately
+relaxed:
+
+* No memory ceiling and no allocation rule. Tools run on a developer's
+  workstation, not on a handheld from 2005.
+* Latest compilers, any language, any dependency. The first tool is Rust.
+* Idiomatic style for whatever language they are written in. The engine's
+  `camelCase` rule stops at the engine boundary — `vic-extractor` is
+  `snake_case` throughout, because fighting `rustfmt` and `clippy` would cost
+  more than the consistency is worth.
+* Each tool owns its own continuous integration. `vic-extractor` builds and
+  tests on Linux, macOS and Windows in its own repository.
+
+What does **not** relax: no retail game data, in any repository, ever.
+
+Tools are built by their own workflow, not the engine's, so a tool breaking
+never gates the engine build.
+
+| Tool | Purpose |
+| --- | --- |
+| `vic-extractor` | Reads a Sims 2 retail ISO and lists the DBPF packages on it, as a command line tool and as a web page. Does not extract yet. |
+
+**One implementation of a format, always.** A tool must not reimplement
+something the engine already parses. `vic-extractor` compiles
+`engine/source/packageReader.c` through its `build.rs` and calls it over FFI,
+including in its WebAssembly build. Two parsers drift the moment either changes,
+and then disagree about a real disc.
+
+That sharing is why tools live in this repository rather than one repository
+each. A tool in its own repository cannot reach the engine's sources at build
+time without either circular submodules or its continuous integration cloning
+the engine, and neither is worth the separation. `git subtree` splits one out
+later with its history intact if that changes.
+
 ## Layout
 
 ```
@@ -353,8 +392,10 @@ platform/        one directory per platform backend
 render/          one directory per graphics backend
   openGLES2/
   webGPU/
-tools/           asset extraction and build tooling
-docs/formats/    reverse-engineering notes inherited from upstream
+scripts/         repository hygiene checks, run by make and by CI
+tests/           test programs for the engine
+tools/           one directory per standalone tool, relaxed rules
+docs/formats/    reverse-engineering notes, and formats decoded here
 legacy/          upstream C# and Unity shaders, reference only, never built
 ```
 

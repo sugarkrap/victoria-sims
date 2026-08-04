@@ -33,6 +33,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/freestandingRuntime.c \
                   engine/source/profiler.c \
                   engine/source/graphicsMemoryBudget.c \
+                  engine/source/packageReader.c \
                   engine/source/engineCore.c
 
 # Which renderer the native build uses. openGLES2 needs a driver with
@@ -202,18 +203,25 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 		*) echo "ERROR: not OABI, got $$flags" >&2; exit 1 ;; \
 	esac
 
-RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tools/verifyRasterizer
+RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
+PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 
-verify: $(RASTERIZER_VERIFIER)
+verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
+	@$(PACKAGE_READER_VERIFIER)
 
-$(RASTERIZER_VERIFIER): tools/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
-	@mkdir -p $(BUILD_DIRECTORY)/tools
-	$(HOST_COMPILER) $(COMMON_FLAGS) tools/verifyRasterizer.c render/software/rasterizer.c \
+$(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c engine/source/memoryArena.c
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
+		engine/source/memoryArena.c -o $@
+
+$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyRasterizer.c render/software/rasterizer.c \
 		render/software/rasterizerNEON.c -o $@
 
 check:
-	@tools/checkNoDynamicAllocation.sh
+	@scripts/checkNoDynamicAllocation.sh
 
 clean:
 	rm -rf $(BUILD_DIRECTORY)

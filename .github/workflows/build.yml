@@ -65,7 +65,7 @@ jobs:
         run: make web EXTRA_FLAGS=-Werror
 
       - name: Verify the module instantiates and drives the renderer
-        run: node tools/verifyWebModule.mjs
+        run: node tests/verifyWebModule.mjs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -123,9 +123,9 @@ jobs:
         run: |
           FLAGS="-std=c99 -O2 -I. -Iengine/include -static \
                  -march=armv7-a -mtune=cortex-a8 -mfpu=neon -mfloat-abi=softfp"
-          arm-linux-gnueabi-gcc $FLAGS tools/verifyRasterizer.c \
+          arm-linux-gnueabi-gcc $FLAGS tests/verifyRasterizer.c \
             render/software/rasterizer.c render/software/rasterizerNEON.c -o portableArm
-          arm-linux-gnueabi-gcc $FLAGS -DVICTORIA_HAS_NEON=1 tools/verifyRasterizer.c \
+          arm-linux-gnueabi-gcc $FLAGS -DVICTORIA_HAS_NEON=1 tests/verifyRasterizer.c \
             render/software/rasterizer.c render/software/rasterizerNEON.c -o neonArm
           qemu-arm-static ./portableArm portable.ppm
           qemu-arm-static ./neonArm neon.ppm
@@ -171,4 +171,4 @@ jobs:
         run: make check
 
       - name: No retail game data committed
-        run: tools/checkNoGameData.sh
+        run: scripts/checkNoGameData.sh

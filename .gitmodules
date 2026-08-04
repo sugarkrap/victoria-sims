@@ -1,0 +1,4 @@
+[submodule "tools/vic-extractor"]
+	path = tools/vic-extractor
+	url = https://github.com/sugarkrap/vic-extractor.git
+	branch = main

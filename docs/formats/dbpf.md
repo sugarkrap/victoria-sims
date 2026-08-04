@@ -95,6 +95,25 @@ without a DIR resource has no compressed entries. None of the scenegraph
 fixtures contain a DIR, which is why the reader can be brought up against them
 before compression support exists.
 
+## The reader
+
+`engine/source/packageReader.c` implements the above. Two things about it are
+deliberate:
+
+* **It performs no file I/O.** It is handed bytes that already exist. That is
+  what lets it be identical on WebAssembly, which has no filesystem, and lets a
+  test point it at a buffer with no platform layer underneath.
+* **A bad index is rejected outright, not partially believed.** A resource
+  claiming to extend past the end of the file makes the whole index
+  untrustworthy, so the open fails rather than skipping that entry.
+
+Entry size is derived by dividing the index size by the entry count, as above,
+rather than by reading the version field.
+
+`tests/verifyPackageReader.c` checks it against the real fixtures in
+`testAssets/`, asserting exact resource counts per type — including the full
+CRES/SHPE/GMND/GMDC chain in `teapot_model.package` — plus the rejection paths.
+
 ## Reading notes for this project
 
 The package reader allocates nothing. An index has a known entry count before
