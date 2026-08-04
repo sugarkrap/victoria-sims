@@ -36,6 +36,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/packageReader.c \
                   engine/source/resourceCollection.c engine/source/geometryReader.c \
                   engine/source/scenegraph.c engine/source/resourceNode.c \
+                  engine/source/textureReader.c engine/source/textureDecode.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -225,12 +226,13 @@ COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
 STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
 SCENEGRAPH_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyScenegraph
 RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
+TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
-		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER)
+		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -240,6 +242,7 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(STRINGS_VERIFIER)
 	@$(SCENEGRAPH_VERIFIER)
 	@$(RESOURCE_NODE_VERIFIER)
+	@$(TEXTURE_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
@@ -250,6 +253,15 @@ $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCollection.c \
 		engine/source/resourceCollection.c engine/source/packageReader.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
+		engine/source/textureDecode.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyTexture.c engine/source/textureReader.c \
+		engine/source/textureDecode.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
 
 $(RESOURCE_NODE_VERIFIER): tests/verifyResourceNode.c engine/source/resourceNode.c \
 		engine/source/resourceCollection.c engine/source/compression.c \

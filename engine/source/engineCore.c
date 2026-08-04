@@ -336,7 +336,9 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             appendCount(message, sizeof(message), discSearch.modelTree.blockCount);
             stringAppend(message, sizeof(message), " blocks walked, ");
             appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
-            stringAppend(message, sizeof(message), " node(s)");
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), discSearch.modelTree.nodeCount);
+            stringAppend(message, sizeof(message), " node(s) kept");
             if (discSearch.modelTree.storedNodeCount > 0U)
             {
                 stringAppend(message, sizeof(message), ", bone ");

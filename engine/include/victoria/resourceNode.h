@@ -26,11 +26,15 @@
  * bind pose. Furniture, which is placed by these transforms rather than by
  * bones, is what this makes correct today. */
 
-/* Nodes kept per model, and edges between them. Retail models are small trees —
-   a chair is a handful of parts — and one that overruns keeps what fits and
-   says how many there were. */
-#define RESOURCE_NODE_LIMIT 32U
-#define RESOURCE_NODE_EDGE_LIMIT 64U
+/* Nodes kept per model, and edges between them.
+
+   Thirty-two was the first guess and it was wrong: a retail Sim's head model
+   walks 177 blocks and carries more transform nodes than that, because a
+   character's tree is its skeleton rather than a handful of parts. A model that
+   still overruns keeps what fits and reports the true count beside it, so a cap
+   being hit is visible rather than silently rounding a skeleton down. */
+#define RESOURCE_NODE_LIMIT 128U
+#define RESOURCE_NODE_EDGE_LIMIT 256U
 
 typedef enum ResourceNodeResult
 {
