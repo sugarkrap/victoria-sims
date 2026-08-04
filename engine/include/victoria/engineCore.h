@@ -58,6 +58,13 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem);
    immediately may spin on this; a browser must call it once a frame. */
 EngineDiscLoadStatus engineStepDiscLoad(void);
 
+/* Logs what a catalogue holds: packages against everything else, and the
+   largest of everything else by name. Called for itself during a disc load, and
+   exposed because a platform may want to look at a disc without starting a
+   renderer — and because "what is on this disc" is a question worth being able
+   to ask on its own. */
+void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
+
 MemoryArena *engineGetGlobalArena(void);
 
 #endif

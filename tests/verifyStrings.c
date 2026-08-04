@@ -89,5 +89,28 @@ int main(void)
         checkThat(&failureCount, "truncates rather than overruns", stringEquals(buffer, "abcdefg"));
     }
 
+    printf("\n-- recognising a file extension --\n");
+    /* Three callers used to carry their own copy of this, all of them deciding
+       whether a path off a disc is a package. A disc written with 8.3 names
+       spells it one way and one written with Joliet another. */
+    checkThat(&failureCount, "matches the plain spelling",
+              stringEndsWithIgnoringCase("TSData/Res/Sims3D/Sims01.package", ".package"));
+    checkThat(&failureCount, "and the shouted one",
+              stringEndsWithIgnoringCase("TSDATA/RES/SIMS3D/SIMS01.PACKAGE", ".package"));
+    checkThat(&failureCount, "and a suffix that is itself shouted",
+              stringEndsWithIgnoringCase("sims01.package", ".PACKAGE"));
+    checkThat(&failureCount, "refuses a different extension",
+              !stringEndsWithIgnoringCase("setup.cab", ".package"));
+    /* The suffix appearing anywhere but the end is not a match, which a
+       comparison that searched rather than anchored would get wrong. */
+    checkThat(&failureCount, "refuses it in the middle of the path",
+              !stringEndsWithIgnoringCase("a.package/inside.txt", ".package"));
+    checkThat(&failureCount, "refuses a path shorter than the suffix",
+              !stringEndsWithIgnoringCase("a.p", ".package"));
+    checkThat(&failureCount, "matches a path that is only the suffix",
+              stringEndsWithIgnoringCase(".package", ".package"));
+    checkThat(&failureCount, "and an empty suffix matches anything",
+              stringEndsWithIgnoringCase("anything", ""));
+
     return checkSummarize(failureCount, "strings");
 }

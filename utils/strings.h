@@ -18,6 +18,13 @@ MemorySize stringLength(const char *text);
 Boolean stringEquals(const char *first, const char *second);
 Boolean stringStartsWith(const char *text, const char *prefix);
 
+/* Whether text ends with suffix, ignoring case. Written for file extensions:
+   a disc written with 8.3 names spells .PACKAGE and one written with Joliet
+   spells .package, and neither is the right answer. Three callers had grown
+   their own copy of this, which is three chances for them to disagree about
+   what a package is. */
+Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix);
+
 /* Stops at the first character that is not a digit, so trailing junk is
    ignored rather than rejected. Returns zero for an empty or non-numeric
    string, which callers treat as "unset". */

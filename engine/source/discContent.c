@@ -69,23 +69,7 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
 
 static Boolean endsWithPackage(const char *path)
 {
-    MemorySize length = stringLength(path);
-    MemorySize index;
-    const char *suffix = ".package";
-    MemorySize suffixLength = 8UL;
-
-    if (length < suffixLength)
-    {
-        return BOOLEAN_FALSE;
-    }
-    for (index = 0UL; index < suffixLength; index++)
-    {
-        if (characterToLowerCase(path[length - suffixLength + index]) != suffix[index])
-        {
-            return BOOLEAN_FALSE;
-        }
-    }
-    return BOOLEAN_TRUE;
+    return stringEndsWithIgnoringCase(path, ".package");
 }
 
 /* The shape a model's resource node points at, or null.

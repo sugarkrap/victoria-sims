@@ -87,6 +87,128 @@ static void appendHexadecimal(char *destination, MemorySize capacity, Unsigned32
     }
 }
 
+/* Kibibytes, except below a kibibyte, where they would all read as zero and a
+   ten byte file would be indistinguishable from an empty one. */
+static void appendByteSize(char *destination, MemorySize capacity, Unsigned64 byteCount)
+{
+    char digits[24];
+    Boolean asKibibytes = (Boolean)(byteCount >= 1024ULL);
+
+    if (stringWriteUnsigned(digits, sizeof(digits),
+                            asKibibytes ? byteCount / 1024ULL : byteCount) > 0UL)
+    {
+        stringAppend(destination, capacity, digits);
+        stringAppend(destination, capacity, asKibibytes ? " KiB" : " bytes");
+    }
+}
+
+/* How many of the disc's other files get named in the log. Enough to recognise
+   an installer payload or an archive format by sight; not so many that a disc
+   of loose files buries everything else. */
+#define CATALOGUE_LISTING_LIMIT 12U
+
+/* What is on the disc besides packages.
+ *
+ * Six hundred packages hold a hundred and twenty seven images between them,
+ * which is not what a disc with Sims on it looks like. The packages have been
+ * counted and the resources in them have been counted; the files that are not
+ * packages have never been looked at, and they are the only part of the disc
+ * this engine has never had an opinion about.
+ *
+ * Nothing here reads a byte. The catalogue already knows every path and every
+ * length, because the walk that built it had to. */
+void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem)
+{
+    char message[512];
+    Unsigned32 which;
+    Unsigned32 packageCount = 0U;
+    Unsigned64 packageBytes = 0ULL;
+    Unsigned32 otherCount = 0U;
+    Unsigned64 otherBytes = 0ULL;
+    Unsigned64 ceilingSize = 0xFFFFFFFFFFFFFFFFULL;
+    Unsigned32 ceilingIndex = 0U;
+    Unsigned32 listed;
+
+    for (which = 0U; which < fileSystem->entryCount; which++)
+    {
+        const VirtualFileEntry *entry = virtualFileSystemGetEntry(fileSystem, which);
+
+        if (entry == NULL_POINTER)
+        {
+            continue;
+        }
+        if (stringEndsWithIgnoringCase(entry->path, ".package"))
+        {
+            packageCount++;
+            packageBytes += entry->sizeInBytes;
+        }
+        else
+        {
+            otherCount++;
+            otherBytes += entry->sizeInBytes;
+        }
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    appendCount(message, sizeof(message), packageCount);
+    stringAppend(message, sizeof(message), " package(s) totalling ");
+    appendByteSize(message, sizeof(message), packageBytes);
+    stringAppend(message, sizeof(message), ", and ");
+    appendCount(message, sizeof(message), otherCount);
+    stringAppend(message, sizeof(message), " other file(s) totalling ");
+    appendByteSize(message, sizeof(message), otherBytes);
+    platformLogMessage(message);
+
+    /* Largest first, because a file big enough to hold a disc's worth of art is
+       the only one worth recognising by name. Ties are broken by position so a
+       run of identically sized files is listed rather than the first of them
+       being picked over and over. */
+    for (listed = 0U; listed < CATALOGUE_LISTING_LIMIT; listed++)
+    {
+        Unsigned64 bestSize = 0ULL;
+        Unsigned32 bestIndex = fileSystem->entryCount;
+        Boolean found = BOOLEAN_FALSE;
+
+        for (which = 0U; which < fileSystem->entryCount; which++)
+        {
+            const VirtualFileEntry *entry = virtualFileSystemGetEntry(fileSystem, which);
+            Boolean belowCeiling;
+
+            if (entry == NULL_POINTER || stringEndsWithIgnoringCase(entry->path, ".package"))
+            {
+                continue;
+            }
+            belowCeiling = (Boolean)(entry->sizeInBytes < ceilingSize ||
+                                     (entry->sizeInBytes == ceilingSize && which > ceilingIndex));
+            if (!belowCeiling)
+            {
+                continue;
+            }
+            if (!found || entry->sizeInBytes > bestSize)
+            {
+                bestSize = entry->sizeInBytes;
+                bestIndex = which;
+                found = BOOLEAN_TRUE;
+            }
+        }
+        if (!found)
+        {
+            break;
+        }
+        ceilingSize = bestSize;
+        ceilingIndex = bestIndex;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        appendByteSize(message, sizeof(message), bestSize);
+        stringAppend(message, sizeof(message), "  ");
+        stringAppend(message, sizeof(message),
+                     virtualFileSystemGetEntry(fileSystem, bestIndex)->path);
+        platformLogMessage(message);
+    }
+}
+
 
 /* A disc load, one step at a time.
  *
@@ -149,6 +271,7 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
     if (fileSystem->entryCount > 0U)
     {
         discCatalogueIsBuilt = BOOLEAN_TRUE;
+        engineReportDiscCatalogue(fileSystem);
         discContentBegin(&discSearch, fileSystem, globalArena);
     }
     else if (discReaderBegin(&discReader, fileSystem, globalArena, DISC_FILE_LIMIT) !=
@@ -448,6 +571,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         appendCount(message, sizeof(message), discFileSystem->entryCount);
         stringAppend(message, sizeof(message), " files");
         platformLogMessage(message);
+        engineReportDiscCatalogue(discFileSystem);
 
         discCatalogueIsBuilt = BOOLEAN_TRUE;
         discContentBegin(&discSearch, discFileSystem, globalArena);

@@ -36,6 +36,27 @@ Boolean stringStartsWith(const char *text, const char *prefix)
     return BOOLEAN_TRUE;
 }
 
+Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix)
+{
+    MemorySize textLength = stringLength(text);
+    MemorySize suffixLength = stringLength(suffix);
+    MemorySize index;
+
+    if (textLength < suffixLength)
+    {
+        return BOOLEAN_FALSE;
+    }
+    for (index = 0UL; index < suffixLength; index += 1UL)
+    {
+        if (characterToLowerCase(text[textLength - suffixLength + index]) !=
+            characterToLowerCase(suffix[index]))
+        {
+            return BOOLEAN_FALSE;
+        }
+    }
+    return BOOLEAN_TRUE;
+}
+
 MemorySize stringParseUnsigned(const char *text)
 {
     MemorySize value = 0UL;

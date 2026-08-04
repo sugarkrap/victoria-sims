@@ -8,6 +8,7 @@
 #include "victoria/engineCore.h"
 #include "platform/linux/linuxDiscStore.h"
 #include "utils/strings.h"
+#include "victoria/discReader.h"
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
@@ -27,6 +28,11 @@ typedef struct LinuxWindowState
 } LinuxWindowState;
 
 #define PROFILER_REPORT_DEFAULT_INTERVAL_MICROSECONDS 2000000ULL
+
+/* Files an inspection will catalogue. The engine's own limit is the same order;
+   this one is separate because inspecting a disc is not loading one, and a
+   number chosen for a load should not quietly bound a diagnostic. */
+#define INSPECT_FILE_LIMIT 4096U
 
 static LinuxWindowState windowState;
 
@@ -252,10 +258,69 @@ static int runHeadlessSelfCheck(void)
     return 0;
 }
 
+/* Says what is on a disc and stops, without opening a window.
+ *
+ * A disc load normally ends in a mesh being handed to a renderer, which needs a
+ * display, which a build machine or a remote shell does not have. But the
+ * question "what files are on this disc" is answered entirely by the walk, and
+ * the walk needs nothing but the store — so it can be asked anywhere, and by
+ * anyone holding a copy of the game we are not allowed to ship. */
+static int inspectDisc(const char *path)
+{
+    static DiscStore store;
+    static VirtualFileSystem fileSystem;
+    MemoryArena *arena = memoryBudgetGetGlobalArena();
+    DiscReader reader;
+    DiscReadStatus walk;
+    char message[256];
+
+    if (discStoreOpen(&store, &fileSystem, path, arena) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("platform: cannot open that disc");
+        return 1;
+    }
+
+    /* A folder arrives with its catalogue already filled; an image has to be
+       walked first. */
+    if (fileSystem.entryCount == 0U)
+    {
+        walk = discReaderBegin(&reader, &fileSystem, arena, INSPECT_FILE_LIMIT);
+        while (walk == DISC_READ_PENDING)
+        {
+            walk = discReaderStep(&reader);
+        }
+        if (walk != DISC_READ_COMPLETE)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "platform: ");
+            stringAppend(message, sizeof(message), discReadStatusGetName(walk));
+            platformLogMessage(message);
+            discStoreClose(&store);
+            return 1;
+        }
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "platform: ");
+    stringAppend(message, sizeof(message), path);
+    stringAppend(message, sizeof(message), " holds ");
+    if (stringWriteUnsigned(message + stringLength(message), sizeof(message) - stringLength(message),
+                            (Unsigned64)fileSystem.entryCount) > 0UL)
+    {
+        stringAppend(message, sizeof(message), " files");
+    }
+    platformLogMessage(message);
+
+    engineReportDiscCatalogue(&fileSystem);
+    discStoreClose(&store);
+    return 0;
+}
+
 int main(int argumentCount, char **argumentValues)
 {
     EngineConfiguration configuration;
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
+    const char *inspectPath = NULL_POINTER;
     MemorySize graphicsMemoryLimitBytes = 0UL;
     const char *discPath = NULL_POINTER;
     static DiscStore discStore;
@@ -276,6 +341,10 @@ int main(int argumentCount, char **argumentValues)
         {
             windowState.profilerReportIntervalMicroseconds = 0ULL;
         }
+        else if (stringStartsWith(argument, "--inspect-disc=") == BOOLEAN_TRUE)
+        {
+            inspectPath = argument + stringLength("--inspect-disc=");
+        }
         else if (stringStartsWith(argument, "--disc=") == BOOLEAN_TRUE)
         {
             /* An image or a directory; which it is decided by looking, not by
@@ -290,6 +359,11 @@ int main(int argumentCount, char **argumentValues)
                 (MemorySize)stringParseUnsigned(argument + stringLength("--graphics-memory-mebibytes=")) *
                 1024UL * 1024UL;
         }
+    }
+
+    if (inspectPath != NULL_POINTER)
+    {
+        return inspectDisc(inspectPath);
     }
 
     if (runHeadlessCheck == BOOLEAN_TRUE)
@@ -313,7 +387,11 @@ int main(int argumentCount, char **argumentValues)
 
     if (discPath != NULL_POINTER)
     {
-        if (discStoreOpen(&discStore, &discFileSystem, discPath, engineGetGlobalArena()) ==
+        /* The budget's arena rather than the engine's: the engine has not been
+           initialized yet, so its own pointer is still null, and a folder disc
+           allocates its catalogue right here. They are the same arena either
+           way — the budget hands out the one and only one. */
+        if (discStoreOpen(&discStore, &discFileSystem, discPath, memoryBudgetGetGlobalArena()) ==
             BOOLEAN_TRUE)
         {
             char opened[256];

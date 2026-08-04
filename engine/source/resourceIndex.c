@@ -43,22 +43,7 @@ static Unsigned32 readUnsigned32(const Unsigned8 *bytes, MemorySize offset)
 
 static Boolean endsWithPackage(const char *path)
 {
-    MemorySize length = stringLength(path);
-    MemorySize index;
-    const char *suffix = ".package";
-
-    if (length < 8UL)
-    {
-        return BOOLEAN_FALSE;
-    }
-    for (index = 0UL; index < 8UL; index++)
-    {
-        if (characterToLowerCase(path[length - 8UL + index]) != suffix[index])
-        {
-            return BOOLEAN_FALSE;
-        }
-    }
-    return BOOLEAN_TRUE;
+    return stringEndsWithIgnoringCase(path, ".package");
 }
 
 /* Tallies one type. A linear scan over a few dozen entries, run once per index
