@@ -84,6 +84,10 @@ typedef struct DiscContentSearch
        fix is a wider search rather than a better comparison. */
     Unsigned32 materialsInPackage;
     Unsigned32 texturesInPackage;
+    /* The image the material asked for, by name. Kept even when it was not
+       found here, because that name is what a search of the rest of the disc
+       has to go on. */
+    char textureName[RESOURCE_NAME_LIMIT];
     Boolean textureFound;
     TextureDescription texture;
 

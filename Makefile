@@ -38,7 +38,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/scenegraph.c engine/source/resourceNode.c \
                   engine/source/textureReader.c engine/source/textureDecode.c \
                   engine/source/material.c \
-                  utils/resourceHash.c \
+                  utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -229,12 +229,14 @@ STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
 SCENEGRAPH_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyScenegraph
 RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
 TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
+RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 
 verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
-		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER)
+		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER) \
+		$(RESOURCE_INDEX_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -245,6 +247,7 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(SCENEGRAPH_VERIFIER)
 	@$(RESOURCE_NODE_VERIFIER)
 	@$(TEXTURE_VERIFIER)
+	@$(RESOURCE_INDEX_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 
 VERIFIER_SUPPORT := utils/assert.c
@@ -255,6 +258,14 @@ $(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCollection.c \
 		engine/source/resourceCollection.c engine/source/packageReader.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_INDEX_VERIFIER): tests/verifyResourceIndex.c engine/source/resourceIndex.c \
+		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceIndex.c engine/source/resourceIndex.c \
+		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT) -o $@
 
 $(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
 		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \

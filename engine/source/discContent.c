@@ -48,6 +48,7 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->textureFound = BOOLEAN_FALSE;
     search->materialsInPackage = 0U;
     search->texturesInPackage = 0U;
+    search->textureName[0] = '\0';
     search->modelsResolved = 0U;
     search->modelName[0] = '\0';
     search->foundThroughScenegraph = BOOLEAN_FALSE;
@@ -228,6 +229,7 @@ static void findTextureForMaterial(DiscContentSearch *search, const Package *pac
     search->textureFound = BOOLEAN_FALSE;
     search->materialsInPackage = 0U;
     search->texturesInPackage = 0U;
+    search->textureName[0] = '\0';
     if (search->materialName[0] == '\0')
     {
         return;
@@ -270,6 +272,7 @@ static void findTextureForMaterial(DiscContentSearch *search, const Package *pac
     {
         return;
     }
+    stringAppend(search->textureName, RESOURCE_NAME_LIMIT, material.baseTextureName);
 
     materialBuildResourceName(wanted, sizeof(wanted), material.baseTextureName, "_txtr");
     for (index = 0U; index < package->resourceCount && !search->textureFound; index++)

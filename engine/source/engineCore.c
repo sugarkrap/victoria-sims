@@ -7,6 +7,8 @@
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
 #include "victoria/renderInterface.h"
+#include "victoria/compression.h"
+#include "victoria/resourceIndex.h"
 #include "victoria/textureDecode.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
@@ -101,6 +103,24 @@ static DiscContentSearch discSearch;
 static EngineDiscLoadStatus discLoadStatus = ENGINE_DISC_IDLE;
 static Boolean discCatalogueIsBuilt = BOOLEAN_FALSE;
 
+/* How many textures the disc-wide index can remember. A retail disc holds
+   thousands; this is generous enough for one and says so when it is not. */
+#define TEXTURE_INDEX_CAPACITY 32768U
+
+/* Which of the several things a load can be doing. The texture search only
+   happens when a material named an image its own package did not hold, which
+   is the usual case for a Sim and never the case for a teapot. */
+typedef enum DiscPhase
+{
+    DISC_PHASE_CONTENT = 0,
+    DISC_PHASE_INDEX,
+    DISC_PHASE_FETCH_TEXTURE,
+    DISC_PHASE_DONE
+} DiscPhase;
+
+static DiscPhase discPhase = DISC_PHASE_CONTENT;
+static ResourceIndex textureIndex;
+
 static void reportDiscFailure(const char *what)
 {
     char message[192];
@@ -117,6 +137,7 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
     discFileSystem = fileSystem;
     discLoadStatus = ENGINE_DISC_IDLE;
     discCatalogueIsBuilt = BOOLEAN_FALSE;
+    discPhase = DISC_PHASE_CONTENT;
 
     if (fileSystem == NULL_POINTER)
     {
@@ -139,6 +160,112 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
     discLoadStatus = ENGINE_DISC_WORKING;
 }
 
+/* Decodes whatever texture the search settled on and hands it to the backend.
+ *
+ * The pixels are staged in the arena and given straight back. Every backend
+ * copies during the call — the driver owns the image afterwards — so holding
+ * them would be two of everything, and a 256 by 256 image is a quarter of a
+ * megabyte decoded. */
+static void uploadFoundTexture(void)
+{
+    char message[192];
+    MemorySize marker;
+    MemorySize wantedBytes;
+    Unsigned8 *decoded;
+    TextureDecodeResult decodeResult;
+
+    if (!discSearch.textureFound)
+    {
+        return;
+    }
+    if (discSearch.mesh.textureCoordinates == NULL_POINTER)
+    {
+        /* Sampling an image with no coordinates to sample it at would paint
+           every vertex with the same pixel, which reads as a broken decoder
+           rather than as a mesh without texture coordinates. */
+        platformLogMessage("engine: the mesh has no texture coordinates, so it is left unpainted");
+        return;
+    }
+
+    marker = memoryArenaGetMarker(globalArena);
+    wantedBytes = textureDecodeGetRequiredBytes(discSearch.texture.levelWidth,
+                                                discSearch.texture.levelHeight);
+    decoded = (Unsigned8 *)memoryArenaAllocate(globalArena, wantedBytes, 4UL);
+    decodeResult = TEXTURE_DECODE_DESTINATION_TOO_SMALL;
+    if (decoded != NULL_POINTER)
+    {
+        decodeResult = textureDecodeLevel(decoded, wantedBytes, discSearch.texture.bytes,
+                                          discSearch.texture.byteCount, discSearch.texture.format,
+                                          discSearch.texture.levelWidth,
+                                          discSearch.texture.levelHeight);
+    }
+    if (decodeResult == TEXTURE_DECODE_OK)
+    {
+        renderSetTexture(decoded, (Unsigned32)discSearch.texture.levelWidth,
+                         (Unsigned32)discSearch.texture.levelHeight);
+    }
+    else
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the texture would not decode — ");
+        stringAppend(message, sizeof(message), textureDecodeResultGetName(decodeResult));
+        platformLogMessage(message);
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+}
+
+/* Reads the texture the index pointed at, out of whichever package holds it.
+ * Answers false while the bytes are still on their way. */
+static Boolean fetchIndexedTexture(const ResourceIndexEntry *found, Boolean *succeeded)
+{
+    Unsigned8 *bytes;
+    VirtualReadResult read;
+    MemorySize size = (MemorySize)found->sizeInBytes;
+
+    *succeeded = BOOLEAN_FALSE;
+    bytes = (Unsigned8 *)memoryArenaAllocate(globalArena, size, 8UL);
+    if (bytes == NULL_POINTER)
+    {
+        return BOOLEAN_TRUE;
+    }
+    read = virtualFileSystemReadFile(discFileSystem, found->fileIndex,
+                                     (Unsigned64)found->offsetInBytes, size, bytes);
+    if (read == VIRTUAL_READ_PENDING)
+    {
+        /* Given back and asked for again next step. The arena is a stack, so
+           leaving it allocated across a pend would strand it. */
+        return BOOLEAN_FALSE;
+    }
+    if (read != VIRTUAL_READ_OK)
+    {
+        return BOOLEAN_TRUE;
+    }
+
+    /* Compressed exactly as it would be inside its own package, so the same
+       unpacking applies — the resource does not know which file it is in. */
+    if (compressionLooksLikeRefPack(bytes, size))
+    {
+        MemorySize unpackedSize = compressionGetDecompressedSize(bytes, size);
+        Unsigned8 *unpacked = (Unsigned8 *)memoryArenaAllocate(globalArena, unpackedSize, 8UL);
+
+        if (unpacked == NULL_POINTER ||
+            compressionDecompressRefPack(unpacked, unpackedSize, bytes, size, &unpackedSize) !=
+                COMPRESSION_OK)
+        {
+            return BOOLEAN_TRUE;
+        }
+        bytes = unpacked;
+        size = unpackedSize;
+    }
+
+    if (textureReaderOpen(&discSearch.texture, bytes, size) == TEXTURE_READ_OK)
+    {
+        discSearch.textureFound = BOOLEAN_TRUE;
+        *succeeded = BOOLEAN_TRUE;
+    }
+    return BOOLEAN_TRUE;
+}
+
 EngineDiscLoadStatus engineStepDiscLoad(void)
 {
     /* Wide enough for every refusal reason at once. A truncated diagnostic is
@@ -147,6 +274,94 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
 
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
+        return discLoadStatus;
+    }
+
+    if (discPhase == DISC_PHASE_INDEX)
+    {
+        ResourceIndexStatus indexStatus = resourceIndexStep(&textureIndex);
+
+        if (indexStatus == RESOURCE_INDEX_WORKING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: indexed ");
+        appendCount(message, sizeof(message), textureIndex.filesIndexed);
+        stringAppend(message, sizeof(message), " package(s), ");
+        appendCount(message, sizeof(message), textureIndex.count);
+        stringAppend(message, sizeof(message), " texture(s)");
+        if (textureIndex.dropped > 0U)
+        {
+            stringAppend(message, sizeof(message), ", ");
+            appendCount(message, sizeof(message), textureIndex.dropped);
+            stringAppend(message, sizeof(message), " past the index's room");
+        }
+        if (textureIndex.filesRefused > 0U)
+        {
+            stringAppend(message, sizeof(message), ", ");
+            appendCount(message, sizeof(message), textureIndex.filesRefused);
+            stringAppend(message, sizeof(message), " would not be read");
+        }
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_FETCH_TEXTURE;
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (discPhase == DISC_PHASE_FETCH_TEXTURE)
+    {
+        char wanted[RESOURCE_NAME_LIMIT];
+        const ResourceIndexEntry *found;
+
+        materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_txtr");
+        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
+
+        if (found != NULL_POINTER)
+        {
+            Boolean succeeded = BOOLEAN_FALSE;
+            MemorySize marker = memoryArenaGetMarker(globalArena);
+
+            if (!fetchIndexedTexture(found, &succeeded))
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            stringAppend(message, sizeof(message), wanted);
+            if (succeeded)
+            {
+                stringAppend(message, sizeof(message), " found elsewhere on the disc, ");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
+                stringAppend(message, sizeof(message), "x");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message),
+                             textureFormatGetName(discSearch.texture.format));
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), " was indexed but would not read");
+            }
+            platformLogMessage(message);
+            uploadFoundTexture();
+            /* Held until the upload has copied it, then given back. */
+            memoryArenaRewindToMarker(globalArena, marker);
+        }
+        else
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            stringAppend(message, sizeof(message), wanted);
+            stringAppend(message, sizeof(message), " is nowhere on this disc");
+            platformLogMessage(message);
+        }
+
+        renderSetMesh(&discSearch.mesh, globalArena);
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
         return discLoadStatus;
     }
 
@@ -419,52 +634,32 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
         }
 
-        /* The texture goes first: a backend has to know the bindings before it
-           builds a pipeline, and rebuilding one afterwards to add a texture is
-           work nobody needs.
-
-           The decoded pixels are staged in the arena and given straight back.
-           Every backend copies during the call — the graphics driver owns the
-           image afterwards — so holding it here would be two of everything, and
-           a 256 by 256 image decoded to RGBA is a quarter of a megabyte. */
-        if (discSearch.textureFound && discSearch.mesh.textureCoordinates != NULL_POINTER)
+        /* The image the material asked for was not in its own package. A Sim's
+           face texture lives in the shared skin packages, so this is the normal
+           case rather than a failure — but it needs a search of the whole disc,
+           which is a phase of its own. */
+        if (!discSearch.textureFound && discSearch.textureName[0] != '\0' &&
+            discSearch.mesh.textureCoordinates != NULL_POINTER)
         {
-            MemorySize marker = memoryArenaGetMarker(globalArena);
-            MemorySize wantedBytes = textureDecodeGetRequiredBytes(discSearch.texture.levelWidth,
-                                                                  discSearch.texture.levelHeight);
-            Unsigned8 *decoded = (Unsigned8 *)memoryArenaAllocate(globalArena, wantedBytes, 4UL);
-            TextureDecodeResult decodeResult = TEXTURE_DECODE_DESTINATION_TOO_SMALL;
+            static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_TXTR };
 
-            if (decoded != NULL_POINTER)
-            {
-                decodeResult = textureDecodeLevel(
-                    decoded, wantedBytes, discSearch.texture.bytes, discSearch.texture.byteCount,
-                    discSearch.texture.format, discSearch.texture.levelWidth,
-                    discSearch.texture.levelHeight);
-            }
-            if (decodeResult == TEXTURE_DECODE_OK)
-            {
-                renderSetTexture(decoded, (Unsigned32)discSearch.texture.levelWidth,
-                                 (Unsigned32)discSearch.texture.levelHeight);
-            }
-            else
+            if (resourceIndexBegin(&textureIndex, discFileSystem, globalArena,
+                                   TEXTURE_INDEX_CAPACITY, wantedTypes, 1U))
             {
                 message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: the texture would not decode — ");
-                stringAppend(message, sizeof(message), textureDecodeResultGetName(decodeResult));
+                stringAppend(message, sizeof(message), "engine: looking for ");
+                stringAppend(message, sizeof(message), discSearch.textureName);
+                stringAppend(message, sizeof(message), " across the rest of the disc");
                 platformLogMessage(message);
+                discPhase = DISC_PHASE_INDEX;
+                return ENGINE_DISC_WORKING;
             }
-            memoryArenaRewindToMarker(globalArena, marker);
-        }
-        else if (discSearch.textureFound)
-        {
-            /* Sampling an image with no coordinates to sample it at would paint
-               every vertex with the same pixel, which looks like a bug in the
-               decoder rather than a mesh without texture coordinates. */
-            platformLogMessage("engine: the mesh has no texture coordinates, so it is left unpainted");
+            platformLogMessage("engine: not enough room to index the disc for a texture");
         }
 
+        uploadFoundTexture();
         renderSetMesh(&discSearch.mesh, globalArena);
+        discPhase = DISC_PHASE_DONE;
         discLoadStatus = ENGINE_DISC_READY;
     }
     return discLoadStatus;
