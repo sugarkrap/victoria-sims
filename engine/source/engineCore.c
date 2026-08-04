@@ -282,11 +282,22 @@ typedef enum DiscPhase
     DISC_PHASE_INSTALLER,
     DISC_PHASE_INDEX,
     DISC_PHASE_FETCH_TEXTURE,
+    DISC_PHASE_FETCH_LEVEL,
     DISC_PHASE_DONE
 } DiscPhase;
 
 static DiscPhase discPhase = DISC_PHASE_CONTENT;
 static ResourceIndex textureIndex;
+
+/* Where the arena stood before the texture was read, kept because the texture
+   has to survive between steps.
+ *
+ * Following a reference means a second read, and a second read means a second
+ * pend. Rewinding and starting again on a pend is right for one read and wrong
+ * for two: the retry re-reads the first, which pends, and the two take turns
+ * for ever. That is not hypothetical — it printed seventeen thousand identical
+ * log lines before anyone looked. */
+static MemorySize textureFetchMarker = 0UL;
 
 /* Where the probe has got to. The ceiling is the last file it looked at, in the
    (size, position) order the listing uses, so the two walk the same files in the
@@ -871,6 +882,28 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         return ENGINE_DISC_WORKING;
     }
 
+    /* Following the reference to the largest level, with the texture that named
+     * it still allocated beneath. Its own marker, so a pend gives back only what
+     * this step claimed and leaves the texture alone — and so a LIFO that will
+     * not read falls back on the smaller level rather than on nothing. */
+    if (discPhase == DISC_PHASE_FETCH_LEVEL)
+    {
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+
+        if (!fetchLargestLevel(message, sizeof(message)))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+
+        renderSetMesh(&discSearch.mesh, globalArena);
+        uploadFoundTexture();
+        memoryArenaRewindToMarker(globalArena, textureFetchMarker);
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
+        return discLoadStatus;
+    }
+
     if (discPhase == DISC_PHASE_FETCH_TEXTURE)
     {
         char wanted[RESOURCE_NAME_LIMIT];
@@ -902,11 +935,11 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         if (found != NULL_POINTER)
         {
             Boolean succeeded = BOOLEAN_FALSE;
-            MemorySize marker = memoryArenaGetMarker(globalArena);
 
+            textureFetchMarker = memoryArenaGetMarker(globalArena);
             if (!fetchIndexedTexture(found, &succeeded))
             {
-                memoryArenaRewindToMarker(globalArena, marker);
+                memoryArenaRewindToMarker(globalArena, textureFetchMarker);
                 return ENGINE_DISC_WORKING;
             }
             message[0] = '\0';
@@ -928,16 +961,15 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             }
             platformLogMessage(message);
             /* The level in the TXTR is the largest one it holds, which is not
-               always the largest one there is. Said after the line above, so
-               the two read as what was found and then what it led to. */
+               always the largest one there is. Handed to a phase of its own so
+               the texture just read stays where it is: the reference costs
+               another read, and a read that pends must not take the first one
+               with it. */
             if (succeeded && discSearch.texture.largestIsElsewhere &&
                 discSearch.texture.lifoName[0] != '\0')
             {
-                if (!fetchLargestLevel(message, sizeof(message)))
-                {
-                    memoryArenaRewindToMarker(globalArena, marker);
-                    return ENGINE_DISC_WORKING;
-                }
+                discPhase = DISC_PHASE_FETCH_LEVEL;
+                return ENGINE_DISC_WORKING;
             }
             /* The mesh before the texture. A backend binds an image to the
                pipeline the mesh created, so there is nothing to bind it to
@@ -947,7 +979,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             renderSetMesh(&discSearch.mesh, globalArena);
             uploadFoundTexture();
             /* Held until the upload has copied it, then given back. */
-            memoryArenaRewindToMarker(globalArena, marker);
+            memoryArenaRewindToMarker(globalArena, textureFetchMarker);
         }
         else
         {

@@ -392,6 +392,27 @@ calls.length = 0;
               probe.includes("unrecognised"));
     }
 
+    // A load that needs two reads and gives back the first one on the second's
+    // pend will fetch them alternately for ever, and what that looks like from
+    // outside is one log line repeated thousands of times. Nothing on this
+    // fixture says anything twice, so a repeat here means a step machine that
+    // stopped advancing.
+    {
+        const seen = new Map();
+        let worst = 0;
+        let worstText = "";
+
+        for (const text of loggedMessages) {
+            const count = (seen.get(text) ?? 0) + 1;
+            seen.set(text, count);
+            if (count > worst) {
+                worst = count;
+                worstText = text;
+            }
+        }
+        check(`no message repeats (worst says "${worstText.slice(0, 40)}" ${worst}x)`, worst <= 2);
+    }
+
     console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);
 }
 
