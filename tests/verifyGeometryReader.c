@@ -54,6 +54,148 @@ static Boolean nearly(Real32 value, Real32 expected)
     return difference < 0.001f ? BOOLEAN_TRUE : BOOLEAN_FALSE;
 }
 
+/* An authored container, for the layouts the fixture cannot reach.
+
+   The teapot is block version 4, so it exercises half word indices and nothing
+   else. Retail character meshes are older and store their indices as full
+   words — 238 of the 282 meshes on the user's disc were refused for being that
+   version — and there is no fixture on hand that is one. So one is written
+   here, byte by byte, from the layout rather than from anything this reader
+   produced. */
+
+#define BUILT_CAPACITY 512UL
+
+typedef struct Builder
+{
+    Unsigned8 bytes[BUILT_CAPACITY];
+    MemorySize length;
+} Builder;
+
+static void putUnsigned8(Builder *builder, Unsigned8 value)
+{
+    if (builder->length < BUILT_CAPACITY)
+    {
+        builder->bytes[builder->length] = value;
+        builder->length++;
+    }
+}
+
+static void putUnsigned32(Builder *builder, Unsigned32 value)
+{
+    putUnsigned8(builder, (Unsigned8)(value & 0xFFU));
+    putUnsigned8(builder, (Unsigned8)((value >> 8) & 0xFFU));
+    putUnsigned8(builder, (Unsigned8)((value >> 16) & 0xFFU));
+    putUnsigned8(builder, (Unsigned8)((value >> 24) & 0xFFU));
+}
+
+static void putReal32(Builder *builder, Real32 value)
+{
+    union
+    {
+        Unsigned32 word;
+        Real32 value;
+    } converter;
+
+    converter.value = value;
+    putUnsigned32(builder, converter.word);
+}
+
+/* Short names only, which is every name here, so one length byte is right. */
+static void putString(Builder *builder, const char *text)
+{
+    MemorySize length = stringLength(text);
+    MemorySize index;
+
+    putUnsigned8(builder, (Unsigned8)length);
+    for (index = 0UL; index < length; index++)
+    {
+        putUnsigned8(builder, (Unsigned8)text[index]);
+    }
+}
+
+static void putTypeInformation(Builder *builder, const char *name, Unsigned32 identifier,
+                               Unsigned32 version)
+{
+    putString(builder, name);
+    putUnsigned32(builder, identifier);
+    putUnsigned32(builder, version);
+}
+
+/* Word wide, which is what a container below block version 3 uses. */
+static void putWordIndexArray(Builder *builder, const Unsigned32 *values, Unsigned32 count)
+{
+    Unsigned32 index;
+
+    putUnsigned32(builder, count);
+    for (index = 0U; index < count; index++)
+    {
+        putUnsigned32(builder, values[index]);
+    }
+}
+
+static void buildWordIndexedContainer(Builder *builder, Unsigned32 blockVersion)
+{
+    static const Real32 positions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f };
+    static const Unsigned32 elementIndices[2] = { 0U, 1U };
+    static const Unsigned32 faces[3] = { 0U, 1U, 2U };
+    Unsigned32 index;
+
+    builder->length = 0UL;
+
+    putUnsigned32(builder, 0xFFFF0001UL);
+    putUnsigned32(builder, 0U); /* no file links */
+    putUnsigned32(builder, 1U); /* one block */
+    putUnsigned32(builder, 0xAC4F8687UL);
+
+    putTypeInformation(builder, "cGeometryDataContainer", 0xAC4F8687UL, blockVersion);
+    putTypeInformation(builder, "cSGResource", 0xACE46235UL, 2U);
+    putString(builder, "body_tslocator_gmdc");
+
+    putUnsigned32(builder, 2U); /* two elements */
+
+    /* Positions: three vertices of three floats. */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0x5B830781UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 2U); /* three floats */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 36U);
+    for (index = 0U; index < 9U; index++)
+    {
+        putReal32(builder, positions[index]);
+    }
+    putWordIndexArray(builder, NULL_POINTER, 0U);
+
+    /* Normals, all straight up, so unit length proves the stride. */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0x3B83078BUL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 2U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 36U);
+    for (index = 0U; index < 3U; index++)
+    {
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 1.0f);
+    }
+    putWordIndexArray(builder, NULL_POINTER, 0U);
+
+    putUnsigned32(builder, 1U); /* one component */
+    putWordIndexArray(builder, elementIndices, 2U);
+    putUnsigned32(builder, 3U); /* three vertices */
+    putUnsigned32(builder, 0U);
+    putWordIndexArray(builder, NULL_POINTER, 0U);
+    putWordIndexArray(builder, NULL_POINTER, 0U);
+    putWordIndexArray(builder, NULL_POINTER, 0U);
+
+    putUnsigned32(builder, 1U); /* one primitive */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putString(builder, "body");
+    putWordIndexArray(builder, faces, 3U);
+}
+
 int main(void)
 {
     MemoryArena arena;
@@ -182,6 +324,47 @@ int main(void)
         }
     }
 
+    printf("\n-- an older container, indices a word wide --\n");
+    {
+        static Builder builder;
+        GeometryMesh older;
+        Unsigned32 version;
+
+        /* Both versions below the narrowing, so a reader that only handles the
+           new width fails here rather than on one of them by luck. */
+        for (version = 1U; version <= 2U; version++)
+        {
+            buildWordIndexedContainer(&builder, version);
+            result = geometryReaderOpen(&older, builder.bytes, builder.length, &arena);
+            checkThat(&failureCount, "reads a container at block version 1 or 2",
+                      result == GEOMETRY_READ_OK);
+            if (result != GEOMETRY_READ_OK)
+            {
+                printf("  version %u: %s\n", (unsigned)version, geometryReadResultGetName(result));
+                continue;
+            }
+            checkThat(&failureCount, "names the resource body_tslocator_gmdc",
+                      stringEquals(older.resourceName, "body_tslocator_gmdc"));
+            checkThat(&failureCount, "finds its three vertices", older.vertexCount == 3U);
+            checkThat(&failureCount, "and its one triangle", older.indexCount == 3U);
+            checkThat(&failureCount, "with the faces in order",
+                      older.indices[0] == 0U && older.indices[1] == 1U && older.indices[2] == 2U);
+            /* Reading the element index array two bytes at a time would find
+               element 0 twice and never reach the normals. */
+            checkThat(&failureCount, "follows the word wide element list to the normals",
+                      older.normals != NULL_POINTER);
+            {
+                Real32 minimum[3];
+                Real32 maximum[3];
+
+                geometryMeshGetBounds(&older, minimum, maximum);
+                checkThat(&failureCount, "with the positions where they were written",
+                          nearly(maximum[0], 1.0f) && nearly(maximum[1], 2.0f) &&
+                              nearly(maximum[2], 0.0f));
+            }
+        }
+    }
+
     printf("\n-- refusing what it cannot read --\n");
     {
         GeometryMesh other;
@@ -192,6 +375,17 @@ int main(void)
                       GEOMETRY_READ_NOT_A_RESOURCE);
         checkThat(&failureCount, "rejects a resource that stops part way",
                   geometryReaderOpen(&other, resourceBytes, 64UL, &arena) == GEOMETRY_READ_TRUNCATED);
+
+        {
+            /* An older collection mark. Not readable here, but saying so as a
+               version rather than as rubbish is the difference between knowing
+               what a disc holds and guessing. */
+            static const Unsigned8 olderMark[16] = { 0x01U, 0x00U, 0xFEU, 0xFFU, 0U };
+
+            checkThat(&failureCount, "calls an older collection mark a version, not rubbish",
+                      geometryReaderOpen(&other, olderMark, sizeof(olderMark), &arena) ==
+                          GEOMETRY_READ_UNSUPPORTED_VERSION);
+        }
 
         {
             /* A material definition is a scenegraph resource too, and reading it

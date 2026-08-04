@@ -11,10 +11,19 @@
 #define ELEMENT_FORMAT_TWO_FLOATS 1UL
 #define ELEMENT_FORMAT_THREE_FLOATS 2UL
 
-/* Indices narrowed from words to half words at block version 3, and the static
- * bounding mesh did the same at version 4. Below 3 has not been seen in the
- * fixtures and is not accepted rather than being read on a guess. */
-#define MINIMUM_BLOCK_VERSION 3UL
+/* Indices narrowed from words to half words at block version 3. Below that they
+ * are full words, everywhere they appear — the component's element list and the
+ * primitive's faces alike.
+ *
+ * This used to refuse anything under 3 rather than read it on a guess. A retail
+ * disc then refused 238 of 282 meshes for exactly that reason, which turned a
+ * cautious gate into the single largest thing standing between the engine and
+ * the game. The widths are now handled instead of avoided. */
+#define MINIMUM_BLOCK_VERSION 1UL
+
+/* Half word indices cannot address more vertices than this, so a container
+ * claiming more is either not what it says or beyond what we can carry. */
+#define LARGEST_ADDRESSABLE_VERTEX_COUNT 65536U
 
 /* Reads a buffer without ever indexing past its end. Every read checks, and a
  * cursor that has overrun stays overrun, so a caller can do a run of reads and
@@ -130,6 +139,12 @@ static void readString(Cursor *cursor, char *destination, MemorySize capacity)
     }
 }
 
+/* How wide one index is at a given block version. */
+static MemorySize indexWidth(Unsigned32 version)
+{
+    return (version < 3UL) ? 4UL : 2UL;
+}
+
 /* An index array: a count, then that many words or half words. Returns where
  * the array starts so a caller can come back for it, having skipped it here. */
 static Unsigned32 skipIndexArray(Cursor *cursor, Unsigned32 version, MemorySize *startPosition)
@@ -140,7 +155,7 @@ static Unsigned32 skipIndexArray(Cursor *cursor, Unsigned32 version, MemorySize 
     {
         *startPosition = cursor->position;
     }
-    cursorTake(cursor, (MemorySize)count * ((version < 3UL) ? 4UL : 2UL));
+    cursorTake(cursor, (MemorySize)count * indexWidth(version));
     return count;
 }
 
@@ -261,6 +276,15 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     }
     if (versionMark != (Unsigned32)SCENEGRAPH_VERSION_MARK)
     {
+        /* Older collections mark themselves 0xFFFE0001 or 0xFFFD0001 and differ
+         * in how the file links are laid out. Saying so separately keeps them
+         * from being counted as rubbish, which is what the last run did to
+         * forty-four of them. */
+        if ((versionMark & 0x0000FFFFUL) == 0x00000001UL &&
+            (versionMark >> 16) >= 0xFFF0UL)
+        {
+            return GEOMETRY_READ_UNSUPPORTED_VERSION;
+        }
         return GEOMETRY_READ_NOT_A_RESOURCE;
     }
 
@@ -370,9 +394,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
             Cursor elementCursor = cursor;
             Unsigned32 which;
 
-            elementCursor.position = elementIndexStart + (MemorySize)inner * 2UL;
+            elementCursor.position = elementIndexStart + ((MemorySize)inner * indexWidth(blockVersion));
             elementCursor.overran = BOOLEAN_FALSE;
-            which = readUnsigned16(&elementCursor);
+            which = (blockVersion < 3UL) ? readUnsigned32(&elementCursor)
+                                         : (Unsigned32)readUnsigned16(&elementCursor);
             if (which >= elementCount)
             {
                 continue;
@@ -419,6 +444,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     {
         return GEOMETRY_READ_NO_GEOMETRY;
     }
+    if (vertexCount > LARGEST_ADDRESSABLE_VERTEX_COUNT)
+    {
+        return GEOMETRY_READ_UNSUPPORTED_VERSION;
+    }
 
     mesh->positions = copyRealArray(arena, &cursor, positionSpan, 3U, vertexCount);
     if (mesh->positions == NULL_POINTER)
@@ -445,11 +474,12 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     cursor.overran = BOOLEAN_FALSE;
     for (index = 0U; index < faceCount; index++)
     {
-        Unsigned16 value = readUnsigned16(&cursor);
+        Unsigned32 value = (blockVersion < 3UL) ? readUnsigned32(&cursor)
+                                                : (Unsigned32)readUnsigned16(&cursor);
 
         /* An index outside the component would read a vertex that is not there.
          * Clamping keeps a malformed model from reading past the arrays. */
-        indices[index] = (value < (Unsigned16)vertexCount) ? value : (Unsigned16)(vertexCount - 1U);
+        indices[index] = (value < vertexCount) ? (Unsigned16)value : (Unsigned16)(vertexCount - 1U);
     }
     if (cursor.overran)
     {
