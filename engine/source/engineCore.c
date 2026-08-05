@@ -2169,10 +2169,17 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                     platformLogMessage(message);
                 }
             }
-            /* The vertices in the mesh have moved, so what the backend holds is
-               now the old pose. Sent again rather than left: the picture on
-               screen is the only place this work is visible. */
-            renderSetMesh(&discSearch.mesh, globalArena);
+            /* The vertices have moved; the mesh is otherwise the one already
+               uploaded, so only they are sent.
+               
+               renderSetMesh here would start by releasing everything the last
+               mesh took — which includes every per-part texture. The Sim was
+               correctly painted right up until the first pose landed, and then
+               reverted to wearing one texture over all three parts, because
+               this line threw them away. The body went back to wearing a face:
+               a band across the arm and a patch at the waist, the same
+               artefacts per-part texturing had just removed. */
+            renderUpdateMeshVertices(&discSearch.mesh, globalArena);
             /* And from here the frame loop keeps it moving. Only now, because
                until a pose has succeeded once there is nothing to advance and
                a frame that tried would pay for a palette every frame to
