@@ -1,6 +1,7 @@
 #include "victoria/discContent.h"
 #include "victoria/discReader.h"
 #include "victoria/engineCore.h"
+#include "victoria/freestandingRuntime.h"
 #include "utils/strings.h"
 #include "victoria/graphicsMemoryBudget.h"
 #include "victoria/memoryBudget.h"
@@ -457,6 +458,21 @@ static const char *const simDrawnPartNames[SIM_DRAWN_PART_COUNT] = { "amBodyNake
                                                                      "amFace_cres",
                                                                      "amHairBald_cres" };
 static GeometryMesh simParts[SIM_DRAWN_PART_COUNT];
+
+/* One weight per deformation channel the joined model declares.
+ *
+ * Fixed rather than sized to the model, because the engine allocates nothing at
+ * run time. Sixty-four covers a Sim's thirty with room over; a model declaring
+ * more has its later channels left at rest, which is a shape slightly less
+ * deformed than the file asked for rather than a refusal.
+ *
+ * Driven on the clock the same way the pose is, and for the same reason: a
+ * still deformation cannot be told apart from geometry that was always that
+ * shape. */
+#define SIM_MORPH_WEIGHT_LIMIT 64U
+static Real32 simMorphWeights[SIM_MORPH_WEIGHT_LIMIT];
+static Unsigned32 simMorphChannels = 0U;
+static Boolean simMorphReported = BOOLEAN_FALSE;
 static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
 
 /* The stem of the texture a part should wear INSTEAD of the one its shape
@@ -1067,6 +1083,144 @@ static void reportMorphTargets(const GeometryMesh *part)
         stringAppend(message, sizeof(message), "; ");
     }
     platformLogMessage(message);
+
+    /* And whether anything came with them. A part can declare channels and
+       carry nothing to move by them — the declaration is in one section of the
+       container and the per-vertex data is in the elements — so the two are
+       counted separately rather than one being read as evidence of the other. */
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:     ");
+    if (part->morphSlotCount == 0U)
+    {
+        stringAppend(message, sizeof(message), "and carries nothing to move by them");
+    }
+    else
+    {
+        Unsigned32 touched = 0U;
+        Unsigned32 vertex;
+
+        for (vertex = 0U; vertex < part->vertexCount; vertex++)
+        {
+            Unsigned32 slot;
+
+            for (slot = 0U; slot < part->morphSlotCount; slot++)
+            {
+                if (part->morphSlotChannels[(MemorySize)vertex * part->morphSlotCount + slot] != 0U)
+                {
+                    touched++;
+                    break;
+                }
+            }
+        }
+        stringAppend(message, sizeof(message), "carrying ");
+        appendCount(message, sizeof(message), part->morphSlotCount);
+        stringAppend(message, sizeof(message), " delta set(s) over a map read for ");
+        appendCount(message, sizeof(message), part->morphMappedVertexCount);
+        stringAppend(message, sizeof(message), " vertices, reaching ");
+        appendCount(message, sizeof(message), touched);
+        stringAppend(message, sizeof(message), " of its ");
+        appendCount(message, sizeof(message), part->vertexCount);
+    }
+    platformLogMessage(message);
+}
+
+/* Which declared channels the vertices actually refer to, and how far each one
+ * would move the model at full strength.
+ *
+ * This is the measurement that says the deformation data was read the right way
+ * round, and it is worth having for one reason: the per-vertex map packs its
+ * four slots into a word MOST significant byte first, while the bone assignment
+ * word beside it packs its four slots LEAST significant byte first. Reading
+ * either in the other's direction produces channel numbers that are perfectly
+ * plausible — small, in range, differing per vertex — and simply wrong.
+ *
+ * What tells them apart is this: read correctly, the numbers land on channels
+ * the container declared and cluster on the two or three a part really uses.
+ * Read backwards, they scatter across numbers the declaration has no names for.
+ * So the count of vertices per channel is printed against the channel's name,
+ * and a name that no vertex reaches is printed too — a declared channel nothing
+ * refers to is not an error, but a run of them is the signature of the wrong
+ * byte order. */
+static void reportDeformationReach(const GeometryMesh *mesh)
+{
+    char message[512];
+    Unsigned32 channel;
+    Unsigned32 unreached = 0U;
+
+    if (mesh->morphTargetCount == 0U)
+    {
+        return;
+    }
+    if (mesh->morphSlotChannels == NULL_POINTER || mesh->morphSlotCount == 0U)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), mesh->morphTargetCount);
+        stringAppend(message, sizeof(message),
+                     " deformation channel(s) declared and nothing carried to move with them");
+        platformLogMessage(message);
+        return;
+    }
+
+    /* Channel nought is skipped rather than counted as unreached: it is the
+       file's "no channel here" and is meant to have no vertices. */
+    for (channel = 1U; channel < mesh->morphTargetCount; channel++)
+    {
+        Unsigned32 vertices = 0U;
+        Real32 furthest = 0.0f;
+        Unsigned32 vertex;
+
+        for (vertex = 0U; vertex < mesh->vertexCount; vertex++)
+        {
+            Unsigned32 slot;
+
+            for (slot = 0U; slot < mesh->morphSlotCount; slot++)
+            {
+                MemorySize at = (MemorySize)vertex * mesh->morphSlotCount + slot;
+                Real32 lengthSquared;
+
+                if ((Unsigned32)mesh->morphSlotChannels[at] != channel)
+                {
+                    continue;
+                }
+                vertices++;
+                lengthSquared = (mesh->morphSlotDeltas[at * 3UL] * mesh->morphSlotDeltas[at * 3UL]) +
+                                (mesh->morphSlotDeltas[at * 3UL + 1UL] *
+                                 mesh->morphSlotDeltas[at * 3UL + 1UL]) +
+                                (mesh->morphSlotDeltas[at * 3UL + 2UL] *
+                                 mesh->morphSlotDeltas[at * 3UL + 2UL]);
+                if (lengthSquared > furthest)
+                {
+                    furthest = lengthSquared;
+                }
+            }
+        }
+        if (vertices == 0U)
+        {
+            unreached++;
+            continue;
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   channel ");
+        appendCount(message, sizeof(message), channel);
+        stringAppend(message, sizeof(message), " ");
+        stringAppend(message, sizeof(message), mesh->morphTargets[channel].groupName);
+        stringAppend(message, sizeof(message), "/");
+        stringAppend(message, sizeof(message), mesh->morphTargets[channel].channelName);
+        stringAppend(message, sizeof(message), " moves ");
+        appendCount(message, sizeof(message), vertices);
+        stringAppend(message, sizeof(message), " vertices, furthest by ");
+        appendThousandths(message, sizeof(message), mathSquareRoot(furthest));
+        platformLogMessage(message);
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    appendCount(message, sizeof(message), mesh->morphTargetCount - 1U - unreached);
+    stringAppend(message, sizeof(message), " of ");
+    appendCount(message, sizeof(message), mesh->morphTargetCount - 1U);
+    stringAppend(message, sizeof(message), " declared channel(s) are reached by a vertex");
+    platformLogMessage(message);
 }
 
 /* Decodes whatever level is in hand and gives it to the part, then moves on. */
@@ -1515,6 +1669,20 @@ static SimAssembly stepTheSim(void)
         appendCount(message, sizeof(message), whole.skinnedVertexCount);
         stringAppend(message, sizeof(message), " of them weighted");
         platformLogMessage(message);
+        reportDeformationReach(&whole);
+
+        {
+            Unsigned32 channel;
+
+            simMorphChannels = (whole.morphTargetCount < SIM_MORPH_WEIGHT_LIMIT)
+                                   ? whole.morphTargetCount
+                                   : SIM_MORPH_WEIGHT_LIMIT;
+            for (channel = 0U; channel < SIM_MORPH_WEIGHT_LIMIT; channel++)
+            {
+                simMorphWeights[channel] = 0.0f;
+            }
+            simMorphReported = BOOLEAN_FALSE;
+        }
 
         discSearch.mesh = whole;
         renderSetMesh(&discSearch.mesh, globalArena);
@@ -3187,6 +3355,12 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 appendCount(message, sizeof(message), discSearch.refusalsByReason[reason]);
                 stringAppend(message, sizeof(message), ";");
             }
+            if (discSearch.largestArenaWant > 0UL)
+            {
+                stringAppend(message, sizeof(message), " largest allocation wanted ");
+                appendCount(message, sizeof(message), (Unsigned32)discSearch.largestArenaWant);
+                stringAppend(message, sizeof(message), " bytes;");
+            }
             platformLogMessage(message);
         }
 
@@ -3785,8 +3959,49 @@ static void advanceThePose(Real32 elapsedSeconds)
         poseTick = tick;
     }
 
+    /* The deformation, swung between rest and full on its own slow clock —
+     * slower than the animation, so the two are told apart on screen rather
+     * than reading as one motion.
+     *
+     * Every channel at once, which is a caricature and is meant to be. What it
+     * proves is that the per-vertex map reaches the mesh and that the deltas
+     * are in rest space: a face pulled into every one of its shapes together
+     * still has to be a face, and still has to move with the pose rather than
+     * swimming against it. Driving one channel would look like nothing much
+     * either way.
+     *
+     * Channel nought is skipped because it is not a channel — see the note on
+     * geometryMeshApplyMorph. */
+    if (simMorphChannels > 1U)
+    {
+        Real32 strength = 0.5f + (0.5f * mathSine(elapsedSeconds * 0.35f));
+        Unsigned32 channel;
+
+        for (channel = 1U; channel < simMorphChannels; channel++)
+        {
+            simMorphWeights[channel] = strength;
+        }
+        discSearch.morphWeights = simMorphWeights;
+        discSearch.morphWeightCount = simMorphChannels;
+    }
+
     if (discContentPoseFromAnimation(&discSearch, &posedAnimation, tick, globalArena))
     {
+        if (!simMorphReported && discSearch.verticesDeformed > 0U)
+        {
+            char message[256];
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: deformed ");
+            appendCount(message, sizeof(message), discSearch.verticesDeformed);
+            stringAppend(message, sizeof(message), " vertices over ");
+            appendCount(message, sizeof(message), simMorphChannels - 1U);
+            stringAppend(message, sizeof(message),
+                         " channel(s) before posing them, which is the order a morph has to "
+                         "come in");
+            platformLogMessage(message);
+            simMorphReported = BOOLEAN_TRUE;
+        }
         /* The vertices moved; the mesh is otherwise the one already uploaded.
            renderSetMesh here would charge the graphics ledger for a second
            buffer every frame and compile the program again with it. */

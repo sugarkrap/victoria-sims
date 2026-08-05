@@ -302,11 +302,23 @@ typedef struct DiscContentSearch
        rather than from whichever shape was filed first. */
     Unsigned32 packagesWithTrees;
     Unsigned32 modelsResolved;
+    /* The deformation weights the pose is built with, one per declared channel,
+       or null for none. Owned by the caller; the pose reads them and does not
+       keep them. */
+    const Real32 *morphWeights;
+    Unsigned32 morphWeightCount;
+    /* Vertices the last pose deformed before it posed them. */
+    Unsigned32 verticesDeformed;
+
     Unsigned32 geometryRefused;
     /* Why the refusals happened, one bucket per GeometryReadResult. A disc that
        refuses hundreds of meshes for one reason and a disc that refuses them for
        six are different problems, and a bare count cannot tell them apart. */
     Unsigned32 refusalsByReason[GEOMETRY_READ_RESULT_COUNT];
+    /* The largest allocation a refused mesh asked for and could not get. A
+       refusal that says only "not enough arena" costs a run of the disc per
+       guess at which array it was. */
+    MemorySize largestArenaWant;
     /* Refusals that never reached the geometry reader because the stream would
        not decompress. */
     Unsigned32 decompressionRefused;

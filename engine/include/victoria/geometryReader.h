@@ -14,11 +14,13 @@
  * A GMDC is wrapped in the scenegraph's resource collection header, so this
  * reads that too rather than making every caller skip it.
  *
- * What is deliberately not read yet:
+ * Bone assignments, weights, the bind pose and the deformation channels are all
+ * read. What is deliberately not read yet:
  *
- *   - Bone assignments and weights. A mesh comes back in its bind pose, which
- *     is the right thing to look at first and the wrong thing to animate.
- *   - Morph targets. Face shapes and body sliders live here.
+ *   - Morph normal deltas, and the two morph index elements beside them. A
+ *     deformed vertex therefore keeps its resting normal and is shaded very
+ *     slightly wrong, on a shape that has only slightly changed.
+ *   - Tangents, binormals, and the second colour set.
  *
  * The mesh's arrays are copied into the arena rather than pointed at the source
  * buffer. The buffer's floats are not aligned, and reading an unaligned float
@@ -33,6 +35,19 @@
 #define GEOMETRY_ELEMENT_TANGENT 0x89D92BA0UL
 #define GEOMETRY_ELEMENT_BONE_ASSIGNMENT 0xFBD70111UL
 #define GEOMETRY_ELEMENT_BONE_WEIGHT 0x3BD70105UL
+
+/* Deformation. One map element per component, and up to four sets of deltas
+   alongside it — see GEOMETRY_MORPH_SLOT_LIMIT for what the pair means. */
+#define GEOMETRY_ELEMENT_MORPH_VERTEX_MAP 0xDCF2CFDCUL
+#define GEOMETRY_ELEMENT_MORPH_VERTEX_DELTA 0x5CF2CFE1UL
+
+/* How many deformation channels one vertex can be in at once.
+ *
+ * Four, because the map spends one packed word a vertex and gives each slot a
+ * byte. That is a limit of the file, not of this reader: a body declares three
+ * channels and a face twenty-seven, but no single vertex is ever moved by more
+ * than four of them. */
+#define GEOMETRY_MORPH_SLOT_LIMIT 4U
 
 /* The slot value meaning "no bone here". The file's own sentinel, not one
  * chosen here: an assignment word packs four byte indices and spells an empty
@@ -237,6 +252,31 @@ typedef struct GeometryMesh
     const GeometryMorphTarget *morphTargets;
     Unsigned32 morphTargetCount;
 
+    /* What actually moves when a channel is turned up.
+     *
+     * The file spends one packed word per vertex and one set of deltas per
+     * slot. A slot's byte in that word is the channel it belongs to, and zero
+     * means the slot is unused — which is why morphTargets keeps its blank
+     * first entry rather than compacting it away.
+     *
+     * Unpacked here into two flat arrays, both indexed [vertex * morphSlotCount
+     * + slot], with the deltas carrying three floats each. The channel is
+     * widened from the file's byte to a halfword, because joining several
+     * containers renumbers every channel into one shared space and the sum of
+     * a Sim's parts has no reason to stay under two hundred and fifty five. Null with a zero
+     * count when the container declared channels but carried nothing to move
+     * with them, which is a different thing from declaring none. */
+    const Unsigned16 *morphSlotChannels;
+    const Real32 *morphSlotDeltas;
+    Unsigned32 morphSlotCount;
+    /* Vertices whose map word was actually read, as against merely allocated
+     * for. Needed because the two ways of ending up with no deformation look
+     * identical from outside: a map element rejected for being shorter than its
+     * component leaves the channels zeroed, and so does a map that is genuinely
+     * all zeroes. One is this reader's problem and the other is the disc's, and
+     * they call for opposite next moves. */
+    Unsigned32 morphMappedVertexCount;
+
     /* Element kinds met and not used, with the format each was in. Reported
      * because what a mesh carries decides what the renderer has to be able to
      * do, and a mesh that quietly holds morph targets or a second colour set
@@ -254,6 +294,11 @@ typedef struct GeometryMesh
     /* How many geometry elements the container claimed, set before it is acted
        on so a refusal can quote it. */
     Unsigned32 elementCount;
+    /* The allocation that failed, when the refusal was for arena space. Zero
+       otherwise. A reader that says only "not enough space" leaves the next
+       person bisecting the reader to find out which array it was, which is a
+       run of the disc per guess. */
+    MemorySize arenaWantedBytes;
 } GeometryMesh;
 
 GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes, MemorySize sizeInBytes,
@@ -322,5 +367,33 @@ void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix);
  * tell that from a mesh with no weights would report a pose it never applied. */
 Unsigned32 geometryMeshApplySkin(GeometryMesh *mesh, const Real32 *boneMatrices,
                                  Unsigned32 boneCount);
+
+/* Deforms the mesh by its declared channels, each turned up by its own weight.
+ *
+ * One weight per entry in morphTargets, so channelWeights[n] is the weight of
+ * morphTargets[n]. Entry nought is read and is expected to be ignored by the
+ * file rather than by this: no slot ever names channel nought, so whatever is
+ * passed there moves nothing.
+ *
+ * ORDER MATTERS, and it is the opposite way round from what the names suggest.
+ * This runs BEFORE geometryMeshApplySkin, not after. A morph is a change to the
+ * shape the model was authored in — a fatter body is a different bind pose, not
+ * a differently posed one — so it belongs on the resting mesh, which the skin
+ * then poses. Applying it to a posed mesh adds a rest-space displacement to
+ * vertices that have already left rest space, and the further a limb has swung
+ * the more wrong it is.
+ *
+ * Positions are rewritten in place, so a caller animating this has to restore
+ * the resting mesh first, exactly as it must before skinning.
+ *
+ * Normals are left alone. The file carries deltas for them and they are not
+ * read yet; a morphed vertex therefore keeps its resting normal, which is
+ * slightly wrong shading on a shape that is already only slightly changed.
+ *
+ * Returns how many vertices it moved. Zero from a mesh that carries channels
+ * means the weights named none of them, which is worth telling apart from a
+ * mesh that carries none at all. */
+Unsigned32 geometryMeshApplyMorph(GeometryMesh *mesh, const Real32 *channelWeights,
+                                  Unsigned32 weightCount);
 
 #endif

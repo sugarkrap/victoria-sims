@@ -347,7 +347,11 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
        slots then the first alone then all three in another order. */
     static const Unsigned32 assignments[3] = { 0xFF020100UL, 0xFFFFFF00UL, 0xFF010002UL };
     static const Real32 weights[6] = { 0.25f, 0.5f, 1.0f, 0.0f, 0.5f, 0.25f };
-    static const Unsigned32 elementIndices[3] = { 0U, 1U, 2U };
+    /* Six when the container carries weights: positions, assignments, weights,
+       the morph map, and the two delta sets. The two deltas are numbered by
+       where they sit in THIS list, not in the resource, which is why their
+       order here is part of the fixture. */
+    static const Unsigned32 elementIndices[6] = { 0U, 1U, 2U, 3U, 4U, 5U };
     static const Unsigned32 faces[3] = { 0U, 1U, 2U };
     Unsigned32 index;
 
@@ -362,7 +366,7 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
     putTypeInformation(builder, "cSGResource", 0xACE46235UL, 2U);
     putString(builder, "abodynude_gmdc");
 
-    putUnsigned32(builder, withWeights ? 3U : 2U);
+    putUnsigned32(builder, withWeights ? 6U : 2U);
     putFloatElement(builder, 0x5B830781UL, positions, 3U, 3U, blockVersion);
 
     /* Bone assignments: one word per vertex. The format code is deliberately
@@ -396,8 +400,52 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
         putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
     }
 
+    if (withWeights)
+    {
+        /* Deformation: one map and two sets of deltas.
+         *
+         * The map spends a word a vertex and gives each slot a byte, slot
+         * nought being the MOST significant. Written so that reading it the
+         * other way round — which is how the bone assignment word above is
+         * read, four bytes low first — produces nothing at all rather than
+         * something plausible:
+         *
+         *   vertex 0  0x01000000  slot 0 is channel 1, slot 1 unused
+         *   vertex 1  0x00020000  slot 0 unused, slot 1 is channel 2
+         *   vertex 2  0x00000000  neither
+         *
+         * Read backwards every one of those bytes is nought and no vertex
+         * deforms, which the checks below can tell from the right answer. */
+        static const Unsigned32 morphMap[3] = { 0x01000000UL, 0x00020000UL, 0x00000000UL };
+        /* The two delta sets. Each carries a usable value only where the map
+           names it, and 9 everywhere else — a slot read against the wrong set,
+           or a set read against the wrong slot, lands on a 9 and is loud. */
+        static const Real32 firstDeltas[9] = { 0.5f, 0.0f, 0.0f, 9.0f, 9.0f, 9.0f,
+                                               9.0f, 9.0f, 9.0f };
+        static const Real32 secondDeltas[9] = { 9.0f, 9.0f, 9.0f, 0.0f, 0.25f, 0.0f,
+                                                9.0f, 9.0f, 9.0f };
+
+        /* Format four, which is what a retail body calls it. The reader must
+           take this on its identifier and payload length, as it does the bone
+           assignment word, and not on a layout number. */
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 0xDCF2CFDCUL);
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 4U);
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 12U);
+        for (index = 0U; index < 3U; index++)
+        {
+            putUnsigned32(builder, morphMap[index]);
+        }
+        putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+
+        putFloatElement(builder, 0x5CF2CFE1UL, firstDeltas, 3U, 3U, blockVersion);
+        putFloatElement(builder, 0x5CF2CFE1UL, secondDeltas, 3U, 3U, blockVersion);
+    }
+
     putUnsigned32(builder, 1U);
-    putIndexArray(builder, elementIndices, withWeights ? 3U : 2U, blockVersion);
+    putIndexArray(builder, elementIndices, withWeights ? 6U : 2U, blockVersion);
     putUnsigned32(builder, 3U);
     putUnsigned32(builder, 0U);
     putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
@@ -845,6 +893,67 @@ int main(void)
                           stringEqualsIgnoringCase(skinned.morphTargets[2].groupName, "botmorphs"));
         }
 
+        printf("\n-- and what the channels actually move --\n");
+        /* The map packs four slots into a word, slot nought in the MOST
+         * significant byte. The bone assignment word beside it packs its four
+         * slots the other way, least significant first. Nothing in the file
+         * says which is which, and both readings produce small plausible
+         * channel numbers, so this is written down as a fixture rather than
+         * left as a thing someone once knew.
+         *
+         * The fixture's map is 0x01000000 and 0x00020000. Read the wrong way
+         * round every byte is nought and nothing deforms at all, which is the
+         * one outcome these checks can tell apart from the right answer without
+         * ambiguity. */
+        checkThat(&failureCount, "the two delta sets are found",
+                  skinned.morphSlotCount == 2U && skinned.morphSlotDeltas != NULL_POINTER);
+        checkThat(&failureCount, "and the map was read for every vertex, not merely sized for",
+                  skinned.morphMappedVertexCount == 3U);
+        if (skinned.morphSlotCount == 2U && skinned.morphSlotChannels != NULL_POINTER)
+        {
+            checkThat(&failureCount, "slot nought comes from the word's top byte",
+                      skinned.morphSlotChannels[0] == 1U && skinned.morphSlotChannels[1] == 0U);
+            checkThat(&failureCount, "and slot one from the byte below it",
+                      skinned.morphSlotChannels[2] == 0U && skinned.morphSlotChannels[3] == 2U);
+            checkThat(&failureCount, "a vertex in no channel names none",
+                      skinned.morphSlotChannels[4] == 0U && skinned.morphSlotChannels[5] == 0U);
+            /* Each delta set carries 9 everywhere the map does not name it, so
+               a slot read against the wrong set lands on a 9 rather than on
+               something that could pass for a small displacement. */
+            checkThat(&failureCount, "each slot's deltas come from its own element",
+                      nearly(skinned.morphSlotDeltas[0], 0.5f) &&
+                          nearly(skinned.morphSlotDeltas[10], 0.25f));
+        }
+        {
+            /* Read again into a mesh of its own, because applying a morph
+               rewrites positions and the sections below still want the resting
+               ones. Channel 1 at one, channel 2 at two — different weights, so
+               a swapped channel is a wrong distance and not merely a wrong
+               vertex. */
+            static Builder morphBuilder;
+            static GeometryMesh deforming;
+            static const Real32 weights[3] = { 0.0f, 1.0f, 2.0f };
+            Unsigned32 deformed;
+
+            buildSkinnedContainer(&morphBuilder, 4U, BOOLEAN_TRUE);
+            (void)geometryReaderOpen(&deforming, morphBuilder.bytes, morphBuilder.length, &arena);
+            deformed = geometryMeshApplyMorph(&deforming, weights, 3U);
+
+            checkThat(&failureCount, "applying them moves the two vertices in a channel",
+                      deformed == 2U);
+            checkThat(&failureCount, "the first by its channel's delta times its weight",
+                      nearly(deforming.positions[0], 0.5f) && nearly(deforming.positions[1], 0.0f));
+            checkThat(&failureCount, "the second by the other channel's, weighted twice",
+                      nearly(deforming.positions[3], 1.0f) && nearly(deforming.positions[4], 0.5f));
+            checkThat(&failureCount, "and the vertex in no channel does not move",
+                      nearly(deforming.positions[6], 0.0f) && nearly(deforming.positions[7], 1.0f));
+
+            /* Weights of nought move nothing, which is what lets a caller leave
+               the array in place across a frame that wants no deformation. */
+            checkThat(&failureCount, "a channel at rest moves nothing",
+                      geometryMeshApplyMorph(&deforming, weights, 1U) == 0U);
+        }
+
         printf("\n-- joining several containers into one model --\n");
         /* A Sim is a body, a face and hair: three containers that have to end up
            as one mesh, because one upload painted a part at a time is what the
@@ -913,6 +1022,88 @@ int main(void)
                           whole.boneAssignments[0] == 0U && whole.boneAssignments[1] == 1U);
                 checkThat(&failureCount, "and the bind pose comes from whichever part had one",
                           whole.bindPoseCount == skinned.bindPoseCount);
+
+                /* Deformation channels are numbered from each container's own
+                 * list, so both parts here call their fat channel 1. Unshifted
+                 * they would collide and one part's weight would deform the
+                 * other — the component-index mistake in another costume. The
+                 * lists are concatenated and every non-zero slot moved by where
+                 * its part's list landed; nought stays nought, because it is
+                 * not a channel but the file's way of saying there is none. */
+                checkThat(&failureCount, "both parts' channels arrive in one list",
+                          whole.morphTargetCount ==
+                              skinned.morphTargetCount + mesh.morphTargetCount);
+                if (whole.morphSlotChannels != NULL_POINTER && whole.morphSlotCount > 0U)
+                {
+                    Unsigned32 highest = 0U;
+                    Unsigned32 slot;
+
+                    for (slot = 0U; slot < whole.vertexCount * whole.morphSlotCount; slot++)
+                    {
+                        if ((Unsigned32)whole.morphSlotChannels[slot] > highest)
+                        {
+                            highest = (Unsigned32)whole.morphSlotChannels[slot];
+                        }
+                    }
+                    checkThat(&failureCount, "the first part's channels keep their numbers",
+                              whole.morphSlotChannels[0] == 1U);
+                    /* The teapot declares none, so nothing is shifted here and
+                       the highest stays the first part's. What this holds is
+                       that the shift did not run anyway. */
+                    checkThat(&failureCount, "and no channel is numbered past the joined list",
+                              highest < whole.morphTargetCount);
+                }
+
+                /* And the shift itself, which the join above cannot show
+                 * because only one of its parts declares anything. Two
+                 * containers that both do is the case a Sim actually is: a body
+                 * and a face, each calling its first real channel 1. */
+                {
+                    static Builder firstBuilder;
+                    static Builder secondBuilder;
+                    static GeometryMesh firstPart;
+                    static GeometryMesh secondPart;
+                    static GeometryMesh bothParts;
+                    const GeometryMesh *bothOfThem[2];
+
+                    buildSkinnedContainer(&firstBuilder, 4U, BOOLEAN_TRUE);
+                    buildSkinnedContainer(&secondBuilder, 4U, BOOLEAN_TRUE);
+                    (void)geometryReaderOpen(&firstPart, firstBuilder.bytes, firstBuilder.length,
+                                             &arena);
+                    (void)geometryReaderOpen(&secondPart, secondBuilder.bytes, secondBuilder.length,
+                                             &arena);
+                    bothOfThem[0] = &firstPart;
+                    bothOfThem[1] = &secondPart;
+
+                    if (geometryMeshMerge(&bothParts, bothOfThem, 2U, &arena) == GEOMETRY_READ_OK &&
+                        bothParts.morphSlotChannels != NULL_POINTER)
+                    {
+                        Unsigned32 stride = bothParts.morphSlotCount;
+                        Unsigned32 secondBase = firstPart.vertexCount;
+
+                        checkThat(&failureCount, "two deforming parts join their channel lists",
+                                  bothParts.morphTargetCount == 6U);
+                        checkThat(&failureCount, "the first part's stay where they were",
+                                  bothParts.morphSlotChannels[0] == 1U &&
+                                      bothParts.morphSlotChannels[stride + 1U] == 2U);
+                        /* Three declared by the first part, so the second's
+                           channel 1 becomes 4 and its 2 becomes 5. */
+                        checkThat(&failureCount, "and the second part's move up by the first's count",
+                                  bothParts.morphSlotChannels[secondBase * stride] == 4U &&
+                                      bothParts.morphSlotChannels[(secondBase + 1U) * stride + 1U] ==
+                                          5U);
+                        checkThat(&failureCount, "while an unused slot stays unused rather than "
+                                                 "shifting onto a real channel",
+                                  bothParts.morphSlotChannels[secondBase * stride + 1U] == 0U);
+                        /* And the names line up with the numbers, which is the
+                           point of shifting them at all. */
+                        checkThat(&failureCount, "the joined list names channel 4 as the second "
+                                                 "part's first",
+                                  bothParts.morphTargetCount == 6U &&
+                                      stringEqualsIgnoringCase(bothParts.morphTargets[4].channelName,
+                                                               "fatbot"));
+                    }
+                }
 
                 /* A component index means something only inside its own
                    container, so every source's first primitive draws from

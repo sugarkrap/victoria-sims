@@ -264,6 +264,70 @@ static void rememberUnusedElement(GeometryMesh *mesh, Unsigned32 identifier, Uns
     }
 }
 
+/* The per-vertex morph map, unpacked a slot at a time.
+ *
+ * One word a vertex, four bytes in it, each byte the channel that slot's deltas
+ * belong to. Slot nought is the word's MOST significant byte and slot three its
+ * least, which is the opposite way round from the bone assignment word next
+ * door — that one runs low byte first. Two packed words a vertex apart in the
+ * same file, read in opposite directions; there is no rule to remember here,
+ * only the two facts.
+ *
+ * Read byte-wise off the word rather than cast, for the same reason as the bone
+ * assignments: the payload sits wherever the file put it. */
+static Boolean copyMorphChannels(Unsigned16 *destination, ResourceCursor *cursor,
+                                 const ElementSpan *span, Unsigned32 vertexCount,
+                                 Unsigned32 slotCount)
+{
+    Unsigned32 vertex;
+
+    if (span == NULL_POINTER || (MemorySize)span->payloadBytes < (MemorySize)vertexCount * 4UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+    cursor->position = span->payloadPosition;
+    cursor->overran = BOOLEAN_FALSE;
+    for (vertex = 0U; vertex < vertexCount; vertex++)
+    {
+        Unsigned32 packed = resourceCursorReadUnsigned32(cursor);
+        Unsigned32 slot;
+
+        for (slot = 0U; slot < slotCount; slot++)
+        {
+            destination[(MemorySize)vertex * slotCount + slot] =
+                (Unsigned16)((packed >> ((3U - slot) * 8U)) & 0xFFU);
+        }
+    }
+    return cursor->overran ? BOOLEAN_FALSE : BOOLEAN_TRUE;
+}
+
+/* One slot's deltas, written into the stride the slots share. Separate passes
+   per slot rather than one interleaved pass, because each slot is its own
+   element somewhere else in the resource and reading them together would mean
+   seeking three times a vertex. */
+static Boolean copyMorphDeltas(Real32 *destination, ResourceCursor *cursor,
+                               const ElementSpan *span, Unsigned32 vertexCount,
+                               Unsigned32 slotCount, Unsigned32 slot)
+{
+    Unsigned32 vertex;
+
+    if (span == NULL_POINTER || (MemorySize)span->payloadBytes < (MemorySize)vertexCount * 12UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+    cursor->position = span->payloadPosition;
+    cursor->overran = BOOLEAN_FALSE;
+    for (vertex = 0U; vertex < vertexCount; vertex++)
+    {
+        MemorySize at = ((MemorySize)vertex * slotCount + slot) * 3UL;
+
+        destination[at] = resourceCursorReadReal32(cursor);
+        destination[at + 1UL] = resourceCursorReadReal32(cursor);
+        destination[at + 2UL] = resourceCursorReadReal32(cursor);
+    }
+    return cursor->overran ? BOOLEAN_FALSE : BOOLEAN_TRUE;
+}
+
 /* What one component contributes to the merged mesh. */
 typedef struct ComponentSpan
 {
@@ -272,6 +336,13 @@ typedef struct ComponentSpan
     const ElementSpan *texture;
     const ElementSpan *boneAssignment;
     const ElementSpan *boneWeight;
+    /* The map, and the delta sets in the order this component's own element
+       list names them — which is the order the map's bytes are numbered in. A
+       delta element that belongs to another component is not in this list and
+       must not be counted, or every slot after it names the wrong deltas. */
+    const ElementSpan *morphMap;
+    const ElementSpan *morphDeltas[GEOMETRY_MORPH_SLOT_LIMIT];
+    Unsigned32 morphDeltaCount;
     Unsigned32 vertexCount;
     /* Where this component's vertices start once they are all in one array. A
        primitive's faces are relative to its own component, so this is what
@@ -335,12 +406,16 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     Boolean anyTextures = BOOLEAN_FALSE;
     Boolean anyBoneAssignments = BOOLEAN_FALSE;
     Boolean anyBoneWeights = BOOLEAN_FALSE;
+    Boolean anyMorph = BOOLEAN_FALSE;
     Unsigned32 weightsStoredPerVertex = 0U;
+    Unsigned32 morphSlots = 0U;
     Real32 *positions;
     Real32 *normals = NULL_POINTER;
     Real32 *textures = NULL_POINTER;
     Unsigned8 *boneAssignments = NULL_POINTER;
     Real32 *boneWeights = NULL_POINTER;
+    Unsigned16 *morphChannels = NULL_POINTER;
+    Real32 *morphDeltas = NULL_POINTER;
     Unsigned16 *indices;
 
     clearMesh(mesh);
@@ -462,6 +537,17 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         components[index].boneAssignment = NULL_POINTER;
         components[index].boneWeight = NULL_POINTER;
         components[index].baseVertex = vertexCount;
+        /* Every field of this record is cleared here because the array it lives
+           in comes from the arena, which is never zeroed. A count left holding
+           whatever was there before is not merely wrong, it is unbounded: this
+           one is a slot count that sizes an allocation, and it asked for 3.9 GB
+           against a mesh of a few hundred vertices. */
+        components[index].morphMap = NULL_POINTER;
+        components[index].morphDeltaCount = 0U;
+        for (inner = 0U; inner < GEOMETRY_MORPH_SLOT_LIMIT; inner++)
+        {
+            components[index].morphDeltas[inner] = NULL_POINTER;
+        }
 
         elementIndexCount = skipIndexArray(&cursor, blockVersion, &elementIndexStart);
         components[index].vertexCount = resourceCursorReadUnsigned32(&cursor);
@@ -523,6 +609,25 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
             {
                 components[index].boneAssignment = &spans[which];
                 anyBoneAssignments = BOOLEAN_TRUE;
+            }
+            /* The map's format is not checked, for the same reason the bone
+               assignment word's is not: it carries four packed bytes whatever
+               the file calls that layout, and the payload length is the check
+               that matters. A retail body calls it format 4. */
+            else if (spans[which].identifier == (Unsigned32)GEOMETRY_ELEMENT_MORPH_VERTEX_MAP)
+            {
+                components[index].morphMap = &spans[which];
+                anyMorph = BOOLEAN_TRUE;
+            }
+            else if (spans[which].identifier == (Unsigned32)GEOMETRY_ELEMENT_MORPH_VERTEX_DELTA &&
+                     spans[which].format == ELEMENT_FORMAT_THREE_FLOATS &&
+                     components[index].morphDeltaCount < GEOMETRY_MORPH_SLOT_LIMIT)
+            {
+                /* Appended in the order met. A fifth would have no byte in the
+                   map to be named by, so it is left out rather than displacing
+                   one that has. */
+                components[index].morphDeltas[components[index].morphDeltaCount] = &spans[which];
+                components[index].morphDeltaCount++;
             }
             else if (spans[which].identifier == (Unsigned32)GEOMETRY_ELEMENT_BONE_WEIGHT &&
                      spans[which].format <= ELEMENT_FORMAT_THREE_FLOATS)
@@ -710,11 +815,14 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
                     if (!cursor.overran && targetCount > 0U &&
                         (MemorySize)targetCount <= sizeInBytes / 2UL)
                     {
-                        GeometryMorphTarget *targets = (GeometryMorphTarget *)memoryArenaAllocate(
-                            arena, (MemorySize)targetCount * sizeof(GeometryMorphTarget), 1UL);
+                        MemorySize wanted =
+                            (MemorySize)targetCount * sizeof(GeometryMorphTarget);
+                        GeometryMorphTarget *targets =
+                            (GeometryMorphTarget *)memoryArenaAllocate(arena, wanted, 1UL);
 
                         if (targets == NULL_POINTER)
                         {
+                            mesh->arenaWantedBytes = wanted;
                             return GEOMETRY_READ_OUT_OF_ARENA;
                         }
                         for (index = 0U; index < targetCount; index++)
@@ -794,11 +902,53 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         }
     }
 
+    /* The deformation arrays, sized to the widest component. Components that
+     * carry fewer delta sets leave their extra slots at channel nought, which
+     * the apply loop reads as "this slot moves nothing" — the same spelling the
+     * file uses, so nothing has to know the difference.
+     *
+     * Only when a map turned up. Deltas without a map name no channel and a map
+     * without deltas has nothing to move, so a component holding one of them is
+     * treated as holding neither. */
+    if (anyMorph)
+    {
+        for (index = 0U; index < componentCount; index++)
+        {
+            if (components[index].morphMap != NULL_POINTER &&
+                components[index].morphDeltaCount > morphSlots)
+            {
+                morphSlots = components[index].morphDeltaCount;
+            }
+        }
+    }
+    if (morphSlots > 0U)
+    {
+        MemorySize slotTotal = (MemorySize)vertexCount * (MemorySize)morphSlots;
+
+        morphChannels = (Unsigned16 *)memoryArenaAllocate(
+            arena, slotTotal * sizeof(Unsigned16), sizeof(Unsigned16));
+        morphDeltas =
+            (Real32 *)memoryArenaAllocate(arena, slotTotal * 3UL * sizeof(Real32), sizeof(Real32));
+        if (morphChannels == NULL_POINTER || morphDeltas == NULL_POINTER)
+        {
+            mesh->arenaWantedBytes = slotTotal * (sizeof(Unsigned16) + (3UL * sizeof(Real32)));
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+        for (index = 0U; index < (Unsigned32)slotTotal; index++)
+        {
+            morphChannels[index] = 0U;
+            morphDeltas[index * 3U] = 0.0f;
+            morphDeltas[index * 3U + 1U] = 0.0f;
+            morphDeltas[index * 3U + 2U] = 0.0f;
+        }
+    }
+
     for (index = 0U; index < componentCount; index++)
     {
         const ComponentSpan *component = &components[index];
         MemorySize positionOffset = (MemorySize)component->baseVertex * 3UL;
         Unsigned32 inner;
+        Unsigned32 which;
 
         if (component->vertexCount == 0U)
         {
@@ -862,6 +1012,41 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
                 {
                     boneAssignments[slot + inner] = (Unsigned8)GEOMETRY_BONE_NONE;
                     boneWeights[slot + inner] = 0.0f;
+                }
+            }
+        }
+
+        if (morphChannels != NULL_POINTER && component->morphMap != NULL_POINTER &&
+            component->morphDeltaCount > 0U)
+        {
+            MemorySize slot = (MemorySize)component->baseVertex * (MemorySize)morphSlots;
+
+            if (copyMorphChannels(&morphChannels[slot], &cursor, component->morphMap,
+                                  component->vertexCount, morphSlots))
+            {
+                mesh->morphMappedVertexCount += component->vertexCount;
+                for (inner = 0U; inner < component->morphDeltaCount; inner++)
+                {
+                    if (!copyMorphDeltas(&morphDeltas[slot * 3UL], &cursor,
+                                         component->morphDeltas[inner], component->vertexCount,
+                                         morphSlots, inner))
+                    {
+                        /* A slot whose deltas will not read is silenced rather
+                           than left naming a channel it cannot move for — an
+                           unread slot still holds zeroes, so it would displace
+                           by nothing while counting as a vertex moved. */
+                        for (which = 0U; which < component->vertexCount; which++)
+                        {
+                            morphChannels[slot + (MemorySize)which * morphSlots + inner] = 0U;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (inner = 0U; inner < component->vertexCount * morphSlots; inner++)
+                {
+                    morphChannels[slot + inner] = 0U;
                 }
             }
         }
@@ -964,6 +1149,9 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->textureCoordinates = textures;
     mesh->boneAssignments = boneAssignments;
     mesh->boneWeights = boneWeights;
+    mesh->morphSlotChannels = morphChannels;
+    mesh->morphSlotDeltas = morphDeltas;
+    mesh->morphSlotCount = (morphChannels != NULL_POINTER) ? morphSlots : 0U;
     mesh->weightsStoredPerVertex = (boneAssignments != NULL_POINTER) ? weightsStoredPerVertex : 0U;
     if (boneAssignments != NULL_POINTER)
     {
@@ -1006,6 +1194,10 @@ static void clearMesh(GeometryMesh *mesh)
     mesh->bindPoseCount = 0U;
     mesh->morphTargets = NULL_POINTER;
     mesh->morphTargetCount = 0U;
+    mesh->morphSlotChannels = NULL_POINTER;
+    mesh->morphSlotDeltas = NULL_POINTER;
+    mesh->morphSlotCount = 0U;
+    mesh->morphMappedVertexCount = 0U;
     mesh->vertexCount = 0U;
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;
@@ -1017,6 +1209,7 @@ static void clearMesh(GeometryMesh *mesh)
     mesh->versionMark = 0U;
     mesh->containerVersion = 0U;
     mesh->elementCount = 0U;
+    mesh->arenaWantedBytes = 0UL;
 }
 
 GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *const *sources,
@@ -1033,12 +1226,18 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
     Unsigned32 indexBase = 0U;
     Unsigned32 primitiveBase = 0U;
     Unsigned32 componentBase = 0U;
+    Unsigned32 morphTargetTotal = 0U;
+    Unsigned32 morphSlots = 0U;
+    Unsigned32 morphTargetBase = 0U;
     Unsigned32 which;
     Real32 *positions;
     Real32 *normals = NULL_POINTER;
     Real32 *textures = NULL_POINTER;
     Unsigned8 *boneAssignments = NULL_POINTER;
     Real32 *boneWeights = NULL_POINTER;
+    Unsigned16 *morphChannels = NULL_POINTER;
+    Real32 *morphDeltas = NULL_POINTER;
+    GeometryMorphTarget *morphTargets = NULL_POINTER;
     Unsigned16 *indices;
     GeometryPrimitive *primitives;
 
@@ -1075,16 +1274,26 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
             merged->bindPoses = source->bindPoses;
             merged->bindPoseCount = source->bindPoseCount;
         }
-        /* Morph targets are deliberately not carried across. A bind pose is one
-         * thing every part shares — they are all weighted to the same skeleton,
-         * so the longest one covers the rest. A deformation channel is not:
-         * each part declares its own, numbered from its own array, and the
-         * morph elements that reference those numbers are per container too.
-         * Taking one part's list for the whole would be the component-index
-         * mistake again, where an index that meant something inside one
-         * container was read as though it meant the same after the join.
+        /* Deformation channels are counted here and renumbered below.
          *
-         * A caller wanting them asks the parts, which still hold theirs. */
+         * A bind pose is one thing every part shares — they are all weighted to
+         * the same skeleton, so the longest one covers the rest. A channel is
+         * not. Each part declares its own list and numbers its vertices' slots
+         * from that list, so channel 1 is the body's fat and also the face's
+         * top teeth. Carrying one part's list across, or concatenating the
+         * lists and leaving the numbers alone, is the component-index mistake
+         * again: an index that meant something inside one container read as
+         * though it meant the same after the join.
+         *
+         * So the lists are concatenated AND every non-zero slot is shifted by
+         * where its part's list landed. Each part keeps its own blank entry at
+         * its own base, unreferenced exactly as it was before — closing those
+         * gaps would save a few entries and misname every channel after them. */
+        morphTargetTotal += source->morphTargetCount;
+        if (source->morphSlotCount > morphSlots)
+        {
+            morphSlots = source->morphSlotCount;
+        }
     }
 
     if (vertexTotal == 0U || indexTotal == 0U || primitiveTotal == 0U)
@@ -1136,6 +1345,33 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
         if (boneAssignments == NULL_POINTER || boneWeights == NULL_POINTER)
         {
             return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+    }
+    if (morphSlots > 0U && morphTargetTotal > 0U)
+    {
+        MemorySize slotTotal = (MemorySize)vertexTotal * (MemorySize)morphSlots;
+        MemorySize slot;
+
+        morphChannels = (Unsigned16 *)memoryArenaAllocate(arena, slotTotal * sizeof(Unsigned16),
+                                                          sizeof(Unsigned16));
+        morphDeltas =
+            (Real32 *)memoryArenaAllocate(arena, slotTotal * 3UL * sizeof(Real32), sizeof(Real32));
+        morphTargets = (GeometryMorphTarget *)memoryArenaAllocate(
+            arena, (MemorySize)morphTargetTotal * sizeof(GeometryMorphTarget), 1UL);
+        if (morphChannels == NULL_POINTER || morphDeltas == NULL_POINTER ||
+            morphTargets == NULL_POINTER)
+        {
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+        /* Zeroed first, so a part carrying no deformation — hair does not —
+           leaves its vertices naming channel nought rather than whatever the
+           arena last held there. */
+        for (slot = 0UL; slot < slotTotal; slot++)
+        {
+            morphChannels[slot] = 0U;
+            morphDeltas[slot * 3UL] = 0.0f;
+            morphDeltas[slot * 3UL + 1UL] = 0.0f;
+            morphDeltas[slot * 3UL + 2UL] = 0.0f;
         }
     }
 
@@ -1191,7 +1427,36 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
                             : 0.0f;
                 }
             }
+            if (morphChannels != NULL_POINTER && source->morphSlotChannels != NULL_POINTER)
+            {
+                Unsigned32 slot;
+
+                for (slot = 0U; slot < source->morphSlotCount; slot++)
+                {
+                    MemorySize from = (MemorySize)index * source->morphSlotCount + slot;
+                    MemorySize to = ((MemorySize)vertexBase + index) * morphSlots + slot;
+                    Unsigned32 channel = source->morphSlotChannels[from];
+
+                    /* Nought is left at nought. It is not a channel — it is the
+                       file saying this slot moves nothing — so shifting it
+                       would make every unused slot in the model point at
+                       whichever part's blank entry landed on that number. */
+                    morphChannels[to] =
+                        (channel == 0U) ? 0U : (Unsigned16)(channel + morphTargetBase);
+                    morphDeltas[to * 3UL] = source->morphSlotDeltas[from * 3UL];
+                    morphDeltas[to * 3UL + 1UL] = source->morphSlotDeltas[from * 3UL + 1UL];
+                    morphDeltas[to * 3UL + 2UL] = source->morphSlotDeltas[from * 3UL + 2UL];
+                }
+            }
         }
+        if (morphTargets != NULL_POINTER && source->morphTargets != NULL_POINTER)
+        {
+            for (index = 0U; index < source->morphTargetCount; index++)
+            {
+                morphTargets[morphTargetBase + index] = source->morphTargets[index];
+            }
+        }
+        morphTargetBase += source->morphTargetCount;
 
         for (index = 0U; index < source->indexCount; index++)
         {
@@ -1233,6 +1498,21 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
     merged->componentCount = componentBase;
     merged->boneAssignments = boneAssignments;
     merged->boneWeights = boneWeights;
+    merged->morphSlotChannels = morphChannels;
+    merged->morphSlotDeltas = morphDeltas;
+    merged->morphSlotCount = (morphChannels != NULL_POINTER) ? morphSlots : 0U;
+    if (morphChannels != NULL_POINTER)
+    {
+        for (which = 0U; which < sourceCount; which++)
+        {
+            if (sources[which] != NULL_POINTER)
+            {
+                merged->morphMappedVertexCount += sources[which]->morphMappedVertexCount;
+            }
+        }
+    }
+    merged->morphTargets = morphTargets;
+    merged->morphTargetCount = (morphTargets != NULL_POINTER) ? morphTargetTotal : 0U;
     merged->weightsStoredPerVertex = weightsStored;
     if (boneAssignments != NULL_POINTER)
     {
@@ -1443,4 +1723,68 @@ void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix)
             direction[2] = matrix[2] * x + matrix[6] * y + matrix[10] * z;
         }
     }
+}
+
+Unsigned32 geometryMeshApplyMorph(GeometryMesh *mesh, const Real32 *channelWeights,
+                                  Unsigned32 weightCount)
+{
+    Unsigned32 vertex;
+    Unsigned32 moved = 0U;
+
+    if (mesh == NULL_POINTER || mesh->positions == NULL_POINTER ||
+        mesh->morphSlotChannels == NULL_POINTER || mesh->morphSlotDeltas == NULL_POINTER ||
+        mesh->morphSlotCount == 0U || channelWeights == NULL_POINTER || weightCount == 0U)
+    {
+        return 0U;
+    }
+
+    for (vertex = 0U; vertex < mesh->vertexCount; vertex++)
+    {
+        MemorySize slotBase = (MemorySize)vertex * (MemorySize)mesh->morphSlotCount;
+        Real32 displacement[3];
+        Unsigned32 slot;
+        Boolean any = BOOLEAN_FALSE;
+
+        displacement[0] = 0.0f;
+        displacement[1] = 0.0f;
+        displacement[2] = 0.0f;
+
+        for (slot = 0U; slot < mesh->morphSlotCount; slot++)
+        {
+            Unsigned32 channel = (Unsigned32)mesh->morphSlotChannels[slotBase + slot];
+            const Real32 *delta;
+            Real32 weight;
+
+            /* Channel nought is the file's own way of saying this slot is
+               unused, which is why it is never a real channel and why the
+               declared list keeps a blank entry in front of the rest. */
+            if (channel == 0U || channel >= weightCount)
+            {
+                continue;
+            }
+            weight = channelWeights[channel];
+            if (weight == 0.0f)
+            {
+                continue;
+            }
+            delta = &mesh->morphSlotDeltas[(slotBase + slot) * 3UL];
+            displacement[0] += delta[0] * weight;
+            displacement[1] += delta[1] * weight;
+            displacement[2] += delta[2] * weight;
+            any = BOOLEAN_TRUE;
+        }
+
+        /* Counted on having been asked to move rather than on the sum coming
+           out non-zero: two channels that cancel is a vertex this deformed, and
+           reporting it as untouched would make an exactly opposed pair look
+           like a morph that failed to reach the mesh. */
+        if (any)
+        {
+            mesh->positions[(MemorySize)vertex * 3UL] += displacement[0];
+            mesh->positions[(MemorySize)vertex * 3UL + 1UL] += displacement[1];
+            mesh->positions[(MemorySize)vertex * 3UL + 2UL] += displacement[2];
+            moved++;
+        }
+    }
+    return moved;
 }

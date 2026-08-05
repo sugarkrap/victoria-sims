@@ -85,7 +85,11 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->modelsResolved = 0U;
     search->modelName[0] = '\0';
     search->foundThroughScenegraph = BOOLEAN_FALSE;
+    search->morphWeights = NULL_POINTER;
+    search->morphWeightCount = 0U;
+    search->verticesDeformed = 0U;
     search->geometryRefused = 0U;
+    search->largestArenaWant = 0UL;
     search->decompressionRefused = 0U;
     search->sawUnknownMark = BOOLEAN_FALSE;
     search->firstUnknownMark = 0U;
@@ -1137,6 +1141,23 @@ Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation 
         return BOOLEAN_FALSE;
     }
 
+    /* Deformation goes here — after the mesh is back at rest and before a bone
+     * touches it — and this is the only place it may go.
+     *
+     * A morph changes the shape the model was authored in. A fatter body is a
+     * different resting mesh, not a differently posed one, so its deltas are in
+     * rest space and belong on a resting mesh. Applied after the skin they
+     * would be added to vertices that have already been carried off to wherever
+     * their bones went, and the further a limb had swung the further out the
+     * displacement would land. Between the restore and the palette is the one
+     * window where the mesh is at rest and about to be posed. */
+    search->verticesDeformed = 0U;
+    if (search->morphWeights != NULL_POINTER && search->morphWeightCount > 0U)
+    {
+        search->verticesDeformed = geometryMeshApplyMorph(&search->mesh, search->morphWeights,
+                                                          search->morphWeightCount);
+    }
+
     /* One matrix per entry of the container's bind pose, because that array and
        the primitives' bone numbers share a numbering — so a bone number indexes
        both, and the palette can be indexed by it directly. */
@@ -1520,6 +1541,10 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
             if ((Unsigned32)readResult < GEOMETRY_READ_RESULT_COUNT)
             {
                 search->refusalsByReason[(Unsigned32)readResult]++;
+            }
+            if (search->mesh.arenaWantedBytes > search->largestArenaWant)
+            {
+                search->largestArenaWant = search->mesh.arenaWantedBytes;
             }
             memoryArenaRewindToMarker(search->arena, attemptMarker);
             return DISC_CONTENT_PENDING;
