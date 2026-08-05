@@ -29,9 +29,17 @@ let frameCostMilliseconds = 0;
 const reportedGraphicsKibibytes = 32 * 1024;
 const shaderCompileMilliseconds = 50;
 
+// Kept as well as printed, so a line the engine is supposed to emit can be
+// asserted on rather than looked for by eye.
+const loggedMessages = [];
+
 const imports = {
     victoriaPlatform: {
-        logMessage: (pointer, length) => console.log(`      engine: ${decodeUTF8(pointer, length)}`),
+        logMessage: (pointer, length) => {
+            const text = decodeUTF8(pointer, length);
+            loggedMessages.push(text);
+            console.log(`      engine: ${text}`);
+        },
         getMilliseconds: () => simulatedMilliseconds
     },
     victoriaRender: {
@@ -46,6 +54,22 @@ const imports = {
         },
         setClearColor: (red, green, blue) => calls.push({ name: "setClearColor", red, green, blue }),
         setTriangleTint: (tint) => calls.push({ name: "setTriangleTint", tint }),
+        // Mesh drawing. Nothing in this file gives the engine a disc, so these
+        // stand ready and stay unused — which is itself worth asserting, since
+        // a build with no disc must still draw its triangle.
+        createMeshPipeline: (pointer, length) => {
+            calls.push({ name: "createMeshPipeline", shaderSource: decodeUTF8(pointer, length) });
+            return 1;
+        },
+        uploadMesh: (vertexPointer, vertexCount, indexPointer, indexCount) => {
+            calls.push({ name: "uploadMesh", vertexCount, indexCount });
+            return 1;
+        },
+        uploadTexture: (pixelPointer, width, height) => {
+            calls.push({ name: "uploadTexture", width, height });
+            return 1;
+        },
+        setMeshUniforms: () => calls.push({ name: "setMeshUniforms" }),
         submitFrame: () => {
             calls.push({ name: "submitFrame" });
             // Advancing the clock mid-frame is what the engine measures: it
@@ -131,6 +155,15 @@ const tints = calls.filter((call) => call.name === "setTriangleTint").map((call)
 check("tint stays inside its intended range", tints.every((tint) => tint >= 0.29 && tint <= 1.01));
 check("tint actually animates", new Set(tints.map((tint) => tint.toFixed(4))).size > 1);
 
+// A build that was never given a disc must still draw. The mesh imports exist
+// from the moment the module is linked, and a backend that reached for them
+// unprompted would take the page from "no disc yet" to a blank canvas.
+check("draws the triangle when no disc was given",
+      calls.some((call) => call.name === "setTriangleTint"));
+check("and does not build a mesh pipeline it was never given a mesh for",
+      !calls.some((call) => call.name === "createMeshPipeline"));
+check("nor uploads one", !calls.some((call) => call.name === "uploadMesh"));
+
 const lastMicroseconds = instance.exports.victoriaWebGetFrameMicroseconds();
 const worstMicroseconds = instance.exports.victoriaWebGetWorstFrameMicroseconds();
 const averageMicroseconds = instance.exports.victoriaWebGetAverageFrameMicroseconds();
@@ -198,6 +231,10 @@ const refusalImports = {
         createTrianglePipeline: () => { refusalCalls.push({ name: "createTrianglePipeline" }); return 1; },
         setClearColor: () => {},
         setTriangleTint: () => {},
+        createMeshPipeline: () => 1,
+        uploadMesh: () => 1,
+        uploadTexture: () => 1,
+        setMeshUniforms: () => {},
         submitFrame: () => {},
         queryGraphicsMemoryKibibytes: () => reportedGraphicsKibibytes,
         warmUpPipeline: () => refusalCalls.push({ name: "warmUpPipeline" })
@@ -213,6 +250,187 @@ check("nothing is charged after a refusal",
 check("no pipeline is built once the ceiling has refused",
       !refusalCalls.some((call) => call.name === "createTrianglePipeline"));
 
+
+// ---------------------------------------------------------------------------
+// Reading a disc the way the page does.
+//
+// The browser cannot answer a read on the spot, so the module asks for a range,
+// says PENDING, and waits to be asked again. That protocol is the whole reason
+// the engine's reads have a PENDING at all, and it is not exercised by anything
+// else here — a build with no disc never reaches it.
+//
+// Driving it from Node rather than a browser is deliberate. What is being
+// tested is the handshake, not WebGPU, and a headless run can assert on every
+// step of it.
+// ---------------------------------------------------------------------------
+calls.length = 0;
+{
+    const image = readFileSync("testAssets/discs/testDisc.iso");
+    const opened = instance.exports.victoriaWebOpenDisc(image.length);
+    let status = 0;
+    let steps = 0;
+    let rangesFetched = 0;
+    let bytesFetched = 0;
+
+    check("opens a disc", opened === 1);
+
+    for (steps = 0; steps < 200000; steps += 1) {
+        status = instance.exports.victoriaWebStepDiscLoad();
+        if (status !== 1) {
+            break;
+        }
+        const length = instance.exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = instance.exports.victoriaWebGetWantedOffset();
+            const pointer = instance.exports.victoriaWebGetDeliveryPointer();
+            new Uint8Array(instance.exports.memory.buffer, pointer, length)
+                .set(image.subarray(offset, offset + length));
+            instance.exports.victoriaWebDeliver();
+            rangesFetched += 1;
+            bytesFetched += length;
+        }
+    }
+
+    check("reaches a drawable state", status === 2);
+    check("asked the page for ranges rather than the image", rangesFetched > 0);
+    // Ranges, not the whole image — but no longer less than the image, and the
+    // reason is worth stating rather than papering over with a bigger number.
+    //
+    // This fixture takes the worst case of two searches every run, because
+    // every model in it is rigid:
+    //
+    //   - the content walk reads every package looking for one with bone
+    //     assignments, finds none, and goes back for the first — reading it
+    //     twice;
+    //   - the skinned-geometry survey then indexes the disc again and opens
+    //     every container it finds, to answer where skinned meshes live.
+    //
+    // A disc with a skinned mesh in it pays neither in full. Three passes is
+    // the ceiling those two together can reach here; the property worth holding
+    // is that it is a small multiple at all, since a search that re-read the
+    // image per package would leave any fixed number behind immediately.
+    check(`reads a bounded amount (${bytesFetched} of ${image.length} bytes)`,
+          bytesFetched < image.length * 3);
+    check("built a mesh pipeline once it had geometry",
+          calls.some((call) => call.name === "createMeshPipeline"));
+
+    const upload = calls.find((call) => call.name === "uploadMesh");
+    check("uploaded the teapot", Boolean(upload));
+    if (upload) {
+        // The same numbers the native geometry test asserts, arrived at through
+        // wasm, the disc reader and the PENDING handshake.
+        check("with 13248 vertices", upload.vertexCount === 13248);
+        check("and 18960 indices", upload.indexCount === 18960);
+    }
+    // What the disc holds besides packages, and what those files actually are.
+    // The fixture carries a file named like an installer cabinet that is not
+    // one, so the probe has something to be wrong about: it reports what the
+    // bytes say, not what the extension claims.
+    check("counts packages against everything else",
+          loggedMessages.some((text) =>
+              text.includes("5 package(s)") && text.includes("3 other file(s)")));
+    check("names the largest non-package file first",
+          loggedMessages.some((text) => text.includes("KiB  TSData.exe")));
+
+    // The fixture's TSData.exe carries the first sixty-four bytes of an Inno
+    // Setup installer, copied from the shape a real repack has: a Delphi MZP
+    // stub, and the loader mark at 0x30 that says what the program really is.
+    // Reading only the front would call this "a Windows program", which is what
+    // every installer on every disc looks like and tells nobody anything.
+    const installer = loggedMessages.find((text) => text.includes("TSData.exe —"));
+    check("probes the installer for a signature", Boolean(installer));
+    if (installer) {
+        check("naming Delphi's stub, which is what marks it out",
+              installer.includes("Delphi-built"));
+        // Printed whether or not they mean anything to the reader: on the disc
+        // this grew for, 0x30 being zeros is what said the table was elsewhere.
+        check("and printing the front and 0x30 both",
+              installer.includes("4D 5A 50 00") && installer.includes("and at 0x30"));
+    }
+
+    // Having named it, the load goes on to open it: the table's own checksum
+    // establishes the field layout, and its last two offsets are what anything
+    // reading further would need. Nothing is decompressed — this is navigation,
+    // and a reader that claimed to open an archive before it could find its way
+    // around one would be claiming nothing.
+    // Not at 0x30 — the real installer keeps zeros there, so the fixture does
+    // too, and the table has to be found by looking for it.
+    check("says the table is not where the old loaders keep it",
+          loggedMessages.some((text) => text.includes("keeps no table at 0x30")));
+    // The real file's front is a program, and a program says where it stops.
+    // Searching from there rather than from zero is the difference between
+    // looking in the payload and looking in the executable.
+    check("reads the program's own section table to find where it ends",
+          loggedMessages.some((text) =>
+              text.includes("1 section(s) ending at 0x00000200") &&
+              text.includes("appended past it")));
+    check("and names what is appended there",
+          loggedMessages.some((text) =>
+              text.includes("what is appended starts 52 61 72 21") &&
+              text.includes("a RAR archive")));
+
+    // What everything downstream turns on. A stored entry is a range of the
+    // file and can go straight to the package reader; a packed one needs an
+    // unpacker that does not exist here. The fixture holds one of each, so a
+    // reader that called them all one thing would fail on the other.
+    check("names a stored entry, its size and where its data begins",
+          loggedMessages.some((text) =>
+              text.includes("stored 1 KiB at 0x00000258") &&
+              text.includes("mounted.package")));
+    check("and a packed one by its unpacked size",
+          loggedMessages.some((text) =>
+              text.includes("packed 32 bytes at 0x000008EB") &&
+              text.includes("Sims02.package")));
+    check("counting both kinds separately",
+          loggedMessages.some((text) =>
+              text.includes("walked 2 archive entries") &&
+              text.includes("1 stored (1 KiB), 1 packed")));
+    // The stored entry is presented to the catalogue as a file of its own, so
+    // everything downstream reads it without learning there is an archive.
+    // Only the package is mounted: the archive holds the whole installed game,
+    // most of which this engine has no reader for.
+    check("mounting the stored package and not the packed one",
+          loggedMessages.some((text) => text.includes("1 package(s) mounted")));
+    // The archive counts from the start of its containing file and the
+    // catalogue counts from the start of the store. That addition is the one
+    // thing that would silently point every mounted package at the wrong place,
+    // so the fixture puts a real package inside and the engine reads it back.
+    check("and the mounted package really is a package where it says it is",
+          loggedMessages.some((text) =>
+              text.includes("the first mounted package really is one")));
+
+    const probe = loggedMessages.find((text) => text.includes("data1.cab —"));
+    check("probes a file it cannot name", Boolean(probe));
+    if (probe) {
+        // "placehol", which is neither a cabinet nor anything else known.
+        check("reporting the bytes it read", probe.includes("70 6C 61 63 65 68 6F 6C"));
+        check("and refusing to name a format it does not recognise",
+              probe.includes("unrecognised"));
+    }
+
+    // A load that needs two reads and gives back the first one on the second's
+    // pend will fetch them alternately for ever, and what that looks like from
+    // outside is one log line repeated thousands of times. Nothing on this
+    // fixture says anything twice, so a repeat here means a step machine that
+    // stopped advancing.
+    {
+        const seen = new Map();
+        let worst = 0;
+        let worstText = "";
+
+        for (const text of loggedMessages) {
+            const count = (seen.get(text) ?? 0) + 1;
+            seen.set(text, count);
+            if (count > worst) {
+                worst = count;
+                worstText = text;
+            }
+        }
+        check(`no message repeats (worst says "${worstText.slice(0, 40)}" ${worst}x)`, worst <= 2);
+    }
+
+    console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);
+}
 
 if (failureCount > 0) {
     console.error(`\n${failureCount} check(s) failed`);

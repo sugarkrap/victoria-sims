@@ -392,6 +392,9 @@ platform/        one directory per platform backend
 render/          one directory per graphics backend
   openGLES2/
   webGPU/
+utils/           small shared pieces that belong to no one layer
+  strings.c      the string handling the engine has instead of a C library
+  assert.c       reporting for the verifiers; never linked into the engine
 scripts/         repository hygiene checks, run by make and by CI
 tests/           test programs for the engine
 tools/           one directory per standalone tool, relaxed rules
@@ -402,6 +405,14 @@ legacy/          upstream C# and Unity shaders, reference only, never built
 `engine/` must stay free of platform and graphics calls. Anything touching a
 window, a device, or the clock belongs in `platform/` or `render/` behind
 `platformInterface.h` or `renderInterface.h`.
+
+`utils/` is for a helper that more than one layer needs and that belongs to
+none of them — a lowercase-a-character, a check that prints and counts. It is
+held to the same rules as `engine/` when it is linked into the engine, which is
+why `strings.c` is in the allocation check and `assert.c` is not: `assert.c`
+prints, so it exists only for the verifiers. It is not a drawer for anything
+that does not have an obvious home; a thing used in one place stays where it is
+used.
 
 `legacy/` is a reading room. It is not compiled, not linted, and not held to
 the conventions above. Port from it deliberately; do not wire it into the

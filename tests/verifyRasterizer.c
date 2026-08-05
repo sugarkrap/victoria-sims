@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 
+#include "utils/assert.h"
 #include "render/software/rasterizer.h"
 
 #define SURFACE_WIDTH 320U
@@ -25,16 +26,7 @@ static const RasterizerVertex triangleVertices[3] = {
     { 0.6f, -0.5f, 1.0f, 0.9f, 0.4f }
 };
 
-static int failureCount = 0;
-
-static void check(const char *description, int condition)
-{
-    printf("%s  %s\n", condition ? "ok  " : "FAIL", description);
-    if (!condition)
-    {
-        failureCount += 1;
-    }
-}
+static Integer32 failureCount = 0;
 
 int main(int argumentCount, char **argumentValues)
 {
@@ -51,7 +43,7 @@ int main(int argumentCount, char **argumentValues)
     printf("span implementation: %s\n", rasterizerGetSpanImplementationName());
 
     rasterizerClear(&surface, CLEAR_COLOR);
-    check("clear reaches the last pixel",
+    checkThat(&failureCount, "clear reaches the last pixel",
           surfacePixels[(SURFACE_WIDTH * SURFACE_HEIGHT) - 1U] == CLEAR_COLOR);
 
     rasterizerDrawTriangle(&surface, triangleVertices, 1.0f);
@@ -73,15 +65,15 @@ int main(int argumentCount, char **argumentValues)
     /* The triangle spans 60%% of the width and 55%% of the height, so a little
        over a sixth of the surface. Loose bounds: this is here to catch "drew
        nothing" and "filled everything", not to pin down exact coverage. */
-    check("triangle covered a plausible area",
+    checkThat(&failureCount, "triangle covered a plausible area",
           coveredPixels > (SURFACE_WIDTH * SURFACE_HEIGHT) / 8U &&
           coveredPixels < (SURFACE_WIDTH * SURFACE_HEIGHT) / 2U);
 
     /* Corners are outside the triangle, the centre is inside it. */
-    check("top-left corner untouched", surfacePixels[0] == CLEAR_COLOR);
-    check("bottom-right corner untouched",
+    checkThat(&failureCount, "top-left corner untouched", surfacePixels[0] == CLEAR_COLOR);
+    checkThat(&failureCount, "bottom-right corner untouched",
           surfacePixels[(SURFACE_WIDTH * SURFACE_HEIGHT) - 1U] == CLEAR_COLOR);
-    check("centre is inside the triangle",
+    checkThat(&failureCount, "centre is inside the triangle",
           surfacePixels[((SURFACE_HEIGHT / 2U) * SURFACE_WIDTH) + (SURFACE_WIDTH / 2U)] != CLEAR_COLOR);
 
     /* Vertex colours are distinct, so a correctly interpolated triangle has
@@ -100,7 +92,7 @@ int main(int argumentCount, char **argumentValues)
             }
         }
         printf("distinct shades across one scanline: %u\n", distinctSample);
-        check("colour is interpolated, not flat", distinctSample > 8U);
+        checkThat(&failureCount, "colour is interpolated, not flat", distinctSample > 8U);
     }
 
     if (argumentCount > 1)
@@ -122,11 +114,5 @@ int main(int argumentCount, char **argumentValues)
         }
     }
 
-    if (failureCount > 0)
-    {
-        printf("\n%d check(s) failed\n", failureCount);
-        return 1;
-    }
-    printf("\nall rasterizer checks passed\n");
-    return 0;
+    return checkSummarize(failureCount, "rasterizer");
 }

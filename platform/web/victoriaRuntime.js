@@ -10,6 +10,15 @@ const runtimeState = {
     canvasFormat: null,
     pipeline: null,
     uniformBuffer: null,
+    meshPipeline: null,
+    meshUniformBuffer: null,
+    meshBindGroup: null,
+    meshVertexBuffer: null,
+    meshIndexBuffer: null,
+    meshTexture: null,
+    meshSampler: null,
+    meshIndexCount: 0,
+    depthTexture: null,
     bindGroup: null,
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
     startTimestamp: 0,
@@ -21,6 +30,72 @@ const runtimeState = {
 // work without telling anyone anything new.
 const OVERLAY_INTERVAL_MILLISECONDS = 250;
 const SPARKLINE_SAMPLE_COUNT = 120;
+
+// Creates the device texture and copies the pixels in. WebGPU wants each row of
+// a write to start on a 256 byte boundary, so a row that is not a multiple of
+// that has to be padded — which is why this stages rather than writing the
+// module's memory straight through.
+function setMeshTexture(pixels, width, height) {
+    const bytesPerRow = (width * 4 + 255) & ~255;
+    const staging = new Uint8Array(bytesPerRow * height);
+
+    for (let row = 0; row < height; row += 1) {
+        staging.set(pixels.subarray(row * width * 4, (row + 1) * width * 4), row * bytesPerRow);
+    }
+
+    runtimeState.meshTexture = runtimeState.device.createTexture({
+        size: { width, height },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+    runtimeState.device.queue.writeTexture(
+        { texture: runtimeState.meshTexture }, staging,
+        { bytesPerRow, rowsPerImage: height }, { width, height });
+}
+
+// A texture binds to the layout the mesh's pipeline defines, so there is
+// nothing to bind it to until a mesh has been uploaded. That ordering held by
+// accident for as long as no texture was ever found; the first disc that
+// yielded one arrived here with a null pipeline. The engine now sets the mesh
+// first, and this refuses rather than throwing if it ever does not.
+function rebuildMeshBindGroup() {
+    if (!runtimeState.meshPipeline || !runtimeState.meshTexture) {
+        return false;
+    }
+    runtimeState.meshBindGroup = runtimeState.device.createBindGroup({
+        layout: runtimeState.meshPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } },
+            { binding: 1, resource: runtimeState.meshSampler },
+            { binding: 2, resource: runtimeState.meshTexture.createView() }
+        ]
+    });
+    return true;
+}
+
+// The depth attachment has to match the canvas, and the canvas resizes with
+// the window. Kept until the size changes rather than made every frame, since
+// allocating a full screen texture per frame is exactly the sort of thing that
+// looks fine at sixty frames a second on a desktop and is not.
+function ensureDepthTexture() {
+    const width = runtimeState.canvas.width;
+    const height = runtimeState.canvas.height;
+
+    if (runtimeState.depthTexture &&
+        runtimeState.depthTexture.width === width &&
+        runtimeState.depthTexture.height === height) {
+        return runtimeState.depthTexture;
+    }
+    if (runtimeState.depthTexture) {
+        runtimeState.depthTexture.destroy();
+    }
+    runtimeState.depthTexture = runtimeState.device.createTexture({
+        size: { width, height },
+        format: "depth24plus",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
+    return runtimeState.depthTexture;
+}
 
 function readUTF8(pointer, length) {
     const bytes = new Uint8Array(runtimeState.memory.buffer, pointer, length);
@@ -97,19 +172,155 @@ const importObject = {
                 runtimeState.uniformBuffer, 0, new Float32Array([tint, 0, 0, 0]));
         },
 
+        // Builds the pipeline a mesh is drawn with. Separate from the triangle's
+        // because it takes vertex buffers and tests depth, and because the
+        // triangle has to keep working on a build with no disc.
+        createMeshPipeline(shaderPointer, shaderLength) {
+            const shaderSource = readUTF8(shaderPointer, shaderLength);
+            const shaderModule = runtimeState.device.createShaderModule({ code: shaderSource });
+
+            runtimeState.meshPipeline = runtimeState.device.createRenderPipeline({
+                layout: "auto",
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: "vertexMain",
+                    buffers: [{
+                        // Position, normal, texture coordinate: 3 + 3 + 2 floats.
+                        arrayStride: 32,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: "float32x3" },
+                            { shaderLocation: 1, offset: 12, format: "float32x3" },
+                            { shaderLocation: 2, offset: 24, format: "float32x2" }
+                        ]
+                    }]
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: "fragmentMain",
+                    targets: [{ format: runtimeState.canvasFormat }]
+                },
+                primitive: { topology: "triangle-list" },
+                depthStencil: {
+                    format: "depth24plus",
+                    depthWriteEnabled: true,
+                    depthCompare: "less-equal"
+                }
+            });
+
+            // Sixteen floats of matrix and four of light direction.
+            runtimeState.meshUniformBuffer = runtimeState.device.createBuffer({
+                size: 80,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+
+            runtimeState.meshSampler = runtimeState.device.createSampler({
+                magFilter: "linear",
+                minFilter: "linear",
+                addressModeU: "repeat",
+                addressModeV: "repeat"
+            });
+            // A single white pixel, so the bind group is complete before any
+            // texture arrives and a mesh with no image is lit exactly as it was
+            // before textures existed. Without it the shader could not sample
+            // unconditionally, and the pipeline would need two variants.
+            if (!runtimeState.meshTexture) {
+                setMeshTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+            }
+            rebuildMeshBindGroup();
+            return 1;
+        },
+
+        // Replaces the image the mesh is painted with. The bind group holds the
+        // old texture by reference, so it has to be built again — cheap, and
+        // done here rather than per frame.
+        uploadTexture(pixelPointer, width, height) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const byteCount = width * height * 4;
+
+            if (byteCount <= 0 || pixelPointer + byteCount > memory.byteLength) {
+                return 0;
+            }
+            setMeshTexture(new Uint8Array(memory, pixelPointer, byteCount), width, height);
+            return rebuildMeshBindGroup() ? 1 : 0;
+        },
+
+        // Copies the mesh out of linear memory into buffers the device owns.
+        // The copy happens here, synchronously, which is what lets the module
+        // reuse its staging space the moment this returns.
+        uploadMesh(vertexPointer, vertexCount, indexPointer, indexCount) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const vertexBytes = vertexCount * 32;
+            // Both the buffer and the write have to be a multiple of four bytes,
+            // and an odd number of sixteen-bit indices is neither. A mesh of 737
+            // triangles is 4422 bytes of indices; the teapot's 6320 happen to
+            // land on a multiple of four, which is why rounding only the buffer
+            // size looked correct for as long as the teapot was the only model.
+            const indexBytes = (indexCount * 2 + 3) & ~3;
+
+            runtimeState.meshVertexBuffer = runtimeState.device.createBuffer({
+                size: vertexBytes,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshVertexBuffer, 0,
+                new Uint8Array(memory, vertexPointer, vertexBytes));
+
+            // Copied into a padded array of its own rather than read long out of
+            // the module's memory: the two extra bytes are somebody else's, and
+            // reading them would work right up until the mesh sat at the end of
+            // the arena.
+            const indexStaging = new Uint8Array(indexBytes);
+            indexStaging.set(new Uint8Array(memory, indexPointer, indexCount * 2));
+
+            runtimeState.meshIndexBuffer = runtimeState.device.createBuffer({
+                size: indexBytes,
+                usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeBuffer(runtimeState.meshIndexBuffer, 0, indexStaging);
+
+            runtimeState.meshIndexCount = indexCount;
+            return 1;
+        },
+
+        setMeshUniforms(valuePointer) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshUniformBuffer, 0, new Uint8Array(memory, valuePointer, 80));
+        },
+
         submitFrame() {
+            const drawingMesh = runtimeState.meshIndexCount > 0;
             const encoder = runtimeState.device.createCommandEncoder();
-            const pass = encoder.beginRenderPass({
+            const descriptor = {
                 colorAttachments: [{
                     view: runtimeState.context.getCurrentTexture().createView(),
                     clearValue: runtimeState.clearColor,
                     loadOp: "clear",
                     storeOp: "store"
                 }]
-            });
-            pass.setPipeline(runtimeState.pipeline);
-            pass.setBindGroup(0, runtimeState.bindGroup);
-            pass.draw(3, 1, 0, 0);
+            };
+
+            if (drawingMesh) {
+                descriptor.depthStencilAttachment = {
+                    view: ensureDepthTexture().createView(),
+                    depthClearValue: 1,
+                    depthLoadOp: "clear",
+                    depthStoreOp: "store"
+                };
+            }
+
+            const pass = encoder.beginRenderPass(descriptor);
+            if (drawingMesh) {
+                pass.setPipeline(runtimeState.meshPipeline);
+                pass.setBindGroup(0, runtimeState.meshBindGroup);
+                pass.setVertexBuffer(0, runtimeState.meshVertexBuffer);
+                pass.setIndexBuffer(runtimeState.meshIndexBuffer, "uint16");
+                pass.drawIndexed(runtimeState.meshIndexCount, 1, 0, 0, 0);
+            } else {
+                pass.setPipeline(runtimeState.pipeline);
+                pass.setBindGroup(0, runtimeState.bindGroup);
+                pass.draw(3, 1, 0, 0);
+            }
             pass.end();
             runtimeState.device.queue.submit([encoder.finish()]);
         },
@@ -310,3 +521,95 @@ async function start() {
 }
 
 start().catch((error) => reportStatus(`Startup failed: ${error.message}`, true));
+
+
+// Handing the engine a disc.
+//
+// The page owns the File and the event loop; the engine owns the formats. So
+// the page drives: open, then step, and whenever a step leaves a range wanted,
+// slice it out of the File, write it where the module asked, and step again.
+//
+// A File is a handle, not bytes — the browser reads ranges off disk on demand —
+// so a three gigabyte image costs the page nothing to hold. That is the same
+// property vic-extractor relies on to read a retail disc in a megabyte and a
+// half of wasm.
+const DISC_STATUS_WORKING = 1;
+const DISC_STATUS_READY = 2;
+const STEPS_BEFORE_YIELDING = 64;
+
+async function loadDisc(file) {
+    const exports = runtimeState.instance.exports;
+
+    if (!exports.victoriaWebOpenDisc(file.size)) {
+        reportDiscMessage(`could not start reading ${file.name}`);
+        return;
+    }
+    reportDiscMessage(`reading ${file.name}…`);
+
+    for (let step = 1; ; step += 1) {
+        const status = exports.victoriaWebStepDiscLoad();
+
+        if (status !== DISC_STATUS_WORKING) {
+            reportDiscMessage(status === DISC_STATUS_READY
+                ? `${file.name} loaded`
+                : `nothing on ${file.name} could be drawn — see the log`);
+            return;
+        }
+
+        const length = exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = exports.victoriaWebGetWantedOffset();
+            const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+            // Taken after the call that reports the pointer, since a growing
+            // linear memory detaches any view made before it.
+            new Uint8Array(exports.memory.buffer,
+                           exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
+            exports.victoriaWebDeliver();
+        } else if (step % STEPS_BEFORE_YIELDING === 0) {
+            // Walking a catalogue asks for nothing, and a few thousand of those
+            // in a row would hold the frame. Let the page breathe.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+    }
+}
+
+function reportDiscMessage(text) {
+    const element = document.getElementById("discStatus");
+    if (element) {
+        element.textContent = text;
+    }
+    console.log(`disc: ${text}`);
+}
+
+function connectDiscPicker() {
+    const input = document.getElementById("discInput");
+    const zone = document.getElementById("discZone");
+
+    if (input) {
+        input.addEventListener("change", (event) => {
+            if (event.target.files[0]) {
+                loadDisc(event.target.files[0]);
+            }
+        });
+    }
+    if (zone) {
+        zone.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            zone.classList.add("isHot");
+        });
+        zone.addEventListener("dragleave", () => zone.classList.remove("isHot"));
+        zone.addEventListener("drop", (event) => {
+            event.preventDefault();
+            zone.classList.remove("isHot");
+            if (event.dataTransfer.files[0]) {
+                loadDisc(event.dataTransfer.files[0]);
+            }
+        });
+    }
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", connectDiscPicker);
+} else {
+    connectDiscPicker();
+}

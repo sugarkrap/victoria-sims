@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 
+#include "utils/assert.h"
 #include "victoria/memoryArena.h"
 #include "victoria/packageReader.h"
 
@@ -22,16 +23,7 @@
 static Unsigned8 fileBuffer[FILE_BUFFER_CAPACITY];
 static Unsigned8 arenaStorage[ARENA_CAPACITY];
 
-static int failureCount = 0;
-
-static void check(const char *description, int condition)
-{
-    printf("%s  %s\n", condition ? "ok  " : "FAIL", description);
-    if (!condition)
-    {
-        failureCount += 1;
-    }
-}
+static Integer32 failureCount = 0;
 
 static MemorySize loadFile(const char *path)
 {
@@ -81,7 +73,7 @@ static void checkTypeCount(const Package *package, const char *typeName, Unsigne
     /* snprintf is available here because this is a host program, not engine
        code; the engine formats without it. */
     snprintf(description, sizeof(description), "holds %u %s (found %u)", expectedCount, typeName, actual);
-    check(description, actual == expectedCount);
+    checkThat(&failureCount, description, actual == expectedCount);
 }
 
 static void verifyTeapotModel(void)
@@ -95,8 +87,8 @@ static void verifyTeapotModel(void)
         return;
     }
 
-    check("reports DBPF 1.1", package.majorVersion == 1U && package.minorVersion == 1U);
-    check("finds four resources", package.resourceCount == 4U);
+    checkThat(&failureCount, "reports DBPF 1.1", package.majorVersion == 1U && package.minorVersion == 1U);
+    checkThat(&failureCount, "finds four resources", package.resourceCount == 4U);
 
     /* The chain the renderer has to walk, all four in one package. */
     checkTypeCount(&package, "CRES", (Unsigned32)PACKAGE_TYPE_CRES, 1U);
@@ -104,20 +96,20 @@ static void verifyTeapotModel(void)
     checkTypeCount(&package, "GMND", (Unsigned32)PACKAGE_TYPE_GMND, 1U);
     checkTypeCount(&package, "GMDC", (Unsigned32)PACKAGE_TYPE_GMDC, 1U);
 
-    check("has no compression directory",
+    checkThat(&failureCount, "has no compression directory",
           packageReaderHasCompressedResources(&package) == BOOLEAN_FALSE);
 
     {
         const PackageResource *geometry =
             packageReaderFindFirstOfType(&package, (Unsigned32)PACKAGE_TYPE_GMDC);
-        check("finds the geometry resource", geometry != NULL_POINTER);
+        checkThat(&failureCount, "finds the geometry resource", geometry != NULL_POINTER);
         if (geometry != NULL_POINTER)
         {
             /* The geometry is nearly the whole file; anything much smaller
                would mean the index was misread. */
-            check("geometry is the bulk of the package",
+            checkThat(&failureCount, "geometry is the bulk of the package",
                   geometry->sizeInBytes > 600000U && geometry->sizeInBytes < package.sizeInBytes);
-            check("geometry bytes are inside the file",
+            checkThat(&failureCount, "geometry bytes are inside the file",
                   packageReaderGetResourceBytes(&package, geometry) != NULL_POINTER);
         }
     }
@@ -142,8 +134,8 @@ static void verifyTeapotModel(void)
                 allInstancesDiffer = BOOLEAN_FALSE;
             }
         }
-        check("all resources share one group", allShareGroup == BOOLEAN_TRUE);
-        check("every resource has its own instance", allInstancesDiffer == BOOLEAN_TRUE);
+        checkThat(&failureCount, "all resources share one group", allShareGroup == BOOLEAN_TRUE);
+        checkThat(&failureCount, "every resource has its own instance", allInstancesDiffer == BOOLEAN_TRUE);
     }
 }
 
@@ -158,7 +150,7 @@ static void verifyTextures(void)
         return;
     }
 
-    check("finds five resources", package.resourceCount == 5U);
+    checkThat(&failureCount, "finds five resources", package.resourceCount == 5U);
     checkTypeCount(&package, "TXTR", (Unsigned32)PACKAGE_TYPE_TXTR, 4U);
     checkTypeCount(&package, "LIFO", (Unsigned32)PACKAGE_TYPE_LIFO, 1U);
 }
@@ -175,7 +167,7 @@ static void verifyMaterialDefinition(void)
         return;
     }
 
-    check("finds one resource", package.resourceCount == 1U);
+    checkThat(&failureCount, "finds one resource", package.resourceCount == 1U);
     checkTypeCount(&package, "TXMT", (Unsigned32)PACKAGE_TYPE_TXMT, 1U);
 }
 
@@ -190,7 +182,7 @@ static void verifyAnimation(void)
         return;
     }
 
-    check("finds three resources", package.resourceCount == 3U);
+    checkThat(&failureCount, "finds three resources", package.resourceCount == 3U);
     checkTypeCount(&package, "ANIM", (Unsigned32)PACKAGE_TYPE_ANIM, 3U);
 }
 
@@ -206,7 +198,7 @@ static void verifyRejections(void)
     printf("\n-- rejections --\n");
 
     memoryArenaInitialize(&arena, arenaStorage, ARENA_CAPACITY);
-    check("rejects a buffer too small to hold a header",
+    checkThat(&failureCount, "rejects a buffer too small to hold a header",
           packageReaderOpen(&package, scratch, 8UL, &arena) == PACKAGE_READ_TRUNCATED);
 
     for (index = 0U; index < sizeof(scratch); index += 1U)
@@ -214,7 +206,7 @@ static void verifyRejections(void)
         scratch[index] = 0U;
     }
     memoryArenaInitialize(&arena, arenaStorage, ARENA_CAPACITY);
-    check("rejects something that is not a package",
+    checkThat(&failureCount, "rejects something that is not a package",
           packageReaderOpen(&package, scratch, sizeof(scratch), &arena) == PACKAGE_READ_NOT_A_PACKAGE);
 
     /* A valid header claiming an index beyond the end of the file. */
@@ -227,7 +219,7 @@ static void verifyRejections(void)
     scratch[0x2C] = 0xFFU;   /* index size far past the end */
     scratch[0x2D] = 0xFFU;
     memoryArenaInitialize(&arena, arenaStorage, ARENA_CAPACITY);
-    check("rejects an index that runs past the end of the file",
+    checkThat(&failureCount, "rejects an index that runs past the end of the file",
           packageReaderOpen(&package, scratch, sizeof(scratch), &arena) == PACKAGE_READ_TRUNCATED);
 
     /* An arena with no room left must fail cleanly rather than overrun. */
@@ -237,7 +229,7 @@ static void verifyRejections(void)
         static Unsigned8 tinyStorage[8];
 
         memoryArenaInitialize(&tinyArena, tinyStorage, sizeof(tinyStorage));
-        check("refuses when the arena cannot hold the index",
+        checkThat(&failureCount, "refuses when the arena cannot hold the index",
               packageReaderOpen(&package, fileBuffer, sizeInBytes, &tinyArena) ==
                   PACKAGE_READ_OUT_OF_ARENA);
     }
@@ -253,11 +245,5 @@ int main(void)
     verifyAnimation();
     verifyRejections();
 
-    if (failureCount > 0)
-    {
-        printf("\n%d check(s) failed\n", failureCount);
-        return 1;
-    }
-    printf("\nall package reader checks passed\n");
-    return 0;
+    return checkSummarize(failureCount, "package reader");
 }

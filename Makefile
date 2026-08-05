@@ -34,7 +34,20 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/profiler.c \
                   engine/source/graphicsMemoryBudget.c \
                   engine/source/packageReader.c \
-                  engine/source/engineCore.c
+                  engine/source/resourceCollection.c engine/source/geometryReader.c \
+                  engine/source/scenegraph.c engine/source/resourceNode.c \
+                  engine/source/textureReader.c engine/source/textureDecode.c \
+                  engine/source/material.c \
+                  utils/resourceHash.c engine/source/resourceIndex.c \
+                  engine/source/compression.c \
+                  engine/source/discReader.c \
+                  engine/source/virtualFileSystem.c \
+                  engine/source/discContent.c \
+                  engine/source/installerReader.c \
+                  engine/source/programReader.c \
+                  engine/source/archiveReader.c \
+                  engine/source/engineCore.c \
+                  utils/strings.c utils/checksum.c
 
 # Which renderer the native build uses. openGLES2 needs a driver with
 # programmable shaders; software needs nothing but a framebuffer, which is the
@@ -50,18 +63,18 @@ LINUX_RENDER_SOURCES := render/software/renderSoftware.c \
                         platform/linux/linuxPresenterSoftware.c
 LINUX_LIBRARIES := -lX11
 else
-LINUX_RENDER_SOURCES := render/openGLES2/renderOpenGLES2.c \
+LINUX_RENDER_SOURCES := render/openGLES2/renderOpenGLES2.c render/meshCamera.c \
                         platform/linux/linuxPresenterEGL.c
 LINUX_LIBRARIES := -lEGL -lGLESv2 -lX11
 endif
 
 LINUX_SOURCES := $(ENGINE_SOURCES) \
                  $(LINUX_RENDER_SOURCES) \
-                 platform/linux/linuxEntryPoint.c
+                 platform/linux/linuxDiscStore.c platform/linux/linuxEntryPoint.c
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
-               render/webGPU/renderWebGPU.c \
-               platform/web/webEntryPoint.c
+               render/webGPU/renderWebGPU.c render/meshCamera.c \
+               platform/web/webDiscStore.c platform/web/webEntryPoint.c
 
 LINUX_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/linux
 WEB_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/web
@@ -90,6 +103,12 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
                -Wl,--export=victoriaWebGetFrameIntervalMicroseconds \
                -Wl,--export=victoriaWebGetGraphicsMemoryLimitBytes \
+               -Wl,--export=victoriaWebOpenDisc \
+               -Wl,--export=victoriaWebStepDiscLoad \
+               -Wl,--export=victoriaWebGetWantedOffset \
+               -Wl,--export=victoriaWebGetWantedLength \
+               -Wl,--export=victoriaWebGetDeliveryPointer \
+               -Wl,--export=victoriaWebDeliver \
                -Wl,--export=victoriaWebGetGraphicsMemoryUsedBytes
 
 WEB_FLAGS := --target=wasm32 -ffreestanding -nostdlib -fno-builtin \
@@ -205,20 +224,149 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 
 RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
+DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
+GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
+MESH_CAMERA_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyMeshCamera
+COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
+STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
+SCENEGRAPH_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyScenegraph
+RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
+TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
+RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
+RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
+INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
+PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
+ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 
-verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER)
+verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
+		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
+		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
+		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER) \
+		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
+	@$(DISC_READER_VERIFIER)
+	@$(GEOMETRY_READER_VERIFIER)
+	@$(MESH_CAMERA_VERIFIER)
+	@$(COMPRESSION_VERIFIER)
+	@$(STRINGS_VERIFIER)
+	@$(SCENEGRAPH_VERIFIER)
+	@$(RESOURCE_NODE_VERIFIER)
+	@$(TEXTURE_VERIFIER)
+	@$(RESOURCE_INDEX_VERIFIER)
+	@$(RESOURCE_COLLECTION_VERIFIER)
+	@$(INSTALLER_VERIFIER)
+	@$(PROGRAM_VERIFIER)
+	@$(ARCHIVE_VERIFIER)
 
-$(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c engine/source/memoryArena.c
+VERIFIER_SUPPORT := utils/assert.c
+
+$(ARCHIVE_VERIFIER): tests/verifyArchive.c engine/source/archiveReader.c utils/strings.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyArchive.c engine/source/archiveReader.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(PROGRAM_VERIFIER): tests/verifyProgram.c engine/source/programReader.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyProgram.c engine/source/programReader.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(INSTALLER_VERIFIER): tests/verifyInstaller.c engine/source/installerReader.c \
+		utils/checksum.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyInstaller.c engine/source/installerReader.c \
+		utils/checksum.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_COLLECTION_VERIFIER): tests/verifyResourceCollection.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCollection.c \
+		engine/source/resourceCollection.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_INDEX_VERIFIER): tests/verifyResourceIndex.c engine/source/resourceIndex.c \
+		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceIndex.c engine/source/resourceIndex.c \
+		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT) -o $@
+
+$(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
+		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyTexture.c engine/source/textureReader.c \
+		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_NODE_VERIFIER): tests/verifyResourceNode.c engine/source/resourceNode.c \
+		engine/source/resourceCollection.c engine/source/compression.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceNode.c engine/source/resourceNode.c \
+		engine/source/resourceCollection.c engine/source/compression.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(SCENEGRAPH_VERIFIER): tests/verifyScenegraph.c engine/source/scenegraph.c \
+		engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/compression.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyScenegraph.c engine/source/scenegraph.c \
+		engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/compression.c engine/source/packageReader.c \
+		engine/source/memoryArena.c utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT) -o $@
+
+$(STRINGS_VERIFIER): tests/verifyStrings.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyStrings.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(COMPRESSION_VERIFIER): tests/verifyCompression.c engine/source/compression.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyCompression.c engine/source/compression.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(MESH_CAMERA_VERIFIER): tests/verifyMeshCamera.c render/meshCamera.c \
+		engine/source/freestandingRuntime.c engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyMeshCamera.c render/meshCamera.c \
+		engine/source/freestandingRuntime.c engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(GEOMETRY_READER_VERIFIER): tests/verifyGeometryReader.c engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGeometryReader.c engine/source/resourceCollection.c engine/source/geometryReader.c \
+		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(DISC_READER_VERIFIER): tests/verifyDiscReader.c engine/source/discReader.c \
+		engine/source/virtualFileSystem.c engine/source/packageReader.c \
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c \
+		utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscReader.c engine/source/discReader.c \
+		engine/source/virtualFileSystem.c engine/source/packageReader.c \
+		engine/source/memoryArena.c engine/source/freestandingRuntime.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageReader.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
-		engine/source/memoryArena.c -o $@
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
 
-$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c render/software/rasterizerNEON.c
+$(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
+		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyRasterizer.c render/software/rasterizer.c \
-		render/software/rasterizerNEON.c -o $@
+		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT) -o $@
 
 check:
 	@scripts/checkNoDynamicAllocation.sh
