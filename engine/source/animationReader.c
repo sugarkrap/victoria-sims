@@ -283,27 +283,97 @@ Real32 animationComponentSample(const AnimationComponent *component, Real32 tick
         {
             return after->value;
         }
-        /* Straight lines, on every curve type, until the tangents' units are
-         * established.
+        /* Straight lines, on every curve type. The tangents are read, kept,
+         * and deliberately not followed.
          *
-         * They were followed as a Hermite, with each slope taken as value per
-         * tick and multiplied by a span in ticks. On a real animation that put
-         * the Sim in a different wild position on every frame between
-         * keyframes: it was right at each keyframe and enormous in between,
-         * which is the signature of a scale error rather than a shape error.
-         * openTS2 converts keyframe times to seconds and leaves its tangents
-         * unscaled, so per-second is the likely reading — and 800 ticks to the
-         * second is about the size of the overshoot.
+         * Their unit is settled: animationMeasureTangentScale totals what each
+         * slope accounts for against the change it spans, and on two real
+         * animations of six hundred and nine hundred intervals it came back 594
+         * and 784 — against 1 if they were per tick and 800 if per second. They
+         * are per second.
          *
-         * Not guessed at a second time. The rest pose cannot settle it either:
-         * it is one keyframe with nothing to interpolate, so it passes whatever
-         * happens here, which is exactly why this shipped wrong. A line is
-         * exact at every keyframe and close between them; a curve of unknown
-         * scale is wrong everywhere between. The tangents are still read and
-         * kept, waiting for something that can tell which unit they are in. */
+         * Knowing that was not enough. Applied as a Hermite with the span
+         * converted to seconds, a Sim that had been moving fluidly on straight
+         * lines flew about instead. So the unit was the wrong question, or not
+         * the only one: which slope belongs to which side of a keyframe is also
+         * in doubt, and the reference is no help — openTS2 reads a halfword it
+         * calls the out tangent, assigns it to TangentIn, and carries a "fix
+         * tangentin and tangentout values" note above the line.
+         *
+         * A line is exact at every keyframe and close between them. A curve
+         * built on a semantics nobody has established is wrong everywhere
+         * between, and this has now got that wrong twice. The measurement and
+         * this note are what the next attempt starts from; the thing it still
+         * needs is a way to tell a right curve from a wrong one that does not
+         * depend on watching a Sim and deciding it looks odd. */
         return before->value + ((after->value - before->value) * ((tick - before->tick) / span));
     }
     return component->keyframes[component->keyframeCount - 1U].value;
+}
+
+void animationMeasureTangentScale(const Animation *animation, Real32 *slopeToChange,
+                                  Unsigned32 *intervalsCompared)
+{
+    Real32 slopeTotal = 0.0f;
+    Real32 changeTotal = 0.0f;
+    Unsigned32 compared = 0U;
+    Unsigned32 index;
+
+    *slopeToChange = 0.0f;
+    *intervalsCompared = 0U;
+    if (animation->channels == NULL_POINTER)
+    {
+        return;
+    }
+
+    for (index = 0U; index < animation->channelCount; index++)
+    {
+        const AnimationChannel *channel = &animation->channels[index];
+        Unsigned32 part;
+
+        for (part = 0U; part < channel->componentCount; part++)
+        {
+            const AnimationComponent *component = &channel->components[part];
+            Unsigned32 which;
+
+            /* A baked curve stores no tangents, so it has nothing to say. */
+            if (component->curveType == ANIMATION_CURVE_BAKED || component->keyframes == NULL_POINTER)
+            {
+                continue;
+            }
+            for (which = 1U; which < component->keyframeCount; which++)
+            {
+                const AnimationKeyframe *before = &component->keyframes[which - 1U];
+                const AnimationKeyframe *after = &component->keyframes[which];
+                Real32 span = after->tick - before->tick;
+                Real32 slope = before->tangentOut;
+                Real32 change = after->value - before->value;
+
+                if (span <= 0.0f)
+                {
+                    continue;
+                }
+                if (slope < 0.0f)
+                {
+                    slope = -slope;
+                }
+                if (change < 0.0f)
+                {
+                    change = -change;
+                }
+                slopeTotal += slope * span;
+                changeTotal += change;
+                compared++;
+            }
+        }
+    }
+
+    if (compared == 0U || changeTotal <= 0.0f)
+    {
+        return;
+    }
+    *slopeToChange = slopeTotal / changeTotal;
+    *intervalsCompared = compared;
 }
 
 const AnimationChannel *animationFindChannel(const Animation *animation, const char *name)

@@ -2041,6 +2041,26 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         stringAppend(message, sizeof(message), (posedAnimation.skeletonTag[0] != '\0')
                                                    ? posedAnimation.skeletonTag
                                                    : "a skeleton it does not name");
+        {
+            /* What unit its tangents are in, measured off the animation in
+               hand. The curve was followed once on the assumption of per tick
+               and threw the Sim about; this is the number that says whether
+               that was the shape or the scale. */
+            Real32 slopeToChange;
+            Unsigned32 intervals;
+
+            animationMeasureTangentScale(&posedAnimation, &slopeToChange, &intervals);
+            if (intervals > 0U)
+            {
+                stringAppend(message, sizeof(message), "; its tangents account for ");
+                appendThousandths(message, sizeof(message), slopeToChange);
+                stringAppend(message, sizeof(message), " times the change they span over ");
+                appendCount(message, sizeof(message), intervals);
+                stringAppend(message, sizeof(message),
+                             " interval(s) — about one means per tick, about eight hundred "
+                             "means per second");
+            }
+        }
         if (posedAnimation.chainCount > 0U)
         {
             stringAppend(message, sizeof(message), ", and ");

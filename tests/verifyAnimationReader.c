@@ -274,7 +274,12 @@ static void buildAnimation(Builder *builder)
         {
             putUnsigned16(builder, 0x800AU); /* time 10, and a stolen set bit */
             putUnsigned16(builder, 1024U);   /* becomes 2049, just over 1.0 */
-            putUnsigned16(builder, 0U);      /* the tangent, stepped over */
+            /* A slope of exactly one, in the 5.10 the tangents always use.
+               Non-zero on purpose and only on this keyframe: with the same
+               slope at both ends the tangent terms cancel at the midpoint, and
+               a check that cannot tell the two scalings apart is how the wrong
+               one shipped. */
+            putUnsigned16(builder, 1024U);
 
             putUnsigned16(builder, 20U); /* time 20, nothing stolen */
             putUnsigned16(builder, 0U);
@@ -381,33 +386,40 @@ int main(void)
     printf("\n-- are the tangents read, and deliberately not followed --\n");
     {
         const AnimationComponent *curved = &animation.channels[1].components[0];
-        Real32 quarter;
-        Real32 straightLine;
 
-        /* The fixture writes 0 for every tangent, which is a real value and not
-           an absent one: a flat slope at both ends. */
         checkThat(&failureCount, "a continuous curve stores one tangent and means it both ways",
                   nearly(curved->keyframes[0].tangentIn, curved->keyframes[0].tangentOut));
+        checkThat(&failureCount, "and 5.10 puts a stored 1024 at a slope of one",
+                  nearly(curved->keyframes[0].tangentOut, 1.0f));
+        checkThat(&failureCount, "while the keyframe after it is flat",
+                  nearly(curved->keyframes[1].tangentOut, 0.0f));
 
-        /* Sampling is a straight line, on every curve type. Following the
-           tangents as a Hermite put a real Sim in a different wild position on
-           every frame between keyframes — right at each one and enormous
-           between — which is a scale error in the tangents' units rather than a
-           wrong shape. They are kept for whoever settles the units; nothing
-           reads them until then.
+        /* Sampling is a straight line, and the tangents are not followed.
+        
+           Their unit is known — the measurement below says per second — but
+           applying them as a Hermite at that scale threw a real Sim about,
+           where straight lines had it moving fluidly. Which slope belongs to
+           which side of a keyframe is still unestablished, and openTS2 carries
+           a "fix tangentin and tangentout values" note over the same code.
 
-           This check is what a rest pose cannot do: that animation is a single
-           keyframe with nothing to interpolate, so it passes whichever way this
-           goes, which is exactly how the curve shipped wrong. */
-        straightLine = curved->keyframes[0].value +
-                       ((curved->keyframes[1].value - curved->keyframes[0].value) * 0.25f);
-        quarter = animationComponentSample(curved, curved->keyframes[0].tick +
-                                                       ((curved->keyframes[1].tick -
-                                                         curved->keyframes[0].tick) *
-                                                        0.25f));
-        checkThat(&failureCount, "a quarter along is a quarter of the way, not along a curve",
-                  nearly(quarter, straightLine));
-        checkThat(&failureCount, "and every keyframe is hit exactly",
+           This check asserts the line explicitly and asserts that the curve is
+           NOT what comes out, so restoring it means deliberately changing a
+           check rather than quietly passing one. That distinction is the whole
+           reason the wrong curve shipped twice. */
+        {
+            Real32 straightLine = curved->keyframes[0].value +
+                                  ((curved->keyframes[1].value - curved->keyframes[0].value) * 0.5f);
+            Real32 spanInSeconds = (curved->keyframes[1].tick - curved->keyframes[0].tick) *
+                                   ANIMATION_TICK_SECONDS;
+            Real32 hermite = straightLine +
+                             (0.125f * spanInSeconds * curved->keyframes[0].tangentOut);
+
+            checkThat(&failureCount, "midway between keyframes is midway in value",
+                      nearly(animationComponentSample(curved, 15.0f), straightLine));
+            checkThat(&failureCount, "and not along the tangents, at any scale",
+                      !nearly(animationComponentSample(curved, 15.0f), hermite));
+        }
+        checkThat(&failureCount, "every keyframe is still hit exactly",
                   nearly(animationComponentSample(curved, curved->keyframes[0].tick),
                          curved->keyframes[0].value) &&
                       nearly(animationComponentSample(curved, curved->keyframes[1].tick),
@@ -416,9 +428,25 @@ int main(void)
         {
             const AnimationComponent *baked = &animation.channels[0].components[0];
 
-            checkThat(&failureCount, "a baked curve is a straight line too",
+            checkThat(&failureCount, "a baked curve carries no tangents and stays a straight line",
                       nearly(animationComponentSample(baked, 37.5f), 0.25f));
         }
+    }
+
+    printf("\n-- measuring what unit the tangents are in --\n");
+    {
+        /* The measurement that settled it on real animations, checked here
+           against numbers worked out by hand. This fixture's slopes really are
+           per tick, so it comes back near the interval count rather than near
+           one — the point is that the measure is arithmetic anyone can follow,
+           not that this fixture agrees with a retail disc. */
+        Real32 slopeToChange = 0.0f;
+        Unsigned32 intervals = 0U;
+
+        animationMeasureTangentScale(&animation, &slopeToChange, &intervals);
+        checkThat(&failureCount, "it compares the intervals that carry tangents", intervals == 3U);
+        checkThat(&failureCount, "and reports slope times span against the change spanned",
+                  nearly(slopeToChange, 10.0f / (2049.0f / 2048.0f)));
     }
 
     printf("\n-- finding a channel by the name a tree spells --\n");

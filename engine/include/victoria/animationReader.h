@@ -172,6 +172,29 @@ AnimationReadResult animationReaderOpen(Animation *animation, const Unsigned8 *b
  * A component with no keyframes yields zero. */
 Real32 animationComponentSample(const AnimationComponent *component, Real32 tick);
 
+/* Measures what unit the keyframe tangents are in.
+ *
+ * A tangent is a slope, so the value it accounts for across an interval is
+ * slope times that interval's length. For a curve that means anything, that
+ * quantity is the same order as the interval's actual change in value — a
+ * slope which claims a bone rotates a thousand degrees across a gap it
+ * actually rotates two over is not a shape, it is a unit error.
+ *
+ * So this totals both over every interval of every channel and hands back the
+ * ratio. Near one and the tangents are per tick, which is what the span is
+ * measured in. Near eight hundred and they are per second, because that is how
+ * many ticks a second holds — and the curve then needs the span converted
+ * before it is applied.
+ *
+ * Totals rather than a worst case: a single interval with a near-zero change
+ * gives an enormous ratio however right the unit is, and one outlier deciding
+ * this is how it went wrong the first time.
+ *
+ * Writes the number of intervals it managed to compare. Nought means every
+ * tangent was flat and the question cannot be answered from this animation. */
+void animationMeasureTangentScale(const Animation *animation, Real32 *slopeToChange,
+                                  Unsigned32 *intervalsCompared);
+
 /* The channel named, or null when the animation drives no bone of that name.
    Compared without regard to case, as the format's own names are not consistent
    about it. */
