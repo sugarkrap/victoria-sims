@@ -224,6 +224,7 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	esac
 
 RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
+FREESTANDING_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFreestandingRuntime
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
 GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
@@ -240,12 +241,13 @@ INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
 ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 
-verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
+verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER)
+	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -381,6 +383,12 @@ $(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageRea
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
 		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
+
+$(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFreestandingRuntime.c \
+		engine/source/freestandingRuntime.c $(VERIFIER_SUPPORT) -o $@
 
 $(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
 		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT)

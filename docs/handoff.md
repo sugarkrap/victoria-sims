@@ -9,11 +9,16 @@ Written to be read by someone who has none of the conversation that produced it.
 ```sh
 make            # the Linux build, into build/linux/victoriaSims
 make web        # the WebAssembly build, into build/web/
-make verify     # 16 C suites; all should say "checks passed"
+make verify     # 17 C suites; all should say "checks passed"
+make verifyWeb  # the wasm module and the browser runtime, under node
 make check      # proves no allocator symbol is linked in
-node tests/verifyWebModule.mjs     # the wasm module against a fixture disc
-node tests/verifyRuntimeUpload.mjs # the browser runtime's upload path
 ```
+
+`make verify` does not include `verifyWeb`: that one needs the module built and
+a `node` to run it under, and a machine with neither should still get the rest.
+Run both. The two defects the web checks catch — an odd index count, and a pose
+that stripped a Sim of its skins — each reached a browser because for a while
+nothing ran them at all.
 
 `make web` needs `wasm-ld`, which is the `lld` package on Arch and
 `lld-<version>` on Debian. Without it the compile succeeds and the link fails
@@ -195,7 +200,22 @@ other than the one it holds. `tests/verifyRuntimeUpload.mjs` pins it.
 
 The three backends differ deliberately: OpenGL ES 2.0 and WebGPU paint parts
 separately; the software rasterizer ignores textures entirely, because the
-hardware at the floor of the ladder cannot afford to sample per pixel.
+hardware at the floor of the ladder cannot afford to sample per pixel. It also
+needs no vertex update at all — it keeps the mesh by pointer and reads its
+positions each frame, and the engine poses in place. That is correct by a
+coupling rather than by construction, and is written down where it lives.
+
+**What the software backend shades with is `mathSquareRoot`, and it did not
+used to be.** It normalised its face normals with four Newton steps started at
+one, inline. Newton only doubles its digits once it is near the root; before
+that it halves the error. A Sim is 1.879 units across with 1,838 vertices, so
+its cross products are about a millionth, and four steps returned 0.063 for a
+root of 0.001 — every normal a sixtieth of unit length, every lambert near
+nought, the whole body flat at the 0.28 ambient floor. The teapot's triangles
+are ten times larger, where that loop is right to within eight percent. The
+square root is a range-reduced one in `freestandingRuntime.c` now, exact to a
+part in ten million at every scale, and `tests/verifyFreestandingRuntime.c`
+pins it there — including at a Sim's scale specifically.
 
 ## The web build
 
@@ -242,7 +262,7 @@ the browser to test it.
 The disc has now contradicted a reasonable inference more than a dozen times,
 and the fix has always been the same: stop reasoning about what it should
 contain and make the engine report what it saw. Beyond that, these sessions
-added five failure modes worth knowing before repeating them.
+added six failure modes worth knowing before repeating them.
 
 **A test that cannot fail is not evidence.** The Hermite curve was added, the
 rest-pose check was recorded *at the time* as unable to discriminate it, and it
@@ -269,6 +289,15 @@ first primitive draws from component nought. Joined without shifting them,
 to avoid transforming shared vertices twice, and leaves a Sim's head behind
 while its body lies down — reported as `posed 1173 of 1838`, which is exactly
 the body's count and the number that gave it away.
+
+**A numerical method has a range, and the comment above it is not it.**
+`mathSine` said "accurate to roughly 1e-6" and was off by seven thousandths at
+a half turn — the far end of the range it reduced into, which is exactly where
+a truncated series is worst. The face-normal loop said "good to a few parts in
+a thousand" and was off by sixty times at the scale the disc actually produces.
+Both claims were true where somebody had looked and false where the work went.
+An approximation needs testing at the ends of its range and at the magnitudes
+its callers really pass, not at one.
 
 **A shared name is not a shared implementation.** The WebGPU banding was hunted
 for a whole session — materials, decoders, samplers, bind groups, shaders — and
