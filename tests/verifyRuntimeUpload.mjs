@@ -28,6 +28,7 @@ const writes = [];
 const buffers = [];
 const textures = [];
 const textureWrites = [];
+const destroyed = [];
 
 // Enough of a browser for the file to load, and no more. Anything it reaches
 // for that is not here is something this test should be told about.
@@ -35,6 +36,7 @@ function makeRecordingDevice() {
     return {
         createBuffer(descriptor) {
             const buffer = { size: descriptor.size, usage: descriptor.usage };
+            buffer.destroy = () => destroyed.push(buffer);
             buffers.push(buffer);
             return buffer;
         },
@@ -47,6 +49,7 @@ function makeRecordingDevice() {
         }),
         createTexture(descriptor) {
             const texture = { ...descriptor, createView: () => ({ kind: "view" }) };
+            texture.destroy = () => destroyed.push(texture);
             textures.push(texture);
             return texture;
         },
@@ -242,6 +245,78 @@ console.log("\n-- uploading a texture before there is a mesh to put it on --");
     }
     check("it does not throw", !threw);
     check("and says it could not", answer === 0);
+}
+
+console.log("\n-- re-sending the vertices of a mesh that is already here --");
+{
+    // A posed model sends its vertices again every frame, and for as long as the
+    // only way to do that was uploadMesh, the first frame of an animation threw
+    // away the part ranges and destroyed the part textures — after which the
+    // whole Sim drew in one call under one skin and its arms came out banded
+    // with a face. The OpenGL backend had the same defect and was given
+    // glBufferSubData; this is that fix, on the backend that still had it.
+    const createMeshPipeline = runtime.importObject.victoriaRender.createMeshPipeline;
+    const uploadMesh = runtime.importObject.victoriaRender.uploadMesh;
+    const setMeshPart = runtime.importObject.victoriaRender.setMeshPart;
+    const uploadPartTexture = runtime.importObject.victoriaRender.uploadPartTexture;
+    const updateMeshVertices = runtime.importObject.victoriaRender.updateMeshVertices;
+
+    check("the page exposes updateMeshVertices", typeof updateMeshVertices === "function");
+
+    const COUNT = 64;
+    const memory = new ArrayBuffer(COUNT * 32 + 4096);
+
+    runtime.runtimeState.instance = { exports: { memory: { buffer: memory } } };
+    runtime.runtimeState.memory = { buffer: memory };
+    runtime.runtimeState.device = makeRecordingDevice();
+    runtime.runtimeState.canvasFormat = "bgra8unorm";
+    runtime.runtimeState.meshTexture = null;
+    runtime.runtimeState.meshVertexBuffer = null;
+    runtime.runtimeState.meshIndexBuffer = null;
+    createMeshPipeline(0, 0);
+
+    // A model of two parts, painted a part at a time, the way a Sim arrives.
+    const INDICES = COUNT * 32;
+    uploadMesh(0, COUNT, INDICES, 6);
+    setMeshPart(0, 0, 3);
+    setMeshPart(1, 3, 3);
+    uploadPartTexture(0, INDICES + 64, 2, 2);
+    uploadPartTexture(1, INDICES + 128, 2, 2);
+
+    const partTexture = runtime.runtimeState.meshPartTextures[0];
+    const vertexBuffer = runtime.runtimeState.meshVertexBuffer;
+    check("the model arrived with two parts", runtime.runtimeState.meshParts.length === 2);
+    check("each wearing its own skin",
+          Boolean(partTexture) && Boolean(runtime.runtimeState.meshPartTextures[1]));
+
+    // The pose moves the vertices. Nothing else about the model changes.
+    new Uint8Array(memory).fill(0x5A, 0, COUNT * 32);
+    writes.length = 0;
+    buffers.length = 0;
+    destroyed.length = 0;
+
+    check("the update is taken", updateMeshVertices(0, COUNT) === 1);
+    check("the ranges survive it", runtime.runtimeState.meshParts.length === 2);
+    check("and so do the skins",
+          runtime.runtimeState.meshPartTextures[0] === partTexture &&
+          runtime.runtimeState.meshPartBindGroups.length === 2);
+    check("nothing was destroyed to make room", destroyed.length === 0);
+    check("no new buffer was allocated for it", buffers.length === 0);
+    check("the posed vertices went into the buffer already there",
+          writes.length === 1 && writes[0].buffer === vertexBuffer &&
+          writes[0].byteLength === COUNT * 32 && writes[0].bytes[0] === 0x5A);
+
+    check("a different vertex count is refused rather than resized",
+          updateMeshVertices(0, COUNT - 1) === 0);
+    check("and so is one reaching past the end of memory",
+          updateMeshVertices(memory.byteLength - 16, COUNT) === 0);
+
+    // The other half of the contract: a genuinely new model must still clear
+    // what belonged to the old one, or the ranges outlive the mesh they index.
+    uploadMesh(0, COUNT, INDICES, 6);
+    check("a new mesh still clears the ranges", runtime.runtimeState.meshParts.length === 0);
+    check("and gives back what the last one held",
+          destroyed.includes(vertexBuffer) && destroyed.includes(partTexture));
 }
 
 if (failureCount === 0) {

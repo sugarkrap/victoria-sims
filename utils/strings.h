@@ -30,6 +30,12 @@ Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix);
    else is the only thing there is to go on. */
 Boolean stringContainsIgnoringCase(const char *text, const char *needle);
 
+/* Whether the two are the same string, ignoring case. For matching an
+   animation's channel names against a skeleton's node names: both come out of
+   the same game and neither is consistent about capitals, so a comparison that
+   respects case silently drives no bones at all. */
+Boolean stringEqualsIgnoringCase(const char *first, const char *second);
+
 /* Stops at the first character that is not a digit, so trailing junk is
    ignored rather than rejected. Returns zero for an empty or non-numeric
    string, which callers treat as "unset". */

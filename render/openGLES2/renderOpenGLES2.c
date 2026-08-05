@@ -95,6 +95,18 @@ static GLint meshMatrixLocation = -1;
 static GLint meshLightLocation = -1;
 static GLsizei meshIndexCount = 0;
 static MemorySize meshChargedBytes = 0UL;
+/* The vertex buffer's size, so an update can refuse a mesh of a different
+   shape rather than writing past the end of what was uploaded. */
+static MemorySize meshVertexBytes = 0UL;
+/* One texture and one index range per part the mesh declared. The ranges are
+   copied out of the mesh at upload rather than kept by pointer: the mesh is the
+   caller's arena, and a backend holding a pointer into it across frames would
+   be trusting storage it does not own. */
+static GLuint meshPartTextures[RENDER_PART_LIMIT];
+static MemorySize meshPartTextureBytes[RENDER_PART_LIMIT];
+static GLsizei meshPartFirstIndex[RENDER_PART_LIMIT];
+static GLsizei meshPartIndexCount[RENDER_PART_LIMIT];
+static Unsigned32 meshPartCount = 0U;
 static MeshCamera meshCamera;
 
 static Real32 viewportAspect = 1.0f;
@@ -337,6 +349,123 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 }
 
 
+/* Position, normal and texture coordinate, eight floats a vertex, into storage
+   the caller owns. Shared by the upload and the per-frame update so the two
+   cannot disagree about the layout the shader was written against. */
+static void interleaveMeshVertices(const GeometryMesh *mesh, GLfloat *interleaved)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < mesh->vertexCount; index++)
+    {
+        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
+        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
+        GLfloat *target = &interleaved[(MemorySize)index * 8UL];
+
+        target[0] = (GLfloat)position[0];
+        target[1] = (GLfloat)position[1];
+        target[2] = (GLfloat)position[2];
+        target[3] = (GLfloat)normal[0];
+        target[4] = (GLfloat)normal[1];
+        target[5] = (GLfloat)normal[2];
+        if (mesh->textureCoordinates != NULL_POINTER)
+        {
+            target[6] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL];
+            target[7] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
+        }
+        else
+        {
+            target[6] = 0.0f;
+            target[7] = 0.0f;
+        }
+    }
+}
+
+/* Hands back the ledger charge and the driver objects the previous mesh took.
+   Safe to call when there was no previous mesh: every handle is zero then, and
+   the ledger release is clamped rather than trusted. */
+static void releaseWhateverTheLastMeshTook(void)
+{
+    if (meshChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+    }
+    if (meshVertexBuffer != 0U)
+    {
+        glDeleteBuffers(1, &meshVertexBuffer);
+        meshVertexBuffer = 0U;
+    }
+    if (meshIndexBuffer != 0U)
+    {
+        glDeleteBuffers(1, &meshIndexBuffer);
+        meshIndexBuffer = 0U;
+    }
+    if (meshProgram != 0U)
+    {
+        glDeleteProgram(meshProgram);
+        meshProgram = 0U;
+    }
+    {
+        Unsigned32 part;
+
+        for (part = 0U; part < RENDER_PART_LIMIT; part++)
+        {
+            if (meshPartTextures[part] != 0U)
+            {
+                glDeleteTextures(1, &meshPartTextures[part]);
+                meshPartTextures[part] = 0U;
+            }
+            if (meshPartTextureBytes[part] > 0UL)
+            {
+                graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                            meshPartTextureBytes[part]);
+                meshPartTextureBytes[part] = 0UL;
+            }
+        }
+        meshPartCount = 0U;
+    }
+}
+
+/* Re-sends the vertices of a mesh already uploaded, for a model whose vertices
+ * moved but whose shape did not — one skinned on the processor each frame.
+ *
+ * Charges the ledger nothing and compiles nothing, because it reuses the buffer
+ * and the program that are already there. renderSetMesh would rebuild both, and
+ * rebuilding a program every frame cost twenty-two milliseconds on the frame it
+ * happened to land on.
+ *
+ * Does nothing when no mesh is set or the vertex count has changed, which is
+ * not this function's job to handle: that is a different mesh, and the caller
+ * wants renderSetMesh for it. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    MemorySize marker;
+    MemorySize vertexBytes;
+    GLfloat *interleaved;
+
+    if (mesh == NULL_POINTER || meshVertexBuffer == 0U || meshIndexCount == 0 ||
+        mesh->positions == NULL_POINTER || mesh->normals == NULL_POINTER ||
+        (MemorySize)mesh->vertexCount * 8UL * sizeof(GLfloat) != meshVertexBytes)
+    {
+        return;
+    }
+
+    vertexBytes = meshVertexBytes;
+    marker = memoryArenaGetMarker(arena);
+    interleaved = (GLfloat *)memoryArenaAllocate(arena, vertexBytes, sizeof(GLfloat));
+    if (interleaved == NULL_POINTER)
+    {
+        memoryArenaRewindToMarker(arena, marker);
+        return;
+    }
+    interleaveMeshVertices(mesh, interleaved);
+
+    glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)vertexBytes, interleaved);
+    memoryArenaRewindToMarker(arena, marker);
+}
+
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 {
     MemorySize marker;
@@ -346,7 +475,6 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     GLuint vertexShader;
     GLuint fragmentShader;
     GLint linkStatus = GL_FALSE;
-    Unsigned32 index;
 
     if (mesh == NULL_POINTER || mesh->vertexCount == 0U || mesh->indexCount < 3U ||
         mesh->normals == NULL_POINTER)
@@ -354,6 +482,16 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         meshIndexCount = 0;
         return;
     }
+
+    /* Whatever the last mesh charged, given back before this one asks.
+     *
+     * Without this every call charges the ledger afresh and nothing is ever
+     * released, which is invisible while a mesh is set once per load and fatal
+     * the moment one is re-sent every frame: an animated face ran the buffer
+     * category to fifteen megabytes in twelve seconds, and would have reached
+     * the ceiling and been refused shortly after. The GL objects went the same
+     * way — a program and two buffers a frame, none deleted. */
+    releaseWhateverTheLastMeshTook();
 
     /* Position, normal and texture coordinate: eight floats a vertex. Carried
        even when the mesh has no coordinates, because a layout that changes
@@ -431,29 +569,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         meshChargedBytes = 0UL;
         return;
     }
-    for (index = 0U; index < mesh->vertexCount; index++)
-    {
-        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
-        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
-        GLfloat *target = &interleaved[(MemorySize)index * 8UL];
-
-        target[0] = (GLfloat)position[0];
-        target[1] = (GLfloat)position[1];
-        target[2] = (GLfloat)position[2];
-        target[3] = (GLfloat)normal[0];
-        target[4] = (GLfloat)normal[1];
-        target[5] = (GLfloat)normal[2];
-        if (mesh->textureCoordinates != NULL_POINTER)
-        {
-            target[6] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL];
-            target[7] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
-        }
-        else
-        {
-            target[6] = 0.0f;
-            target[7] = 0.0f;
-        }
-    }
+    interleaveMeshVertices(mesh, interleaved);
 
     glGenBuffers(1, &meshVertexBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
@@ -465,6 +581,26 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 
     memoryArenaRewindToMarker(arena, marker);
 
+    meshVertexBytes = vertexBytes;
+    {
+        Unsigned32 part;
+
+        meshPartCount = (mesh->storedPrimitiveCount < RENDER_PART_LIMIT)
+                            ? mesh->storedPrimitiveCount
+                            : RENDER_PART_LIMIT;
+        for (part = 0U; part < meshPartCount; part++)
+        {
+            meshPartFirstIndex[part] = (GLsizei)mesh->primitives[part].firstIndex;
+            meshPartIndexCount[part] = (GLsizei)mesh->primitives[part].indexCount;
+        }
+        /* A model with more parts than can be held draws the rest under the
+           last range, so nothing goes missing and the join is visible. */
+        if (mesh->storedPrimitiveCount > RENDER_PART_LIMIT && meshPartCount > 0U)
+        {
+            meshPartIndexCount[meshPartCount - 1U] =
+                (GLsizei)mesh->indexCount - meshPartFirstIndex[meshPartCount - 1U];
+        }
+    }
     meshCameraFrame(&meshCamera, mesh);
     meshIndexCount = (GLsizei)mesh->indexCount;
     platformLogMessage("render: mesh uploaded to the OpenGL ES 2.0 backend");
@@ -512,7 +648,37 @@ static void drawMesh(Real32 elapsedSeconds)
                               vertexStride, (const void *)(6 * sizeof(GLfloat)));
     }
 
-    glDrawElements(GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_SHORT, (const void *)0);
+    /* A part at a time, so each can wear its own skin. A Sim painted in one
+       call wears one texture, and with a face's texture on its body the arms
+       come out banded with an eyebrow. */
+    if (meshPartCount == 0U)
+    {
+        glDrawElements(GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_SHORT, (const void *)0);
+    }
+    else
+    {
+        Unsigned32 part;
+
+        for (part = 0U; part < meshPartCount; part++)
+        {
+            if (meshPartIndexCount[part] == 0)
+            {
+                continue;
+            }
+            if (meshSamplerLocation >= 0)
+            {
+                /* The part's own texture, or the single one the model was given
+                   when it has none of its own. */
+                GLuint name = (meshPartTextures[part] != 0U) ? meshPartTextures[part]
+                                                             : meshTextureName;
+
+                glBindTexture(GL_TEXTURE_2D, name);
+            }
+            glDrawElements(GL_TRIANGLES, meshPartIndexCount[part], GL_UNSIGNED_SHORT,
+                           (const void *)((MemorySize)meshPartFirstIndex[part] *
+                                          sizeof(GLushort)));
+        }
+    }
 
     glDisableVertexAttribArray((GLuint)meshPositionLocation);
     glDisableVertexAttribArray((GLuint)meshNormalLocation);
@@ -570,6 +736,64 @@ void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
     }
     textureChargedBytes = wantedBytes;
     platformLogMessage("render: texture uploaded to the OpenGL ES backend");
+}
+
+void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                          Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+{
+    MemorySize wantedBytes;
+    GLint wrapMode;
+
+    if (partIndex >= RENDER_PART_LIMIT)
+    {
+        return;
+    }
+    if (rgbaPixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        if (meshPartTextures[partIndex] != 0U)
+        {
+            glDeleteTextures(1, &meshPartTextures[partIndex]);
+            meshPartTextures[partIndex] = 0U;
+        }
+        if (meshPartTextureBytes[partIndex] > 0UL)
+        {
+            graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                        meshPartTextureBytes[partIndex]);
+            meshPartTextureBytes[partIndex] = 0UL;
+        }
+        return;
+    }
+
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold this part's texture");
+        return;
+    }
+
+    if (meshPartTextures[partIndex] == 0U)
+    {
+        glGenTextures(1, &meshPartTextures[partIndex]);
+    }
+    glBindTexture(GL_TEXTURE_2D, meshPartTextures[partIndex]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)widthInPixels, (GLsizei)heightInPixels, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+    wrapMode = (isPowerOfTwo(widthInPixels) && isPowerOfTwo(heightInPixels)) ? GL_REPEAT
+                                                                            : GL_CLAMP_TO_EDGE;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapMode);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapMode);
+
+    /* Whatever this part held before, given back only once the new one is
+       there — a release before the request could let the ceiling admit a
+       texture it then cannot hold. */
+    if (meshPartTextureBytes[partIndex] > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                    meshPartTextureBytes[partIndex]);
+    }
+    meshPartTextureBytes[partIndex] = wantedBytes;
 }
 
 void renderDrawFrame(Real32 elapsedSeconds)

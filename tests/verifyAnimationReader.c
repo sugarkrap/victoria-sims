@@ -1,0 +1,476 @@
+/* Checks the animation reader against a container built here.
+ *
+ * There is no fixture animation on disc and there cannot be one — a retail ANIM
+ * is retail data — so this writes the format out byte by byte instead. That is
+ * the same choice the geometry reader's skinned container makes, and it has the
+ * same advantage: the values are chosen to catch a reader that is subtly wrong
+ * rather than merely absent.
+ *
+ * What is deliberately awkward about the fixture, in each case because the
+ * obvious wrong reader passes without it:
+ *
+ *   - The two strings runs are lengths that need padding, and the padding is
+ *     0, 1, 2 rather than zeroes. A reader that skips a fixed amount, or that
+ *     pads when it should not, lands in the middle of the next field.
+ *   - A channel drives a bone whose name differs in case from the tree's, so a
+ *     comparison that respects case finds nothing.
+ *   - One component is a sixteen bit fixed point layout, which takes its lowest
+ *     bit from the top of the time halfword before it. A reader that ignores
+ *     that reads every value at half scale and every time too large. */
+
+#include "utils/assert.h"
+#include "utils/strings.h"
+#include "victoria/animationReader.h"
+#include "victoria/memoryArena.h"
+
+#include <stdio.h>
+
+#define ARENA_CAPACITY (1UL * 1024UL * 1024UL)
+static Unsigned8 arenaStorage[ARENA_CAPACITY];
+
+static Boolean nearly(Real32 value, Real32 expected)
+{
+    Real32 difference = value - expected;
+
+    if (difference < 0.0f)
+    {
+        difference = -difference;
+    }
+    return difference < 0.001f ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+}
+
+#define BUILDER_CAPACITY 8192UL
+
+typedef struct Builder
+{
+    Unsigned8 bytes[BUILDER_CAPACITY];
+    MemorySize length;
+} Builder;
+
+static void putUnsigned8(Builder *builder, Unsigned8 value)
+{
+    if (builder->length < BUILDER_CAPACITY)
+    {
+        builder->bytes[builder->length] = value;
+        builder->length++;
+    }
+}
+
+static void putUnsigned16(Builder *builder, Unsigned16 value)
+{
+    putUnsigned8(builder, (Unsigned8)(value & 0xFFU));
+    putUnsigned8(builder, (Unsigned8)((value >> 8) & 0xFFU));
+}
+
+static void putUnsigned32(Builder *builder, Unsigned32 value)
+{
+    putUnsigned16(builder, (Unsigned16)(value & 0xFFFFUL));
+    putUnsigned16(builder, (Unsigned16)((value >> 16) & 0xFFFFUL));
+}
+
+static void putReal32(Builder *builder, Real32 value)
+{
+    union
+    {
+        Real32 real;
+        Unsigned32 word;
+    } bits;
+
+    bits.real = value;
+    putUnsigned32(builder, bits.word);
+}
+
+/* A length prefixed string, which is how the collection wrapper writes them. */
+static void putPrefixedString(Builder *builder, const char *text)
+{
+    MemorySize length = stringLength(text);
+    MemorySize index;
+
+    putUnsigned8(builder, (Unsigned8)length);
+    for (index = 0UL; index < length; index++)
+    {
+        putUnsigned8(builder, (Unsigned8)text[index]);
+    }
+}
+
+/* A null terminated string, which is how this block writes them. */
+static void putTerminatedString(Builder *builder, const char *text)
+{
+    MemorySize length = stringLength(text);
+    MemorySize index;
+
+    for (index = 0UL; index < length; index++)
+    {
+        putUnsigned8(builder, (Unsigned8)text[index]);
+    }
+    putUnsigned8(builder, 0U);
+}
+
+static void putTypeInformation(Builder *builder, const char *name, Unsigned32 identifier,
+                               Unsigned32 version)
+{
+    putPrefixedString(builder, name);
+    putUnsigned32(builder, identifier);
+    putUnsigned32(builder, version);
+}
+
+/* Pads a run of strings to a four byte boundary, writing 0, 1, 2 as the file
+   does rather than zeroes. */
+static void putPadding(Builder *builder, MemorySize runLength)
+{
+    MemorySize over = runLength % 4UL;
+    MemorySize index;
+
+    for (index = 0UL; index < over; index++)
+    {
+        putUnsigned8(builder, (Unsigned8)index);
+    }
+}
+
+/* Packs the fields the reader has to pull back out of one word. */
+static Unsigned32 packChannelFlags(Unsigned32 durationTicks, Unsigned32 attribute, Unsigned32 type,
+                                   Unsigned32 componentCount)
+{
+    return (durationTicks & 0x7FFFUL) | ((attribute & 0x1FUL) << 17) | ((type & 0x7UL) << 22) |
+           (0xFUL << 25) | ((componentCount & 0x7UL) << 29);
+}
+
+#define CHANNEL_COUNT 2U
+
+/* Two channels on one target: a rotation on "Head" carrying baked eight-seven
+   fixed point, and a translation on "spine" carrying continuous five-eleven,
+   which is the layout that steals a bit. */
+static void buildAnimation(Builder *builder)
+{
+    MemorySize runStart;
+
+    /* The collection wrapper. */
+    putUnsigned32(builder, 0xFFFF0001UL);
+    putUnsigned32(builder, 0U); /* no file links */
+    putUnsigned32(builder, 1U); /* one block */
+    putUnsigned32(builder, (Unsigned32)ANIMATION_TYPE_IDENTIFIER);
+
+    putTypeInformation(builder, "cAnimResourceConst", (Unsigned32)ANIMATION_TYPE_IDENTIFIER, 6U);
+    putTypeInformation(builder, "cSGResource", 0xFC6EB1F7UL, 2U);
+    putPrefixedString(builder, "a-test-stand_anim");
+
+    putUnsigned32(builder, 0U);   /* the size the game would overlay */
+    putUnsigned16(builder, 300U); /* duration in ticks */
+    putUnsigned16(builder, 1U);   /* one target */
+    putUnsigned16(builder, 0U);   /* no event keys */
+    putUnsigned8(builder, 4U);    /* the data string's length */
+    putUnsigned8(builder, 6U);    /* version */
+    putUnsigned8(builder, 1U);    /* flags */
+    putUnsigned8(builder, 0U);    /* priority */
+    putUnsigned8(builder, 0U);    /* locomotion type */
+    putUnsigned8(builder, 6U);    /* the skeleton tag's length */
+
+    {
+        Unsigned32 index;
+
+        for (index = 0U; index < 4U; index++)
+        {
+            putUnsigned32(builder, 0U);
+        }
+        for (index = 0U; index < 9U; index++)
+        {
+            putReal32(builder, 0.0f);
+        }
+    }
+
+    /* "auskel" and a four character data string: eleven bytes with the two
+       terminators, so this run needs three bytes of padding. */
+    runStart = builder->length;
+    putTerminatedString(builder, "auskel");
+    putTerminatedString(builder, "data");
+    putPadding(builder, builder->length - runStart);
+
+    /* The one target. */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putUnsigned16(builder, 0U);             /* the target's own type */
+    putUnsigned16(builder, CHANNEL_COUNT);  /* its channels */
+    putUnsigned8(builder, 2U);              /* two inverse kinematics chains */
+    putUnsigned8(builder, 0U);
+    putUnsigned16(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+
+    /* The target's tag name, its own run. */
+    runStart = builder->length;
+    putTerminatedString(builder, "auskel");
+    putPadding(builder, builder->length - runStart);
+
+    /* The channels. */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0x11112222UL); /* the bone's hashed name, never used */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, packChannelFlags(300U, ANIMATION_ATTRIBUTE_ROTATION,
+                                            ANIMATION_CHANNEL_EULER_ROTATION, 3U));
+    putUnsigned32(builder, 0U);
+
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0x33334444UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, packChannelFlags(300U, ANIMATION_ATTRIBUTE_TRANSFORM,
+                                            ANIMATION_CHANNEL_TRANSFORM_XYZ, 3U));
+    putUnsigned32(builder, 0U);
+
+    /* The channels' names. "Head" is capitalised where a tree spells it "head",
+       which is the case difference a matcher has to ignore. Eleven bytes with
+       terminators, so three of padding again. */
+    runStart = builder->length;
+    putTerminatedString(builder, "Head");
+    putTerminatedString(builder, "spine");
+    putPadding(builder, builder->length - runStart);
+
+    /* Every component's shape, all channels before any keyframe of any of them.
+       The first channel is baked eight-seven; the second is continuous
+       five-eleven, which is sixteen bits and steals a bit. */
+    {
+        Unsigned32 which;
+
+        for (which = 0U; which < 3U; which++)
+        {
+            putUnsigned16(builder, 2U); /* two keyframes */
+            putUnsigned8(builder, 0x00U);
+            putUnsigned8(builder, 0U);
+            putUnsigned32(builder, 0U);
+        }
+        for (which = 0U; which < 3U; which++)
+        {
+            putUnsigned16(builder, 2U);
+            /* Curve type 1 with the layout bits at 0b001 gives five-eleven. */
+            putUnsigned8(builder, 0x05U);
+            putUnsigned8(builder, 0U);
+            putUnsigned32(builder, 0U);
+        }
+    }
+
+    /* The first channel's keyframes: baked, so no time is stored and the values
+       are eight-seven fixed point. 128 is 1.0 and -128 is -1.0. */
+    {
+        Unsigned32 which;
+
+        for (which = 0U; which < 3U; which++)
+        {
+            putUnsigned16(builder, 128U);
+            putUnsigned16(builder, (Unsigned16)((Unsigned32)(-256) & 0xFFFFU));
+        }
+    }
+
+    /* The second channel's: continuous, so each is a time, a value and one
+       tangent. The time carries the value's lowest bit in its top bit, so a
+       time of 10 with that bit set is written 0x800A and the value's stored
+       halfword is the rest of it. 2048 is 1.0 in five-eleven; with the stolen
+       bit the stored halfword is 1024 and the time supplies the low bit. */
+    {
+        Unsigned32 which;
+
+        for (which = 0U; which < 3U; which++)
+        {
+            putUnsigned16(builder, 0x800AU); /* time 10, and a stolen set bit */
+            putUnsigned16(builder, 1024U);   /* becomes 2049, just over 1.0 */
+            /* A slope of exactly one, in the 5.10 the tangents always use.
+               Non-zero on purpose and only on this keyframe: with the same
+               slope at both ends the tangent terms cancel at the midpoint, and
+               a check that cannot tell the two scalings apart is how the wrong
+               one shipped. */
+            putUnsigned16(builder, 1024U);
+
+            putUnsigned16(builder, 20U); /* time 20, nothing stolen */
+            putUnsigned16(builder, 0U);
+            putUnsigned16(builder, 0U);
+        }
+    }
+}
+
+int main(void)
+{
+    MemoryArena arena;
+    Builder builder;
+    Animation animation;
+    AnimationReadResult result;
+    Integer32 failureCount = 0;
+
+    memoryArenaInitialize(&arena, arenaStorage, ARENA_CAPACITY);
+    builder.length = 0UL;
+    buildAnimation(&builder);
+
+    printf("-- reading an animation --\n");
+    result = animationReaderOpen(&animation, builder.bytes, builder.length, &arena);
+    checkThat(&failureCount, "the reader accepts it", result == ANIMATION_READ_OK);
+    if (result != ANIMATION_READ_OK)
+    {
+        printf("  result: %s\n", animationReadResultGetName(result));
+        return checkSummarize(failureCount, "animation reader");
+    }
+
+    checkThat(&failureCount, "names the resource", stringEquals(animation.resourceName, "a-test-stand_anim"));
+    checkThat(&failureCount, "reports its duration", animation.durationTicks == 300U);
+    checkThat(&failureCount, "finds the one target", animation.targetCount == 1U);
+    checkThat(&failureCount, "and both of its channels", animation.channelCount == CHANNEL_COUNT);
+
+    printf("\n-- are the padded string runs walked correctly --\n");
+    /* If either run's padding is mishandled every field after it comes out of
+       the wrong bytes, so these two names passing is what says the walk is
+       aligned — not merely that a string reader works. */
+    checkThat(&failureCount, "the skeleton it was authored against",
+              stringEquals(animation.skeletonTag, "auskel"));
+    checkThat(&failureCount, "the first channel's name survives the run after it",
+              stringEquals(animation.channels[0].name, "Head"));
+    checkThat(&failureCount, "and so does the second's",
+              stringEquals(animation.channels[1].name, "spine"));
+
+    printf("\n-- is the packed flag word taken apart --\n");
+    /* Every one of these is a different field of a single word. A reader that
+       shifted by the wrong amount would still produce plausible small numbers,
+       which is why each is checked rather than only the ones a pose uses. */
+    checkThat(&failureCount, "the duration comes out of the bottom fifteen bits",
+              animation.channels[0].durationTicks == 300U);
+    checkThat(&failureCount, "the attribute says the first channel rotates",
+              animation.channels[0].attribute == ANIMATION_ATTRIBUTE_ROTATION);
+    checkThat(&failureCount, "and that the second translates",
+              animation.channels[1].attribute == ANIMATION_ATTRIBUTE_TRANSFORM);
+    checkThat(&failureCount, "the type says Euler angles and not a quaternion",
+              animation.channels[0].type == ANIMATION_CHANNEL_EULER_ROTATION);
+    checkThat(&failureCount, "and a transform for the second",
+              animation.channels[1].type == ANIMATION_CHANNEL_TRANSFORM_XYZ);
+    checkThat(&failureCount, "both carry three components",
+              animation.channels[0].componentCount == 3U &&
+                  animation.channels[1].componentCount == 3U);
+    checkThat(&failureCount, "and the chains it does not follow are counted",
+              animation.chainCount == 2U);
+
+    printf("\n-- are baked keyframes read and spread over the duration --\n");
+    /* Baked frames store no time at all: the position in the array is the time,
+       spread across the channel's duration. A reader that expected a time would
+       read the next value as one and halve the frame count. */
+    checkThat(&failureCount, "both frames arrive",
+              animation.channels[0].components[0].keyframeCount == 2U);
+    checkThat(&failureCount, "the first sits at the start",
+              nearly(animation.channels[0].components[0].keyframes[0].tick, 0.0f));
+    checkThat(&failureCount, "and the second half way through the duration",
+              nearly(animation.channels[0].components[0].keyframes[1].tick, 150.0f));
+    checkThat(&failureCount, "eight-seven fixed point scales by a hundred and twenty eight",
+              nearly(animation.channels[0].components[0].keyframes[0].value, 1.0f));
+    checkThat(&failureCount, "and sign extends from its own width, not the machine's",
+              nearly(animation.channels[0].components[0].keyframes[1].value, -2.0f));
+
+    printf("\n-- does a sixteen bit layout steal its bit from the time --\n");
+    /* The whole point of the awkward encoding. Read without the steal the value
+       is 1024/2048 = 0.5 and the time is 32778 rather than 10; both are wrong
+       and neither looks obviously wrong on its own. */
+    checkThat(&failureCount, "the time has the stolen bit masked back out",
+              nearly(animation.channels[1].components[0].keyframes[0].tick, 10.0f));
+    checkThat(&failureCount, "and the value has it put back in",
+              nearly(animation.channels[1].components[0].keyframes[0].value, 2049.0f / 2048.0f));
+
+    printf("\n-- sampling between keyframes --\n");
+    {
+        const AnimationComponent *baked = &animation.channels[0].components[0];
+
+        checkThat(&failureCount, "before the first keyframe holds at its value",
+                  nearly(animationComponentSample(baked, -10.0f), 1.0f));
+        checkThat(&failureCount, "on a keyframe is that keyframe",
+                  nearly(animationComponentSample(baked, 150.0f), -2.0f));
+        checkThat(&failureCount, "half way between is half way along",
+                  nearly(animationComponentSample(baked, 75.0f), -0.5f));
+        checkThat(&failureCount, "and past the last holds rather than running on",
+                  nearly(animationComponentSample(baked, 10000.0f), -2.0f));
+    }
+
+    printf("\n-- are the tangents read, and deliberately not followed --\n");
+    {
+        const AnimationComponent *curved = &animation.channels[1].components[0];
+
+        checkThat(&failureCount, "a continuous curve stores one tangent and means it both ways",
+                  nearly(curved->keyframes[0].tangentIn, curved->keyframes[0].tangentOut));
+        checkThat(&failureCount, "and 5.10 puts a stored 1024 at a slope of one",
+                  nearly(curved->keyframes[0].tangentOut, 1.0f));
+        checkThat(&failureCount, "while the keyframe after it is flat",
+                  nearly(curved->keyframes[1].tangentOut, 0.0f));
+
+        /* Sampling is a straight line, and the tangents are not followed.
+        
+           Their unit is known — the measurement below says per second — but
+           applying them as a Hermite at that scale threw a real Sim about,
+           where straight lines had it moving fluidly. Which slope belongs to
+           which side of a keyframe is still unestablished, and openTS2 carries
+           a "fix tangentin and tangentout values" note over the same code.
+
+           This check asserts the line explicitly and asserts that the curve is
+           NOT what comes out, so restoring it means deliberately changing a
+           check rather than quietly passing one. That distinction is the whole
+           reason the wrong curve shipped twice. */
+        {
+            Real32 straightLine = curved->keyframes[0].value +
+                                  ((curved->keyframes[1].value - curved->keyframes[0].value) * 0.5f);
+            Real32 spanInSeconds = (curved->keyframes[1].tick - curved->keyframes[0].tick) *
+                                   ANIMATION_TICK_SECONDS;
+            Real32 hermite = straightLine +
+                             (0.125f * spanInSeconds * curved->keyframes[0].tangentOut);
+
+            checkThat(&failureCount, "midway between keyframes is midway in value",
+                      nearly(animationComponentSample(curved, 15.0f), straightLine));
+            checkThat(&failureCount, "and not along the tangents, at any scale",
+                      !nearly(animationComponentSample(curved, 15.0f), hermite));
+        }
+        checkThat(&failureCount, "every keyframe is still hit exactly",
+                  nearly(animationComponentSample(curved, curved->keyframes[0].tick),
+                         curved->keyframes[0].value) &&
+                      nearly(animationComponentSample(curved, curved->keyframes[1].tick),
+                             curved->keyframes[1].value));
+
+        {
+            const AnimationComponent *baked = &animation.channels[0].components[0];
+
+            checkThat(&failureCount, "a baked curve carries no tangents and stays a straight line",
+                      nearly(animationComponentSample(baked, 37.5f), 0.25f));
+        }
+    }
+
+    printf("\n-- measuring what unit the tangents are in --\n");
+    {
+        /* The measurement that settled it on real animations, checked here
+           against numbers worked out by hand. This fixture's slopes really are
+           per tick, so it comes back near the interval count rather than near
+           one — the point is that the measure is arithmetic anyone can follow,
+           not that this fixture agrees with a retail disc. */
+        Real32 slopeToChange = 0.0f;
+        Unsigned32 intervals = 0U;
+
+        animationMeasureTangentScale(&animation, &slopeToChange, &intervals);
+        checkThat(&failureCount, "it compares the intervals that carry tangents", intervals == 3U);
+        checkThat(&failureCount, "and reports slope times span against the change spanned",
+                  nearly(slopeToChange, 10.0f / (2049.0f / 2048.0f)));
+    }
+
+    printf("\n-- finding a channel by the name a tree spells --\n");
+    /* A tree spells this bone "head" and the animation spells it "Head". A
+       comparison that respects case drives no bones at all, which looks exactly
+       like an animation that targets another skeleton. */
+    checkThat(&failureCount, "the case the tree uses still finds it",
+              animationFindChannel(&animation, "head") == &animation.channels[0]);
+    checkThat(&failureCount, "as does the case the animation uses",
+              animationFindChannel(&animation, "Head") == &animation.channels[0]);
+    checkThat(&failureCount, "and a bone it does not drive finds nothing",
+              animationFindChannel(&animation, "l_hand") == NULL_POINTER);
+
+    printf("\n-- refusing what it should --\n");
+    {
+        Animation other;
+        static const Unsigned8 notAResource[16] = { 0 };
+
+        checkThat(&failureCount, "rejects bytes that are not a collection",
+                  animationReaderOpen(&other, notAResource, sizeof(notAResource), &arena) ==
+                      ANIMATION_READ_NOT_A_RESOURCE);
+        checkThat(&failureCount, "rejects a resource that stops part way",
+                  animationReaderOpen(&other, builder.bytes, 48UL, &arena) != ANIMATION_READ_OK);
+    }
+
+    return checkSummarize(failureCount, "animation reader");
+}

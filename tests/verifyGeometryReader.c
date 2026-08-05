@@ -420,6 +420,26 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
 
         putIndexArray(builder, bones, 3U, blockVersion);
     }
+
+    /* The bind pose, which the container carries itself in a section straight
+     * after the primitives.
+     *
+     * Ten entries because the bone list above names bone 9, and these are
+     * indexed by the bone number rather than by the slot that named it — a
+     * reader that indexed by the slot would read entry 1 for bone 9 and find a
+     * plausible transform there, which is why each entry is given a translation
+     * equal to its own index and nothing else. */
+    putUnsigned32(builder, 10U);
+    for (index = 0U; index < 10U; index++)
+    {
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 1.0f);
+        putReal32(builder, (Real32)index);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+    }
 }
 
 int main(void)
@@ -760,6 +780,103 @@ int main(void)
                   skinned.primitives[0].boneRemap[0] == 4U &&
                       skinned.primitives[0].boneRemap[1] == 9U &&
                       skinned.primitives[0].boneRemap[2] == 2U);
+
+        printf("\n-- does the container's own bind pose arrive --\n");
+        /* The section after the primitives, which an earlier reader stopped
+           short of entirely. What is in it is the inverse bind — measured on a
+           retail container, where a bone's world transform out of the tree
+           times the stored transform landed on the identity — so reading it is
+           what lets a pose palette be built without a matrix inverse. */
+        checkThat(&failureCount, "the bind pose is read", skinned.bindPoses != NULL_POINTER);
+        checkThat(&failureCount, "with one entry per bone the file described",
+                  skinned.bindPoseCount == 10U);
+        checkThat(&failureCount, "indexed by the bone number and not by the slot that named it",
+                  nearly(skinned.bindPoses[9].translation[0], 9.0f) &&
+                      nearly(skinned.bindPoses[4].translation[0], 4.0f));
+        checkThat(&failureCount, "reading the quaternion in the order the file writes it",
+                  nearly(skinned.bindPoses[0].rotation[3], 1.0f) &&
+                      nearly(skinned.bindPoses[0].rotation[0], 0.0f));
+
+        printf("\n-- joining several containers into one model --\n");
+        /* A Sim is a body, a face and hair: three containers that have to end up
+           as one mesh, because one upload painted a part at a time is what the
+           renderer can do and three meshes is not. */
+        {
+            static GeometryMesh whole;
+            const GeometryMesh *parts[2];
+            GeometryReadResult joined;
+            Unsigned32 before = skinned.vertexCount;
+
+            parts[0] = &skinned;
+            parts[1] = &mesh; /* the teapot, which carries no bones at all */
+            joined = geometryMeshMerge(&whole, parts, 2U, &arena);
+
+            checkThat(&failureCount, "the join succeeds", joined == GEOMETRY_READ_OK);
+            if (joined == GEOMETRY_READ_OK)
+            {
+                checkThat(&failureCount, "every vertex of both arrives",
+                          whole.vertexCount == before + mesh.vertexCount);
+                checkThat(&failureCount, "and every index",
+                          whole.indexCount == skinned.indexCount + mesh.indexCount);
+                checkThat(&failureCount, "and every part stays a part",
+                          whole.storedPrimitiveCount ==
+                              skinned.storedPrimitiveCount + mesh.storedPrimitiveCount);
+
+                /* The second model's indices addressed its own vertices, which
+                   are no longer at nought. Unshifted they would reach into the
+                   first model and draw triangles between the two. */
+                {
+                    Unsigned32 index;
+                    Boolean allInRange = BOOLEAN_TRUE;
+                    Unsigned32 lowestOfSecond = 0xFFFFU;
+
+                    for (index = 0U; index < whole.indexCount; index++)
+                    {
+                        if ((Unsigned32)whole.indices[index] >= whole.vertexCount)
+                        {
+                            allInRange = BOOLEAN_FALSE;
+                        }
+                    }
+                    for (index = skinned.indexCount; index < whole.indexCount; index++)
+                    {
+                        if ((Unsigned32)whole.indices[index] < lowestOfSecond)
+                        {
+                            lowestOfSecond = (Unsigned32)whole.indices[index];
+                        }
+                    }
+                    checkThat(&failureCount, "every index addresses a vertex of the joined model",
+                              allInRange);
+                    checkThat(&failureCount, "and the second model's reach past the first's",
+                              lowestOfSecond >= before);
+                }
+
+                /* The ranges are what a per-part draw will use, so a part whose
+                   range was not shifted would paint another part's triangles. */
+                checkThat(&failureCount, "the first part still starts at the beginning",
+                          whole.primitives[0].firstIndex == 0U);
+                checkThat(&failureCount, "and the part after it starts where that one ended",
+                          whole.primitives[skinned.storedPrimitiveCount].firstIndex ==
+                              skinned.indexCount);
+
+                checkThat(&failureCount, "a part with no bones is left unassigned, not on bone 0",
+                          whole.boneAssignments != NULL_POINTER &&
+                              whole.boneAssignments[before * 4U] == 255U);
+                checkThat(&failureCount, "while the skinned part keeps its own bones",
+                          whole.boneAssignments[0] == 0U && whole.boneAssignments[1] == 1U);
+                checkThat(&failureCount, "and the bind pose comes from whichever part had one",
+                          whole.bindPoseCount == skinned.bindPoseCount);
+
+                /* A component index means something only inside its own
+                   container, so every source's first primitive draws from
+                   component nought. Two joined parts sharing an index look to
+                   the skin like two primitives over one component, and it skips
+                   the second to avoid transforming shared vertices twice — so
+                   an unshifted index silently leaves a part unposed. */
+                checkThat(&failureCount, "no two joined parts claim the same component",
+                          whole.primitives[0].componentIndex !=
+                              whole.primitives[skinned.storedPrimitiveCount].componentIndex);
+            }
+        }
 
         printf("\n-- posing by the skeleton --\n");
         {

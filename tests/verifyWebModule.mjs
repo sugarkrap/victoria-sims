@@ -65,6 +65,17 @@ const imports = {
             calls.push({ name: "uploadMesh", vertexCount, indexCount });
             return 1;
         },
+        setMeshPart: (partIndex, firstIndex, indexCount) => {
+            calls.push({ name: "setMeshPart", partIndex, firstIndex, indexCount });
+        },
+        updateMeshVertices: (vertexPointer, vertexCount) => {
+            calls.push({ name: "updateMeshVertices", vertexCount });
+            return 1;
+        },
+        uploadPartTexture: (partIndex, pixelPointer, width, height) => {
+            calls.push({ name: "uploadPartTexture", partIndex, width, height });
+            return 1;
+        },
         uploadTexture: (pixelPointer, width, height) => {
             calls.push({ name: "uploadTexture", width, height });
             return 1;
@@ -233,6 +244,9 @@ const refusalImports = {
         setTriangleTint: () => {},
         createMeshPipeline: () => 1,
         uploadMesh: () => 1,
+        setMeshPart: () => {},
+        updateMeshVertices: () => 1,
+        uploadPartTexture: () => 1,
         uploadTexture: () => 1,
         setMeshUniforms: () => {},
         submitFrame: () => {},
@@ -321,6 +335,26 @@ calls.length = 0;
         // wasm, the disc reader and the PENDING handshake.
         check("with 13248 vertices", upload.vertexCount === 13248);
         check("and 18960 indices", upload.indexCount === 18960);
+    }
+
+    // The ranges a part is painted over. The teapot is one model of two parts,
+    // so this fixture cannot show a Sim's three textures — what it can show is
+    // that the ranges reach the host at all, which is the half of per-part
+    // texturing the module owns. Without them the host draws the whole model in
+    // one call and every part wears the same skin, which is what the WebGPU
+    // backend did until it was given these.
+    const parts = calls.filter((call) => call.name === "setMeshPart");
+    check("told the host which range each part covers", parts.length > 0);
+    if (parts.length > 0) {
+        check("the first part starts at the beginning", parts[0].firstIndex === 0);
+        check("every range has triangles in it",
+              parts.every((part) => part.indexCount > 0 && part.indexCount % 3 === 0));
+        check("and the ranges tile the mesh in order",
+              parts.every((part, at) => at === 0 ||
+                          part.firstIndex === parts[at - 1].firstIndex + parts[at - 1].indexCount));
+        check("without running past the indices uploaded",
+              parts[parts.length - 1].firstIndex + parts[parts.length - 1].indexCount <=
+                  upload.indexCount);
     }
     // What the disc holds besides packages, and what those files actually are.
     // The fixture carries a file named like an installer cabinet that is not

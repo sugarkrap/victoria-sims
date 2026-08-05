@@ -1,6 +1,7 @@
 #ifndef VICTORIA_DISC_CONTENT_HEADER
 #define VICTORIA_DISC_CONTENT_HEADER
 
+#include "victoria/animationReader.h"
 #include "victoria/coreTypes.h"
 #include "victoria/geometryReader.h"
 #include "victoria/memoryArena.h"
@@ -75,6 +76,27 @@ typedef struct DiscModelPart
     Unsigned32 indexCount;
 } DiscModelPart;
 
+/* What an animation did to one bone's chain, for diagnosing a pose rather than
+   for building one. Filled only when a pose is applied. */
+typedef struct DiscContentBoneReport
+{
+    char nodeName[RESOURCE_NAME_LIMIT];
+    /* Nodes from this bone up to the root, and how many of them the animation
+       named at all, and how many of those this understood well enough to
+       apply. named above applied is a partly posed chain. */
+    Unsigned32 chainLength;
+    Unsigned32 chainNamed;
+    Unsigned32 chainApplied;
+    /* The first channel on the chain that named a node and was then skipped,
+       so the log can say which kind is being dropped instead of only that
+       something was. */
+    Boolean anySkipped;
+    char skippedNode[RESOURCE_NAME_LIMIT];
+    Unsigned32 skippedType;
+    Unsigned32 skippedAttribute;
+    Unsigned32 skippedComponents;
+} DiscContentBoneReport;
+
 typedef struct DiscContentSearch
 {
     VirtualFileSystem *fileSystem;
@@ -127,11 +149,77 @@ typedef struct DiscContentSearch
        same one. */
     Unsigned32 verticesPosed;
     Unsigned32 bonesInPalette;
-    /* The first few bones a primitive named, so a log can say whether they look
-       like indices into a tree of a hundred and twenty six nodes or like the
-       identifiers those nodes carry. */
+    /* The first few bones a primitive named, kept for the log, and the names of
+       the nodes they resolved to. The names are what an animation matches on,
+       so a run that poses nothing can be read against them to see whether the
+       animation and the model disagree about what a bone is called. */
     Unsigned32 firstBoneNames[DISC_CONTENT_BONE_SAMPLE];
+    char firstBoneNodeNames[DISC_CONTENT_BONE_SAMPLE][RESOURCE_NAME_LIMIT];
     Unsigned32 firstBoneNameCount;
+
+    /* How the primitives' bone numbers resolved against the tree. They are
+       identifiers nodes carry rather than positions in the node list, so a
+       number that matches no node is a real miss and not an index out of range;
+       counting the two separately is what tells one from the other. */
+    Unsigned32 bonesMatchedToANode;
+    Unsigned32 bonesWithoutANode;
+
+    /* What the container's own bind pose turned out to be, measured rather than
+       assumed. Both are the largest deviation of any matrix cell over every
+       bone measured.
+       - bindPoseFromIdentity: how far the bone's world transform times the
+         stored one lands from the identity. Near nought means the stored
+         transform is already the INVERSE bind, and a pose palette needs no
+         matrix inverse.
+       - bindPoseFromWorld: how far the stored transform is from the world
+         transform itself. Near nought means it is the FORWARD bind instead.
+       Exactly one of them should be small. Both large means the bone numbering
+       is wrong, not the direction. */
+    Real32 bindPoseFromIdentity;
+    Real32 bindPoseFromWorld;
+    Unsigned32 bonesMeasured;
+
+    /* What an animation did to the mesh, once one was applied. Bones posed with
+       no channels applied means the tree and the animation share no node names,
+       which is a different failure from an animation that would not read and
+       must not report as the same one. */
+    Unsigned32 channelsApplied;
+    Unsigned32 bonesPosed;
+    /* How far the pose moved the model, against how big the model is. A count
+       of vertices posed cannot tell a pose from the spike this project drew
+       once already — that moved every vertex too. A shift on the order of the
+       span is a pose; one many times larger is the spike; nought is neither. */
+    Real32 poseShift;
+    Real32 poseSpan;
+
+    /* Per bone the primitives actually use, how much of its chain to the root
+     * the animation reached and how much of that this understood.
+     *
+     * The discriminator for a torn mesh. A bone posed by a convention that is
+     * wrong but uniform moves coherently with its neighbours and looks like a
+     * badly rotated face; one whose chain is only partly applied is dragged
+     * against a neighbour still in its bind pose, and the mesh stretches
+     * between them. Named channels far outnumbering applied ones says which of
+     * those is happening, and naming the first type skipped says what to write
+     * next. */
+    DiscContentBoneReport boneReports[DISC_CONTENT_BONE_SAMPLE];
+    Unsigned32 boneReportCount;
+
+    /* The mesh's vertices as the container gave them, kept aside the first time
+     * a pose is applied.
+     *
+     * geometryMeshApplySkin rewrites the mesh in place, so posing a mesh that
+     * has already been posed skins an already-skinned model and compounds the
+     * two. Restoring from this first makes a pose idempotent, which is what
+     * lets one be rebuilt every frame from the same starting point rather than
+     * drifting further from the bind pose with each one.
+     *
+     * Normals as well as positions: skinning rotates them too, and a mesh whose
+     * positions were restored while its normals were not would light itself
+     * from a pose it is no longer in. */
+    Real32 *bindPositions;
+    Real32 *bindNormals;
+    Unsigned32 bindVertexCount;
 
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];
@@ -263,5 +351,80 @@ DiscContentStatus discContentStep(DiscContentSearch *search);
 /* Steps until it finds something or runs out. Only for a store that never
  * answers PENDING — a file descriptor, or bytes already in memory. */
 DiscContentStatus discContentRunToCompletion(DiscContentSearch *search);
+
+/* Moves the found mesh into the pose the animation holds at a tick.
+ *
+ * This is the point of everything the skeleton work has been building towards,
+ * and it is the only thing entitled to move a skinned mesh. The palette it
+ * builds is each bone's animated world transform times the transform the
+ * container stored for it — which is the inverse bind, measured rather than
+ * assumed — so a mesh posed by the animation it was authored against comes back
+ * exactly where it started, and one posed by any other moves.
+ *
+ * The mesh's own arrays are rewritten, so this builds one pose rather than
+ * animating: playing an animation wants the blend on the graphics processor
+ * with the mesh left alone.
+ *
+ * False when there was nothing to do — no skinning, no tree, no bind pose, no
+ * channels — or when the palette would not fit. The counts on the search say
+ * which, and a caller that reports "posed" without reading them would call a
+ * mesh that never moved a success. */
+Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation *animation,
+                                     Real32 tick, MemoryArena *arena);
+
+/* Copies the mesh's vertices aside as the pose to skin from.
+ *
+ * Must be called before the first pose attempt and while the mesh is still in
+ * the pose the container gave it, because that is what every pose is built
+ * from. Taking it lazily inside the first pose looks equivalent and is not: a
+ * pose attempt is made against an arena marker that a rejected animation
+ * rewinds, so a copy taken there can be handed back while a later pose still
+ * believes in it — and the next pose then skins a mesh that is already posed.
+ *
+ * That is not a hypothetical. It happened: the rest pose was applied, the copy
+ * was dropped when the next animation was rejected, and the animation after
+ * that was posed on top of the rest pose rather than from the bind pose. The
+ * only visible sign was the model's measured span quietly changing from 0.242
+ * to 0.230.
+ *
+ * False when the copy would not fit, which leaves posing unavailable rather
+ * than compounding. */
+Boolean discContentKeepBindPose(DiscContentSearch *search, MemoryArena *arena);
+
+/* Follows one named model in an open package all the way to its vertices.
+ *
+ * CRES names a shape, the shape names a mesh, the mesh is in a container: the
+ * same chain the search walks, but starting from a name rather than from
+ * whatever the package happened to hold first. That is what a Sim needs — its
+ * parts are known by name and there are three of them in one package, so
+ * "the first model in this file" is not a question worth asking there.
+ *
+ * The mesh is left in the arena, so a caller merging several must not rewind
+ * between them. materialName is filled with the material the shape binds, or
+ * left empty when it binds none.
+ *
+ * False when any hop fails, and the log line the caller writes should say which
+ * — a missing shape and an unreadable container are different problems. */
+/* Where the chain from a name to a container stopped. One code per hop, never
+   one for several: "did not resolve" was the first version of this and it named
+   four different failures identically, which is a report that cannot be acted
+   on. */
+typedef enum DiscModelResult
+{
+    DISC_MODEL_OK = 0,
+    DISC_MODEL_NO_TREE,
+    DISC_MODEL_TREE_UNREADABLE,
+    DISC_MODEL_NO_SHAPE_NODE,
+    DISC_MODEL_SHAPE_NOT_IN_PACKAGE,
+    DISC_MODEL_SHAPE_UNREADABLE,
+    DISC_MODEL_NO_GEOMETRY_NAMED,
+    DISC_MODEL_GEOMETRY_UNREADABLE
+} DiscModelResult;
+
+const char *discModelResultGetName(DiscModelResult result);
+
+DiscModelResult discContentReadNamedModel(MemoryArena *arena, const Package *package,
+                                          const char *resourceName, GeometryMesh *mesh,
+                                          char *materialName, MemorySize materialCapacity);
 
 #endif

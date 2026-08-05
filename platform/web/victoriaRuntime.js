@@ -14,10 +14,20 @@ const runtimeState = {
     meshUniformBuffer: null,
     meshBindGroup: null,
     meshVertexBuffer: null,
+    // The vertex buffer's size, so an update can refuse a mesh of a different
+    // shape rather than writing past the end of what was uploaded.
+    meshVertexBytes: 0,
     meshIndexBuffer: null,
     meshTexture: null,
     meshSampler: null,
     meshIndexCount: 0,
+    // One index range and one bind group per part, so a model can be painted a
+    // part at a time. WebGPU binds a texture through a group rather than to a
+    // slot, so a part with its own texture needs a group of its own — there is
+    // no equivalent of rebinding one texture name between draw calls.
+    meshParts: [],
+    meshPartTextures: [],
+    meshPartBindGroups: [],
     depthTexture: null,
     bindGroup: null,
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
@@ -68,6 +78,25 @@ function rebuildMeshBindGroup() {
             { binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } },
             { binding: 1, resource: runtimeState.meshSampler },
             { binding: 2, resource: runtimeState.meshTexture.createView() }
+        ]
+    });
+    return true;
+}
+
+// A part's own bind group, over that part's own texture. Shares the mesh's
+// uniform buffer and sampler, because only the image differs between parts.
+function rebuildPartBindGroup(partIndex) {
+    const texture = runtimeState.meshPartTextures[partIndex];
+
+    if (!runtimeState.meshPipeline || !texture) {
+        return false;
+    }
+    runtimeState.meshPartBindGroups[partIndex] = runtimeState.device.createBindGroup({
+        layout: runtimeState.meshPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: runtimeState.meshUniformBuffer } },
+            { binding: 1, resource: runtimeState.meshSampler },
+            { binding: 2, resource: texture.createView() }
         ]
     });
     return true;
@@ -233,6 +262,43 @@ const importObject = {
         // Replaces the image the mesh is painted with. The bind group holds the
         // old texture by reference, so it has to be built again — cheap, and
         // done here rather than per frame.
+        // Which range of indices belongs to which part. Sent after the mesh,
+        // and cleared with it, because a range means nothing against a mesh it
+        // did not come from.
+        setMeshPart(partIndex, firstIndex, indexCount) {
+            runtimeState.meshParts[partIndex] = { firstIndex, indexCount };
+        },
+
+        uploadPartTexture(partIndex, pixelPointer, width, height) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const byteCount = width * height * 4;
+
+            if (byteCount <= 0 || pixelPointer + byteCount > memory.byteLength) {
+                return 0;
+            }
+            const pixels = new Uint8Array(memory, pixelPointer, byteCount);
+            const bytesPerRow = (width * 4 + 255) & ~255;
+            const staging = new Uint8Array(bytesPerRow * height);
+
+            for (let row = 0; row < height; row += 1) {
+                staging.set(pixels.subarray(row * width * 4, (row + 1) * width * 4),
+                            row * bytesPerRow);
+            }
+            const texture = runtimeState.device.createTexture({
+                size: { width, height },
+                format: "rgba8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeTexture(
+                { texture }, staging, { bytesPerRow, rowsPerImage: height }, { width, height });
+
+            if (runtimeState.meshPartTextures[partIndex]) {
+                runtimeState.meshPartTextures[partIndex].destroy();
+            }
+            runtimeState.meshPartTextures[partIndex] = texture;
+            return rebuildPartBindGroup(partIndex) ? 1 : 0;
+        },
+
         uploadTexture(pixelPointer, width, height) {
             const memory = runtimeState.instance.exports.memory.buffer;
             const byteCount = width * height * 4;
@@ -257,10 +323,19 @@ const importObject = {
             // size looked correct for as long as the teapot was the only model.
             const indexBytes = (indexCount * 2 + 3) & ~3;
 
+            // Whatever the last mesh took, given back. A GPU buffer dropped on
+            // the floor is not collected on any schedule worth relying on.
+            if (runtimeState.meshVertexBuffer) {
+                runtimeState.meshVertexBuffer.destroy();
+            }
+            if (runtimeState.meshIndexBuffer) {
+                runtimeState.meshIndexBuffer.destroy();
+            }
             runtimeState.meshVertexBuffer = runtimeState.device.createBuffer({
                 size: vertexBytes,
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
+            runtimeState.meshVertexBytes = vertexBytes;
             runtimeState.device.queue.writeBuffer(
                 runtimeState.meshVertexBuffer, 0,
                 new Uint8Array(memory, vertexPointer, vertexBytes));
@@ -279,6 +354,37 @@ const importObject = {
             runtimeState.device.queue.writeBuffer(runtimeState.meshIndexBuffer, 0, indexStaging);
 
             runtimeState.meshIndexCount = indexCount;
+            // The ranges and their textures belonged to the mesh just replaced.
+            for (const texture of runtimeState.meshPartTextures) {
+                if (texture) {
+                    texture.destroy();
+                }
+            }
+            runtimeState.meshParts = [];
+            runtimeState.meshPartTextures = [];
+            runtimeState.meshPartBindGroups = [];
+            return 1;
+        },
+
+        // New positions for the mesh already here. Writes over the buffer rather
+        // than making one, which is the whole point of it: uploadMesh clears the
+        // part ranges and destroys the part textures, and an animation calling
+        // that once a frame left the Sim wearing one skin over its whole body
+        // from the first frame it moved.
+        //
+        // Refuses a different vertex count instead of resizing. A mesh of
+        // another shape is another model, and building one is uploadMesh's job.
+        updateMeshVertices(vertexPointer, vertexCount) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const vertexBytes = vertexCount * 32;
+
+            if (!runtimeState.meshVertexBuffer || vertexBytes !== runtimeState.meshVertexBytes ||
+                vertexPointer + vertexBytes > memory.byteLength) {
+                return 0;
+            }
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshVertexBuffer, 0,
+                new Uint8Array(memory, vertexPointer, vertexBytes));
             return 1;
         },
 
@@ -312,10 +418,28 @@ const importObject = {
             const pass = encoder.beginRenderPass(descriptor);
             if (drawingMesh) {
                 pass.setPipeline(runtimeState.meshPipeline);
-                pass.setBindGroup(0, runtimeState.meshBindGroup);
                 pass.setVertexBuffer(0, runtimeState.meshVertexBuffer);
                 pass.setIndexBuffer(runtimeState.meshIndexBuffer, "uint16");
-                pass.drawIndexed(runtimeState.meshIndexCount, 1, 0, 0, 0);
+                if (runtimeState.meshParts.length > 0) {
+                    // A part at a time, each with its own skin. A Sim drawn in
+                    // one call wears one texture, and with a face's texture on
+                    // its body the arms come out banded with an eyebrow.
+                    for (let part = 0; part < runtimeState.meshParts.length; part += 1) {
+                        const range = runtimeState.meshParts[part];
+
+                        if (!range || range.indexCount === 0) {
+                            continue;
+                        }
+                        // A part never given a texture falls back to the
+                        // model's, so a single-texture model is unaffected.
+                        pass.setBindGroup(0, runtimeState.meshPartBindGroups[part] ||
+                                             runtimeState.meshBindGroup);
+                        pass.drawIndexed(range.indexCount, 1, range.firstIndex, 0, 0);
+                    }
+                } else {
+                    pass.setBindGroup(0, runtimeState.meshBindGroup);
+                    pass.drawIndexed(runtimeState.meshIndexCount, 1, 0, 0, 0);
+                }
             } else {
                 pass.setPipeline(runtimeState.pipeline);
                 pass.setBindGroup(0, runtimeState.bindGroup);

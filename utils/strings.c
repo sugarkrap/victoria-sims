@@ -57,6 +57,21 @@ Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix)
     return BOOLEAN_TRUE;
 }
 
+Boolean stringEqualsIgnoringCase(const char *first, const char *second)
+{
+    MemorySize index = 0UL;
+
+    while (first[index] != '\0' && second[index] != '\0')
+    {
+        if (characterToLowerCase(first[index]) != characterToLowerCase(second[index]))
+        {
+            return BOOLEAN_FALSE;
+        }
+        index += 1UL;
+    }
+    return (first[index] == '\0' && second[index] == '\0') ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+}
+
 Boolean stringContainsIgnoringCase(const char *text, const char *needle)
 {
     MemorySize textLength = stringLength(text);

@@ -346,20 +346,24 @@ static Real32 shadeFace(const Unsigned16 *face)
     {
         return 0.35f;
     }
-    /* One Newton step from a rough guess. Good to a few parts in a thousand,
-       which is far beyond what a shade of grey needs, and avoids a square root
-       on targets where that is a library call. */
+    /* This used to run four Newton steps from an estimate of one, inline. That
+       is accurate for a cross product near unit length and wrong by a factor of
+       sixty for one a thousandth of that — which is what a Sim's triangles
+       make, the model being under two units across and carrying eighteen
+       hundred vertices. Every normal came out too short, every lambert came out
+       near nought, and the whole body shaded at the 0.28 floor: a Sim in
+       silhouette. The teapot's triangles are ten times larger and were fine,
+       which is why it stood for as long as it did. */
     {
-        Real32 estimate = 1.0f;
-        Unsigned32 step;
+        Real32 length = mathSquareRoot(lengthSquared);
 
-        for (step = 0U; step < 4U; step++)
+        if (length <= 0.0f)
         {
-            estimate = 0.5f * (estimate + (lengthSquared / estimate));
+            return 0.35f;
         }
         for (axis = 0U; axis < 3U; axis++)
         {
-            normal[axis] /= estimate;
+            normal[axis] /= length;
         }
     }
 
@@ -441,4 +445,38 @@ void renderShutdown(void)
 Unsigned32 renderGetShaderProgramCount(void)
 {
     return 0U;
+}
+
+/* Nothing to do: this backend keeps a pointer to the mesh rather than a copy of
+   it, so vertices moved in place are already what the next frame rasterizes.
+   The camera is deliberately not re-framed — that would zoom the model about as
+   an animation moved it. */
+/* Nothing to do, and it is worth saying why rather than leaving a bare no-op.
+ *
+ * This backend keeps the caller's GeometryMesh by pointer and reads its
+ * positions afresh every frame — projectMesh and shadeFace both work straight
+ * off activeMesh. The engine poses by rewriting those positions in place, so
+ * the new pose is already here by the time this is called. The two backends
+ * that upload to a device need telling; this one does not.
+ *
+ * That makes it correct by a coupling rather than by construction. An engine
+ * that ever posed into a buffer of its own would freeze this backend at the
+ * bind pose and say nothing, so the coupling is written down here. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    (void)mesh;
+    (void)arena;
+}
+
+void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                          Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+{
+    /* Accepted and ignored, for the same reason renderSetTexture is: this
+       backend shades flat because the hardware at the bottom of the ladder
+       cannot afford to sample per pixel. A part's own texture changes nothing
+       when no texture is sampled at all. */
+    (void)partIndex;
+    (void)rgbaPixels;
+    (void)widthInPixels;
+    (void)heightInPixels;
 }

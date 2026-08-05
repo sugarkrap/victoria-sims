@@ -36,6 +36,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/packageReader.c \
                   engine/source/resourceCollection.c engine/source/geometryReader.c \
                   engine/source/scenegraph.c engine/source/resourceNode.c \
+                  engine/source/animationReader.c \
                   engine/source/textureReader.c engine/source/textureDecode.c \
                   engine/source/material.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
@@ -179,7 +180,7 @@ done
 $(ARCHIVER) rcs $(4) $(2)/*.o
 endef
 
-.PHONY: all linux web armv5 armv7 oabi verify check clean
+.PHONY: all linux web armv5 armv7 oabi verify verifyWeb check clean
 
 all: linux
 
@@ -223,6 +224,7 @@ $(OABI_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	esac
 
 RASTERIZER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyRasterizer
+FREESTANDING_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFreestandingRuntime
 PACKAGE_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPackageReader
 DISC_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscReader
 GEOMETRY_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGeometryReader
@@ -231,6 +233,7 @@ COMPRESSION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyCompression
 STRINGS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyStrings
 SCENEGRAPH_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyScenegraph
 RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
+ANIMATION_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyAnimationReader
 TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
 RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
@@ -238,11 +241,13 @@ INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
 ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 
-verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
+verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
-		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(TEXTURE_VERIFIER) \
+		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
+		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER)
+	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
 	@$(DISC_READER_VERIFIER)
@@ -252,12 +257,22 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(STRINGS_VERIFIER)
 	@$(SCENEGRAPH_VERIFIER)
 	@$(RESOURCE_NODE_VERIFIER)
+	@$(ANIMATION_READER_VERIFIER)
 	@$(TEXTURE_VERIFIER)
 	@$(RESOURCE_INDEX_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
 	@$(ARCHIVE_VERIFIER)
+
+# The web checks, which need the module built and a node to run it under rather
+# than a compiler. Kept out of `verify` so a machine without either still gets
+# the rest, and named here rather than left to be remembered by hand — the two
+# defects these caught, an odd index count and a pose that stripped a Sim of its
+# skins, both reached a browser because nothing ran them.
+verifyWeb: $(WEB_MODULE)
+	@node tests/verifyRuntimeUpload.mjs
+	@node tests/verifyWebModule.mjs
 
 VERIFIER_SUPPORT := utils/assert.c
 
@@ -300,6 +315,13 @@ $(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyTexture.c engine/source/textureReader.c \
 		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \
 		engine/source/packageReader.c engine/source/memoryArena.c utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(ANIMATION_READER_VERIFIER): tests/verifyAnimationReader.c engine/source/animationReader.c \
+		engine/source/resourceCollection.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyAnimationReader.c engine/source/animationReader.c \
+		engine/source/resourceCollection.c engine/source/memoryArena.c utils/strings.c \
 		$(VERIFIER_SUPPORT) -o $@
 
 $(RESOURCE_NODE_VERIFIER): tests/verifyResourceNode.c engine/source/resourceNode.c \
@@ -361,6 +383,12 @@ $(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageRea
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
 		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
+
+$(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFreestandingRuntime.c \
+		engine/source/freestandingRuntime.c $(VERIFIER_SUPPORT) -o $@
 
 $(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
 		render/software/rasterizerNEON.c $(VERIFIER_SUPPORT)
