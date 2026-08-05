@@ -420,6 +420,23 @@ static const char *const simDrawnPartNames[SIM_DRAWN_PART_COUNT] = { "amBodyNake
                                                                      "amHairBald_cres" };
 static GeometryMesh simParts[SIM_DRAWN_PART_COUNT];
 static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
+
+/* The stem of the texture a part should wear INSTEAD of the one its shape
+ * binds, or empty to wear what it binds.
+ *
+ * The base face resource binds its face primitive to a brow material, because
+ * it cannot know which face a Sim has — the game overrides it per subset, and
+ * openTS2 takes a materialOverridesBySubset for the same reason. This is that
+ * override, standing in for the skin-tone resolution that would choose it
+ * properly: the tone is taken from whatever the body ended up wearing rather
+ * than written down here, so a disc whose bodies are toned differently follows
+ * its own naming rather than this one's guess.
+ *
+ * A stem that resolves to nothing on the disc leaves the part wearing what its
+ * shape bound, and says so. */
+static const char *const simPartTextureStems[SIM_DRAWN_PART_COUNT] = { "", "amface", "" };
+/* The tone the body turned out to wear — "s1" out of "ambodynaked-nude-s1". */
+static char simSkinTone[RESOURCE_NAME_LIMIT];
 /* Set once the parts are joined and drawn, which stops the animation search
    from posing them. The palette is built against discSearch.modelTree, and that
    tree still belongs to the model the search found — not to these parts. Posing
@@ -966,9 +983,10 @@ static Boolean fetchLargestLevel(char *message, MemorySize messageCapacity)
  * a wrong texture. Following the reference is worth doing and is not done here.
  *
  * False while a read is still on its way. */
-static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
+static Boolean paintPart(Unsigned32 partIndex, const char *materialName, const char *textureStem)
 {
     char wanted[RESOURCE_NAME_LIMIT];
+    char chosen[RESOURCE_NAME_LIMIT];
     const ResourceIndexEntry *entry;
     Unsigned8 *bytes;
     MemorySize size;
@@ -976,6 +994,7 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
     TextureDescription texture;
     char message[256];
     MemorySize marker;
+    Boolean overridden = BOOLEAN_FALSE;
 
     if (materialName == NULL_POINTER || materialName[0] == '\0')
     {
@@ -1012,12 +1031,44 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
         return BOOLEAN_TRUE;
     }
 
-    materialBuildResourceName(wanted, sizeof(wanted), material.baseTextureName, "_txtr");
+    chosen[0] = '\0';
+    stringAppend(chosen, sizeof(chosen), material.baseTextureName);
+
+    /* The override, when this part has one and the disc actually carries it. */
+    if (textureStem != NULL_POINTER && textureStem[0] != '\0' && simSkinTone[0] != '\0')
+    {
+        char preferred[RESOURCE_NAME_LIMIT];
+
+        preferred[0] = '\0';
+        stringAppend(preferred, sizeof(preferred), textureStem);
+        stringAppend(preferred, sizeof(preferred), "-");
+        stringAppend(preferred, sizeof(preferred), simSkinTone);
+        materialBuildResourceName(wanted, sizeof(wanted), preferred, "_txtr");
+        if (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted) !=
+            NULL_POINTER)
+        {
+            chosen[0] = '\0';
+            stringAppend(chosen, sizeof(chosen), preferred);
+            overridden = BOOLEAN_TRUE;
+        }
+        else
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   part ");
+            appendCount(message, sizeof(message), partIndex);
+            stringAppend(message, sizeof(message), " would rather wear ");
+            stringAppend(message, sizeof(message), preferred);
+            stringAppend(message, sizeof(message),
+                         ", which this disc has not got — keeping what its shape bound");
+            platformLogMessage(message);
+        }
+    }
+
+    materialBuildResourceName(wanted, sizeof(wanted), chosen, "_txtr");
     entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
     if (entry == NULL_POINTER)
     {
-        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR,
-                                       material.baseTextureName);
+        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, chosen);
     }
     if (entry == NULL_POINTER)
     {
@@ -1025,7 +1076,7 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
         stringAppend(message, sizeof(message), "engine:   ");
         stringAppend(message, sizeof(message), materialName);
         stringAppend(message, sizeof(message), " names ");
-        stringAppend(message, sizeof(message), material.baseTextureName);
+        stringAppend(message, sizeof(message), chosen);
         stringAppend(message, sizeof(message), ", which is nowhere on this disc");
         platformLogMessage(message);
         return BOOLEAN_TRUE;
@@ -1038,7 +1089,7 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
     {
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), material.baseTextureName);
+        stringAppend(message, sizeof(message), chosen);
         stringAppend(message, sizeof(message), " — would not read");
         platformLogMessage(message);
         return BOOLEAN_TRUE;
@@ -1061,11 +1112,34 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName)
         stringAppend(message, sizeof(message), "engine:   part ");
         appendCount(message, sizeof(message), partIndex);
         stringAppend(message, sizeof(message), " painted with ");
-        stringAppend(message, sizeof(message), material.baseTextureName);
+        stringAppend(message, sizeof(message), chosen);
+        if (overridden)
+        {
+            stringAppend(message, sizeof(message), " (overriding the ");
+            stringAppend(message, sizeof(message), material.baseTextureName);
+            stringAppend(message, sizeof(message), " its shape bound)");
+        }
         if (decodeResult == TEXTURE_DECODE_OK)
         {
             renderSetPartTexture(partIndex, decoded, (Unsigned32)texture.levelWidth,
                                  (Unsigned32)texture.levelHeight);
+            /* The tone is the last hyphenated piece of a texture's name, and it
+               is taken from a part wearing what it was bound rather than from
+               one already overridden — otherwise the override would be deriving
+               its own input. */
+            if (!overridden && simSkinTone[0] == '\0')
+            {
+                MemorySize at = stringLength(chosen);
+
+                while (at > 0UL && chosen[at - 1UL] != '-')
+                {
+                    at -= 1UL;
+                }
+                if (at > 0UL)
+                {
+                    stringAppend(simSkinTone, sizeof(simSkinTone), &chosen[at]);
+                }
+            }
             stringAppend(message, sizeof(message), " at ");
             appendCount(message, sizeof(message), (Unsigned32)texture.levelWidth);
             stringAppend(message, sizeof(message), "x");
@@ -1422,7 +1496,7 @@ static SimAssembly assembleTheSim(void)
     {
         for (which = 0U; which < gathered; which++)
         {
-            if (!paintPart(which, simPartMaterials[which]))
+            if (!paintPart(which, simPartMaterials[which], simPartTextureStems[which]))
             {
                 return SIM_ASSEMBLY_PENDING;
             }
