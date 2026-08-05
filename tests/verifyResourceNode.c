@@ -197,6 +197,27 @@ int main(void)
         resourceNodeGetWorldTransform(&made, 0U, matrix);
         checkThat(&failureCount, "and the parent itself stays at the origin",
                   nearly(matrix[12], 0.0f) && nearly(matrix[13], 0.0f) && nearly(matrix[14], 0.0f));
+
+        printf("\n-- finding a bone by the identifier it carries --\n");
+        /* A primitive's bone list holds identifiers, not positions in this
+           list. The two are given opposite orders here on purpose: bone 9 is
+           node 0 and bone 4 is node 1, so a lookup that indexed instead of
+           searching would answer node 4 — off the end — or node 9, and either
+           way would pose the model by the wrong joint.
+
+           The identifiers are small, which is why this cannot be told apart by
+           looking at their size. That was the guess that had to be measured. */
+        made.nodes[0].boneIdentifier = 9U;
+        made.nodes[1].boneIdentifier = 4U;
+
+        checkThat(&failureCount, "the first bone is found where its identifier says",
+                  resourceNodeFindByBoneIdentifier(&made, 9U) == 0);
+        checkThat(&failureCount, "and the second likewise, not where its number would index",
+                  resourceNodeFindByBoneIdentifier(&made, 4U) == 1);
+        checkThat(&failureCount, "an identifier no node carries finds nothing",
+                  resourceNodeFindByBoneIdentifier(&made, 7U) == -1);
+        checkThat(&failureCount, "and the not-a-bone sentinel is not special-cased into a match",
+                  resourceNodeFindByBoneIdentifier(&made, 0x7FFFFFFFUL) == -1);
     }
 
     printf("\n-- refusing what it should --\n");

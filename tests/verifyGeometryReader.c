@@ -420,6 +420,26 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
 
         putIndexArray(builder, bones, 3U, blockVersion);
     }
+
+    /* The bind pose, which the container carries itself in a section straight
+     * after the primitives.
+     *
+     * Ten entries because the bone list above names bone 9, and these are
+     * indexed by the bone number rather than by the slot that named it — a
+     * reader that indexed by the slot would read entry 1 for bone 9 and find a
+     * plausible transform there, which is why each entry is given a translation
+     * equal to its own index and nothing else. */
+    putUnsigned32(builder, 10U);
+    for (index = 0U; index < 10U; index++)
+    {
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 1.0f);
+        putReal32(builder, (Real32)index);
+        putReal32(builder, 0.0f);
+        putReal32(builder, 0.0f);
+    }
 }
 
 int main(void)
@@ -760,6 +780,22 @@ int main(void)
                   skinned.primitives[0].boneRemap[0] == 4U &&
                       skinned.primitives[0].boneRemap[1] == 9U &&
                       skinned.primitives[0].boneRemap[2] == 2U);
+
+        printf("\n-- does the container's own bind pose arrive --\n");
+        /* The section after the primitives, which an earlier reader stopped
+           short of entirely. What is in it is the inverse bind — measured on a
+           retail container, where a bone's world transform out of the tree
+           times the stored transform landed on the identity — so reading it is
+           what lets a pose palette be built without a matrix inverse. */
+        checkThat(&failureCount, "the bind pose is read", skinned.bindPoses != NULL_POINTER);
+        checkThat(&failureCount, "with one entry per bone the file described",
+                  skinned.bindPoseCount == 10U);
+        checkThat(&failureCount, "indexed by the bone number and not by the slot that named it",
+                  nearly(skinned.bindPoses[9].translation[0], 9.0f) &&
+                      nearly(skinned.bindPoses[4].translation[0], 4.0f));
+        checkThat(&failureCount, "reading the quaternion in the order the file writes it",
+                  nearly(skinned.bindPoses[0].rotation[3], 1.0f) &&
+                      nearly(skinned.bindPoses[0].rotation[0], 0.0f));
 
         printf("\n-- posing by the skeleton --\n");
         {

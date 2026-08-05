@@ -1,7 +1,6 @@
 # Handoff
 
-Where the engine is as of `3b62efd` on `claude/sims2-unity-bootstrap-kb9op7`,
-what it does on a real disc, and what is worth doing next.
+Where the engine is, what it does on a real disc, and what is worth doing next.
 
 Written to be read by someone who has none of the conversation that produced it.
 
@@ -10,7 +9,7 @@ Written to be read by someone who has none of the conversation that produced it.
 ```sh
 make            # the Linux build, into build/linux/victoriaSims
 make web        # the WebAssembly build, into build/web/
-make verify     # 15 C suites; all should say "checks passed"
+make verify     # 16 C suites; all should say "checks passed"
 make check      # proves no allocator symbol is linked in
 node tests/verifyWebModule.mjs     # the wasm module against a fixture disc
 node tests/verifyRuntimeUpload.mjs # the browser runtime's upload path
@@ -47,6 +46,8 @@ The load then goes, in order:
    package.
 5. **Fetch the texture** the material names, following a TXTR's reference to the
    LIFO holding its largest mip level.
+6. If what was drawn has a skeleton, **index every package for animations** and
+   open them until one names this skeleton, then pose the mesh by it.
 
 On the tested disc that ends at a textured Sim face:
 `#0x7f9bd9b9!age3_00_shpe` out of
@@ -56,10 +57,11 @@ On the tested disc that ends at a textured Sim face:
 Every stage says what it saw. A run's log is meant to be self-describing enough
 that this document is not needed to interpret it.
 
-## The skeleton, and why nothing moves
+## The skeleton, and why a resting mesh still does not move
 
-`#23` is complete as **reading** the skeleton. Nothing is applied, and that is a
-finding rather than a gap:
+`#23` read the skeleton and applied nothing. That was a finding rather than a
+gap, and it still holds — what changed with #26 is that there is now an
+animation to supply transforms that are not the bind pose:
 
 > Skinning is `Σ weight · bonePose · inverseBind · v`. The inverse bind is the
 > bone's transform in the pose the mesh was authored in. The mesh on the disc
@@ -74,7 +76,7 @@ drew correctly with no skinning applied whatsoever. The rule is documented on
 check pins it: a palette of identities moves every vertex and lands each one
 exactly where it started.
 
-What is read and kept, ready for an animation:
+What is read and kept, and now fed to one:
 
 - **Bone assignments** `0xFBD70111` — one word per vertex, four byte indices
   packed low-byte-first, 255 meaning an unused slot.
@@ -91,44 +93,134 @@ lives in the repo at
 with all nineteen and both their wiki and in-game names. Read it before
 inferring anything about an element.
 
-## The one open question
+## The question that was open, and the answer
 
-Every run with a skinned mesh logs the bones its primitives named:
+Whether a primitive's bone numbers were **positions in the node list** or the
+**identifiers its nodes carry** is settled: they are identifiers.
+
+The heuristic written down here for telling them apart — small means positions,
+large means identifiers — was **wrong**, and worth recording as wrong. Real bone
+identifiers are small: this disc's face names bones 7, 6 and 5. What is large is
+`0x7FFFFFFF`, the sentinel a node carries when it is *not* a bone, and seeing
+that on a root node is what made identifiers look like they ought to be big.
+
+The reference settles it without any inference at all: `ScenegraphComponent.cs`
+keys its own lookup as `_boneIdToTransform[transformNode.BoneId]`.
+`resourceNodeFindByBoneIdentifier` now searches rather than indexes, and a check
+pins it against a tree whose two orders deliberately disagree.
+
+## The bind pose was in the file all along
+
+The plan recorded here was to invert what `resourceNodeGetWorldTransform`
+returns. That is not necessary: the GMDC carries its own pose-transform array,
+one quaternion and translation per bone, in a section straight after the
+primitives that this reader used to stop short of. It is numbered the way the
+primitives' bone lists are numbered, so a bone number indexes it directly.
+
+It holds the **inverse** bind, which was measured rather than assumed:
 
 ```
-engine: weighted to 126 bone(s) of the tree, left in its bind pose because
-skinning it there would move nothing; its primitives named bones 4 9 2 …
+engine: 3 bone name(s) matched a node by identifier, 0 matched none; over 3
+measured, world x stored is 0.000 from the identity and stored is 1.666 from
+world — the smaller says which the file holds
 ```
 
-Whether those numbers are **positions in the tree's node list** or the
-**identifiers its nodes carry** (`TransformNode.boneIdentifier`) has not been
-settled. Small values mean the first; large ones mean the second, and want
-matching against nodes rather than indexing into them. One glance at that line
-answers it, and the answer decides how a pose palette gets built.
+Both directions are printed on every run, because the number that matters is
+whichever is near nought and a reader told only the winner has to take the
+comparison on trust. So the engine still has no matrix inverse and, on this
+evidence, needs none.
+
+## #26 — posing from an animation
+
+Done. A skinned mesh on screen now sends the load into
+`DISC_PHASE_SEEK_ANIMATION`, which indexes the disc for `0xFB00791E` exactly as
+the skin search indexes for geometry, and opens animations until one will pose
+the model:
+
+```
+engine: 11757 animation(s) across 1411 package(s) to choose from
+engine: animation a2o-exerciseMachine-benchPress-start_anim — 89 channel(s) over
+5 target(s), 3400 tick(s) long, authored against auskel, and 4 inverse
+kinematics chain(s) this does not follow
+engine: posed 521 of 521 vertices over 63 bone(s), 52 channel(s) of the
+animation reaching them; it moved by 0.410 against a model 0.242 across
+```
+
+Two things about that run are the whole lesson of it.
+
+**An animation is matched by name, not by number.** A channel carries a bone's
+name as a string and the tree carries nodes with names, so no hash is resolved
+and no index is trusted. The model's own bones on this disc are `head`, `neck`
+and `spine2`.
+
+**The rest pose is what proves it, and nothing else can.** Every animation on
+the disc produces a shape nobody here can check by looking — except
+`a-pose-neutral-stand_anim`, which is very nearly the pose the mesh was authored
+in and so should move it almost not at all. The animation phase now asks for
+that one by name before falling back to the scan, and says outright whether the
+result was what it had to be:
+
+```
+engine: posed 521 of 521 vertices over 63 bone(s), 48 channel(s) of the
+animation reaching them; it moved by 0.011 against a model 0.242 across
+engine: that was the rest pose, which should move the mesh almost not at all —
+and it did not, so the pose composes the way the game does
+```
+
+Under five per cent of the model's own span. That number is the standing proof
+that the palette, the bind pose, the bone numbering and the Euler convention all
+agree with the game; run it before trusting any change to them.
+
+**Do not diagnose this by looking at two screenshots.** The camera orbits at
+`elapsedSeconds * 0.6f` (`render/openGLES2/renderOpenGLES2.c`), so two captures
+taken at different moments show the model from different angles. A 521-vertex
+face has no modelled back to the skull, and seen from the side it is a profile
+with a smooth shapeless mass behind it — which looks exactly like a mesh torn
+apart. That cost a full round of misdirected diagnosis here: a working pose was
+called a spike, and two hypotheses were built and refuted before the rest pose
+settled it in one run. The instrument to reach for is that check, not the eye.
+
+**The first version of it did lie, though.** It accepted the first animation that read, and
+reported 521 vertices posed by a lighting rig's animation — because
+`geometryMeshApplySkin` returns the number of vertices it *walked*, and an
+all-identity palette walks every one of them to put each back where it was. Two
+guards followed, and neither is optional: the animation's skeleton tag has to
+name a node this model actually has, and the movement is measured against the
+model's own size. A shift on the order of the span is a pose; nought is a
+no-op; many times larger is the spike this project drew once already.
 
 ## Next
 
-- **#26 — pose from an animation.** ANIM resources are `0xFB00791E` and the disc
-  holds plenty; the index can find them exactly as `DISC_PHASE_SEEK_SKIN` finds
-  geometry. The palette is `animatedTransform · inverse(bindTransform)`, the
-  bind one being what `resourceNodeGetWorldTransform` returns. There is no
-  matrix inverse in the engine yet — an affine one is a transposed rotation and
-  a negated, rotated translation, worth writing as that rather than as a general
-  inverse.
 - **#24 — paint each primitive range separately.** The data is already recorded:
   each part's `firstIndex`, `indexCount` and its own material. What is missing is
   N draw calls over those ranges in all three backends, and a per-part texture
   fetch that survives the browser's pending reads.
 - **#22 — walk the archive in fewer reads.** 1,529 entries at one round trip
   each.
+- **Sample the pose on a clock.** The tick posed at is nought, hard-coded. What
+  is read supports any tick — the keyframes and their times are all kept — so
+  what is missing is a caller that advances one.
 
 ## Known soft spots
 
 - **The find-and-redirect path has no fixture.** The test disc holds no skinned
   mesh, so `make verify` cannot catch a regression in the search that finds one
   or the redirect that draws it — only the real disc exercises those. A skinned
-  container in `scripts/makeTestDisc.sh` would close it, and #26 will want one
-  anyway to have something to test a pose against.
+  container in `scripts/makeTestDisc.sh` would close it, and it would also give
+  the pose path something to run against, which it likewise has no fixture for:
+  `verifyAnimationReader` covers the format thoroughly and covers the palette,
+  the tag check and the skinning composition not at all.
+- **Past the rest pose, the animation is whichever the scan reaches first.** The
+  named rest pose is tried first; if it is missing, the fallback opens indexed
+  animations until one names this skeleton, so which one poses the Sim then
+  depends on index order, and up to 64 are opened looking for it.
+- **Keyframes are sampled on straight lines.** The tangents are in the file and
+  are read past, not followed. Right at every keyframe, close between them, and
+  wrong in a way that will matter as soon as anything samples a tick that is not
+  a keyframe's.
+- **Inverse kinematics chains are counted and skipped.** Every run says how
+  many, which is what stops the omission from being invisible: the animation
+  above carries four.
 - **The fixture disc reads more bytes than the image is long** (about 1.8×).
   That is not a leak: every model in it is rigid, so it takes the worst case of
   both searches — read every package, come back for the first, then index and

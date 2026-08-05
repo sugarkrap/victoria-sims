@@ -596,12 +596,12 @@ static void setIdentity(Real32 *matrix)
 }
 
 /* Column major, to match everything else that ends up in front of a shader. */
-static void buildLocalMatrix(const TransformNode *node, Real32 *matrix)
+void resourceNodeBuildTransform(const Real32 *rotation, const Real32 *translation, Real32 *matrix)
 {
-    Real32 x = node->rotation[0];
-    Real32 y = node->rotation[1];
-    Real32 z = node->rotation[2];
-    Real32 w = node->rotation[3];
+    Real32 x = rotation[0];
+    Real32 y = rotation[1];
+    Real32 z = rotation[2];
+    Real32 w = rotation[3];
 
     matrix[0] = 1.0f - 2.0f * (y * y + z * z);
     matrix[1] = 2.0f * (x * y + z * w);
@@ -618,10 +618,30 @@ static void buildLocalMatrix(const TransformNode *node, Real32 *matrix)
     matrix[10] = 1.0f - 2.0f * (x * x + y * y);
     matrix[11] = 0.0f;
 
-    matrix[12] = node->translation[0];
-    matrix[13] = node->translation[1];
-    matrix[14] = node->translation[2];
+    matrix[12] = translation[0];
+    matrix[13] = translation[1];
+    matrix[14] = translation[2];
     matrix[15] = 1.0f;
+}
+
+static void buildLocalMatrix(const TransformNode *node, Real32 *matrix)
+{
+    resourceNodeBuildTransform(node->rotation, node->translation, matrix);
+}
+
+Integer32 resourceNodeFindByBoneIdentifier(const ResourceNodeDescription *description,
+                                           Unsigned32 boneIdentifier)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < description->storedNodeCount; index++)
+    {
+        if (description->nodes[index].boneIdentifier == boneIdentifier)
+        {
+            return (Integer32)index;
+        }
+    }
+    return -1;
 }
 
 static void multiply(const Real32 *left, const Real32 *right, Real32 *result)
@@ -643,6 +663,11 @@ static void multiply(const Real32 *left, const Real32 *right, Real32 *result)
             result[column * 4U + row] = sum;
         }
     }
+}
+
+void resourceNodeMultiplyTransforms(const Real32 *left, const Real32 *right, Real32 *result)
+{
+    multiply(left, right, result);
 }
 
 void resourceNodeGetWorldTransform(const ResourceNodeDescription *description, Unsigned32 nodeIndex,

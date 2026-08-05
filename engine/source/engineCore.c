@@ -85,6 +85,42 @@ static void appendCount(char *destination, MemorySize capacity, Unsigned32 value
     }
 }
 
+/* A small real to three decimal places, which is as much as a "how far from the
+   identity is this" number needs. There is no formatter for reals here and no C
+   library to borrow one from, so the fraction is scaled into an integer and
+   padded by hand. Values are expected around nought to a few; a large one
+   saturates rather than wrapping, because a comparison that reads as 0.001
+   because it overflowed would be worse than one that reads as too big. */
+static void appendThousandths(char *destination, MemorySize capacity, Real32 value)
+{
+    Unsigned32 scaled;
+    Unsigned32 fraction;
+
+    if (value < 0.0f)
+    {
+        value = -value;
+        stringAppend(destination, capacity, "-");
+    }
+    if (value >= 1000000.0f)
+    {
+        stringAppend(destination, capacity, "a great deal");
+        return;
+    }
+    scaled = (Unsigned32)(value * 1000.0f + 0.5f);
+    appendCount(destination, capacity, scaled / 1000U);
+    stringAppend(destination, capacity, ".");
+    fraction = scaled % 1000U;
+    if (fraction < 100U)
+    {
+        stringAppend(destination, capacity, "0");
+    }
+    if (fraction < 10U)
+    {
+        stringAppend(destination, capacity, "0");
+    }
+    appendCount(destination, capacity, fraction);
+}
+
 static void appendHexadecimal(char *destination, MemorySize capacity, Unsigned32 value)
 {
     char digits[24];
@@ -284,6 +320,7 @@ typedef enum DiscPhase
     DISC_PHASE_FETCH_TEXTURE,
     DISC_PHASE_FETCH_LEVEL,
     DISC_PHASE_SEEK_SKIN,
+    DISC_PHASE_SEEK_ANIMATION,
     DISC_PHASE_DONE
 } DiscPhase;
 
@@ -316,6 +353,35 @@ static Unsigned32 skinScanned = 0U;
    two hundred and fifty six containers drawn from across the whole disc hold no
    bone data, the answer is not "look at more of them". */
 #define SKIN_SCAN_LIMIT 256U
+
+/* The search for something to pose the mesh with, which runs only once a
+ * skinned mesh is what is on screen. Same shape as the skin search above and
+ * for the same reasons: index the disc for one type, then open entries until
+ * one reads.
+ *
+ * The tick posed at is nought — the first moment of the animation — because the
+ * point here is to prove a pose is applied at all, and a mesh moved to the
+ * opening frame of a real animation is a pose that either looks like a Sim or
+ * does not. Sampling a tick chosen by anything other than a clock would be
+ * making the number up. */
+static ResourceIndex animationIndex;
+static Animation posedAnimation;
+static Boolean animationIndexBegun = BOOLEAN_FALSE;
+static Boolean animationIndexBuilding = BOOLEAN_FALSE;
+static Unsigned32 animationCursor = 0U;
+static Unsigned32 animationScanned = 0U;
+
+#define ANIMATION_INDEX_CAPACITY 32768U
+#define ANIMATION_SCAN_LIMIT 64U
+#define ANIMATION_POSE_TICK 0.0f
+
+/* The one animation on the disc whose correct outcome is known before it runs:
+   a Sim standing in very nearly the pose its mesh was authored in. Posing by it
+   should move almost nothing, so it is the only available check that the pose
+   pipeline composes its matrices the way the game does. */
+#define ANIMATION_REST_POSE_NAME "a-pose-neutral-stand_anim"
+static Boolean animationTriedNamed = BOOLEAN_FALSE;
+static Boolean animationUsedRestPose = BOOLEAN_FALSE;
 
 /* Where the arena stood before the texture was read, kept because the texture
    has to survive between steps.
@@ -851,6 +917,29 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
         }
         platformLogMessage("engine: not enough room to index the disc for a skinned mesh");
     }
+
+    /* A skinned mesh is on screen, so there is finally something an animation
+       can be applied to. Until now every mesh drawn was rigid and a pose would
+       have had nothing to move. */
+    if (discSearch.mesh.boneAssignments != NULL_POINTER && !animationIndexBegun)
+    {
+        static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_ANIM };
+
+        animationIndexBegun = BOOLEAN_TRUE;
+        if (resourceIndexBegin(&animationIndex, discFileSystem, globalArena,
+                               ANIMATION_INDEX_CAPACITY, wantedTypes, 1U))
+        {
+            animationIndexBuilding = BOOLEAN_TRUE;
+            animationCursor = 0U;
+            animationScanned = 0U;
+            platformLogMessage("engine: what was drawn has a skeleton — asking the index for an "
+                               "animation to pose it with");
+            discPhase = DISC_PHASE_SEEK_ANIMATION;
+            return ENGINE_DISC_WORKING;
+        }
+        platformLogMessage("engine: not enough room to index the disc for an animation");
+    }
+
     discPhase = DISC_PHASE_DONE;
     discLoadStatus = ENGINE_DISC_READY;
     return discLoadStatus;
@@ -864,6 +953,238 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
 
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
+        return discLoadStatus;
+    }
+
+    if (discPhase == DISC_PHASE_SEEK_ANIMATION)
+    {
+        const ResourceIndexEntry *entry;
+        MemorySize marker;
+        Unsigned8 *bytes;
+        MemorySize size;
+        AnimationReadResult animationResult;
+
+        if (animationIndexBuilding)
+        {
+            if (resourceIndexStep(&animationIndex) == RESOURCE_INDEX_WORKING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            animationIndexBuilding = BOOLEAN_FALSE;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), animationIndex.countByType[0]);
+            stringAppend(message, sizeof(message), " animation(s) across ");
+            appendCount(message, sizeof(message), animationIndex.filesIndexed);
+            stringAppend(message, sizeof(message), " package(s) to choose from");
+            platformLogMessage(message);
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* The rest pose first, by name, before falling back to whatever the
+         * scan reaches.
+         *
+         * This animation is very nearly the pose the mesh was authored in, so
+         * posing by it should move the model almost not at all. That makes it
+         * the one animation on the disc whose correct result is known in
+         * advance, and therefore the only one that can tell a working pose
+         * pipeline from a broken one — every other animation produces a shape
+         * nobody here can check. openTS2's own SimAnimationTest opens with it
+         * for the same reason. */
+        if (!animationTriedNamed)
+        {
+            entry = resourceIndexFindNamed(&animationIndex, (Unsigned32)PACKAGE_TYPE_ANIM,
+                                           ANIMATION_REST_POSE_NAME);
+            if (entry == NULL_POINTER)
+            {
+                platformLogMessage("engine: the rest pose " ANIMATION_REST_POSE_NAME
+                                   " is not on this disc — falling back to the scan, whose "
+                                   "result nothing here can check");
+                animationTriedNamed = BOOLEAN_TRUE;
+                return ENGINE_DISC_WORKING;
+            }
+            marker = memoryArenaGetMarker(globalArena);
+            if (!readIndexedResource(entry, &bytes, &size))
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+            animationTriedNamed = BOOLEAN_TRUE;
+            animationUsedRestPose = BOOLEAN_TRUE;
+        }
+        else
+        {
+            if (animationCursor >= animationIndex.count || animationScanned >= ANIMATION_SCAN_LIMIT)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: opened ");
+                appendCount(message, sizeof(message), animationScanned);
+                stringAppend(message, sizeof(message), " of ");
+                appendCount(message, sizeof(message), animationIndex.count);
+                stringAppend(message, sizeof(message),
+                             " animation(s) and none would pose this mesh");
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_DONE;
+                discLoadStatus = ENGINE_DISC_READY;
+                return discLoadStatus;
+            }
+
+            entry = &animationIndex.entries[animationCursor];
+            marker = memoryArenaGetMarker(globalArena);
+            /* One read per step, for the reason the skin search records: two
+               would alternate forever against a store that answers PENDING. */
+            if (!readIndexedResource(entry, &bytes, &size))
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return ENGINE_DISC_WORKING;
+            }
+            animationCursor++;
+            animationScanned++;
+            animationUsedRestPose = BOOLEAN_FALSE;
+        }
+
+        animationResult = (bytes != NULL_POINTER)
+                              ? animationReaderOpen(&posedAnimation, bytes, size, globalArena)
+                              : ANIMATION_READ_TRUNCATED;
+        if (animationResult != ANIMATION_READ_OK)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: animation ");
+        stringAppend(message, sizeof(message), posedAnimation.resourceName);
+        stringAppend(message, sizeof(message), " — ");
+        appendCount(message, sizeof(message), posedAnimation.channelCount);
+        stringAppend(message, sizeof(message), " channel(s) over ");
+        appendCount(message, sizeof(message), posedAnimation.targetCount);
+        stringAppend(message, sizeof(message), " target(s), ");
+        appendCount(message, sizeof(message), posedAnimation.durationTicks);
+        stringAppend(message, sizeof(message), " tick(s) long, authored against ");
+        stringAppend(message, sizeof(message), (posedAnimation.skeletonTag[0] != '\0')
+                                                   ? posedAnimation.skeletonTag
+                                                   : "a skeleton it does not name");
+        if (posedAnimation.chainCount > 0U)
+        {
+            stringAppend(message, sizeof(message), ", and ");
+            appendCount(message, sizeof(message), posedAnimation.chainCount);
+            stringAppend(message, sizeof(message),
+                         " inverse kinematics chain(s) this does not follow");
+        }
+        platformLogMessage(message);
+
+        if (discContentPoseFromAnimation(&discSearch, &posedAnimation, ANIMATION_POSE_TICK,
+                                         globalArena))
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: posed ");
+            appendCount(message, sizeof(message), discSearch.verticesPosed);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+            stringAppend(message, sizeof(message), " vertices over ");
+            appendCount(message, sizeof(message), discSearch.bonesPosed);
+            stringAppend(message, sizeof(message), " bone(s), ");
+            appendCount(message, sizeof(message), discSearch.channelsApplied);
+            stringAppend(message, sizeof(message), " channel(s) of the animation reaching them");
+            /* Against the model's own size, because a displacement means
+               nothing on its own. This is the number that says whether what is
+               on screen is a pose or the spike. */
+            stringAppend(message, sizeof(message), "; it moved by ");
+            appendThousandths(message, sizeof(message), discSearch.poseShift);
+            stringAppend(message, sizeof(message), " against a model ");
+            appendThousandths(message, sizeof(message), discSearch.poseSpan);
+            stringAppend(message, sizeof(message), " across");
+            platformLogMessage(message);
+
+            /* The verdict, but only for the rest pose — it is the only
+               animation whose right answer is known ahead of time. For any
+               other the displacement above is a number with nothing to compare
+               it against, and saying more than that would be inventing a
+               standard. */
+            if (animationUsedRestPose)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message),
+                             "engine: that was the rest pose, which should move the mesh almost "
+                             "not at all — ");
+                if (discSearch.poseShift < discSearch.poseSpan / 20.0f)
+                {
+                    stringAppend(message, sizeof(message),
+                                 "and it did not, so the pose composes the way the game does");
+                }
+                else
+                {
+                    stringAppend(message, sizeof(message),
+                                 "and it did, so the matrices are being composed in some "
+                                 "convention this engine has wrong");
+                }
+                platformLogMessage(message);
+            }
+
+            /* Per bone the mesh actually draws with, how much of its chain the
+               animation reached against how much was applied. A chain named far
+               more than it is applied is posed in part, and a mesh posed in part
+               is dragged against itself — which is what a torn face looks like,
+               and what a displacement measured on the bounds cannot see. */
+            {
+                Unsigned32 which;
+
+                for (which = 0U; which < discSearch.boneReportCount; which++)
+                {
+                    const DiscContentBoneReport *report = &discSearch.boneReports[which];
+
+                    message[0] = '\0';
+                    stringAppend(message, sizeof(message), "engine:   bone ");
+                    stringAppend(message, sizeof(message), report->nodeName);
+                    stringAppend(message, sizeof(message), " — chain of ");
+                    appendCount(message, sizeof(message), report->chainLength);
+                    stringAppend(message, sizeof(message), ", ");
+                    appendCount(message, sizeof(message), report->chainNamed);
+                    stringAppend(message, sizeof(message), " named by a channel, ");
+                    appendCount(message, sizeof(message), report->chainApplied);
+                    stringAppend(message, sizeof(message), " applied");
+                    if (report->anySkipped)
+                    {
+                        stringAppend(message, sizeof(message), "; first skipped is ");
+                        stringAppend(message, sizeof(message), report->skippedNode);
+                        stringAppend(message, sizeof(message), " as ");
+                        stringAppend(message, sizeof(message),
+                                     animationChannelTypeGetName(report->skippedType));
+                        stringAppend(message, sizeof(message), " driving its ");
+                        stringAppend(message, sizeof(message),
+                                     animationAttributeGetName(report->skippedAttribute));
+                        stringAppend(message, sizeof(message), " over ");
+                        appendCount(message, sizeof(message), report->skippedComponents);
+                        stringAppend(message, sizeof(message), " component(s)");
+                    }
+                    platformLogMessage(message);
+                }
+            }
+            /* The vertices in the mesh have moved, so what the backend holds is
+               now the old pose. Sent again rather than left: the picture on
+               screen is the only place this work is visible. */
+            renderSetMesh(&discSearch.mesh, globalArena);
+        }
+        else
+        {
+            /* Read but did not move anything. Almost always the animation and
+               the model naming their bones differently, which is a miss and not
+               a failure — said plainly so it is not read as one. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message),
+                         "engine: that animation moved nothing — ");
+            appendCount(message, sizeof(message), discSearch.channelsApplied);
+            stringAppend(message, sizeof(message), " channel(s) reached a bone of ");
+            appendCount(message, sizeof(message), discSearch.bonesPosed);
+            stringAppend(message, sizeof(message), " posed; looking at the next one");
+            platformLogMessage(message);
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
         return discLoadStatus;
     }
 
@@ -2224,23 +2545,55 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             message[0] = '\0';
             stringAppend(message, sizeof(message), "engine: weighted to ");
             appendCount(message, sizeof(message), discSearch.bonesInPalette);
+            stringAppend(message, sizeof(message), " bone(s) named by its primitives, out of ");
+            appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
             stringAppend(message, sizeof(message),
-                         " bone(s) of the tree, left in its bind pose because skinning it there "
+                         " node(s) in the tree, left in its bind pose because skinning it there "
                          "would move nothing");
             if (discSearch.firstBoneNameCount > 0U)
             {
                 Unsigned32 which;
 
-                /* The bones a primitive named, which is the number an animation
-                   will have to index by. Small ones are positions in the tree;
-                   large ones are the identifiers its nodes carry, and which of
-                   those it is decides how a pose gets built. */
+                /* The bones a primitive named. These are identifiers its nodes
+                   carry, not positions in the node list, so the line below says
+                   how many of them a node actually answered to. */
                 stringAppend(message, sizeof(message), "; its primitives named bones");
                 for (which = 0U; which < discSearch.firstBoneNameCount; which++)
                 {
                     stringAppend(message, sizeof(message), " ");
                     appendCount(message, sizeof(message), discSearch.firstBoneNames[which]);
+                    stringAppend(message, sizeof(message), " (");
+                    stringAppend(message, sizeof(message), discSearch.firstBoneNodeNames[which]);
+                    stringAppend(message, sizeof(message), ")");
                 }
+            }
+            platformLogMessage(message);
+
+            /* How the bone numbers resolved, and what the container's own bind
+               pose turned out to be. Both directions are printed because the
+               number that matters is whichever one is near nought, and a reader
+               who is told only the winner has to take the comparison on trust. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), discSearch.bonesMatchedToANode);
+            stringAppend(message, sizeof(message), " bone name(s) matched a node by identifier, ");
+            appendCount(message, sizeof(message), discSearch.bonesWithoutANode);
+            stringAppend(message, sizeof(message), " matched none");
+            if (discSearch.bonesMeasured > 0U)
+            {
+                stringAppend(message, sizeof(message), "; over ");
+                appendCount(message, sizeof(message), discSearch.bonesMeasured);
+                stringAppend(message, sizeof(message),
+                             " measured, world x stored is ");
+                appendThousandths(message, sizeof(message), discSearch.bindPoseFromIdentity);
+                stringAppend(message, sizeof(message), " from the identity and stored is ");
+                appendThousandths(message, sizeof(message), discSearch.bindPoseFromWorld);
+                stringAppend(message, sizeof(message),
+                             " from world — the smaller says which the file holds");
+            }
+            else if (discSearch.mesh.bindPoseCount == 0U)
+            {
+                stringAppend(message, sizeof(message), "; the container carried no bind pose");
             }
             platformLogMessage(message);
         }

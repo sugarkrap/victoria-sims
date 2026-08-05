@@ -125,6 +125,30 @@ typedef struct GeometryPrimitive
     Unsigned32 vertexCount;
 } GeometryPrimitive;
 
+/* One bone's transform in the pose the mesh was authored in.
+ *
+ * The container stores these itself, in a section straight after the
+ * primitives, rather than leaving them to be derived from the tree. They are
+ * numbered the way a primitive's bone list is numbered, so a number out of that
+ * list indexes this array directly.
+ *
+ * These are the INVERSE bind transforms, not the bind transforms. That was
+ * measured rather than assumed, and the run that settled it is worth repeating
+ * before trusting anything built on top: composing each bone's world transform
+ * out of the tree with the stored one landed 0.000 from the identity, while the
+ * stored one sat 1.666 away from the world transform itself. Exactly one of
+ * those is small, and it is the first.
+ *
+ * What follows from it is that a pose palette is animatedTransform times the
+ * stored transform, with no matrix inverse anywhere — the engine has none, and
+ * on this evidence needs none. */
+typedef struct GeometryBindPose
+{
+    /* x, y, z, w — the order the file writes them, matching TransformNode. */
+    Real32 rotation[4];
+    Real32 translation[3];
+} GeometryBindPose;
+
 typedef struct GeometryMesh
 {
     char name[GEOMETRY_NAME_LIMIT];
@@ -177,6 +201,17 @@ typedef struct GeometryMesh
        non-null array means the elements were there and said nothing, which is
        a different problem from their not being there. */
     Unsigned32 skinnedVertexCount;
+
+    /* The bind pose the container carries, one entry per bone, or null when it
+     * carried none. Read only for a skinned mesh, for the same reason the bone
+     * lists are: a rigid model's section is empty, and reading it across the
+     * disc's static objects would cost a walk to hold nothing.
+     *
+     * Null with a zero count also covers a section that would not read. A mesh
+     * whose bind pose is unreadable still draws — it just cannot be posed — and
+     * refusing the model over it would be the wrong trade. */
+    const GeometryBindPose *bindPoses;
+    Unsigned32 bindPoseCount;
 
     /* Element kinds met and not used, with the format each was in. Reported
      * because what a mesh carries decides what the renderer has to be able to

@@ -350,6 +350,8 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->boneWeights = NULL_POINTER;
     mesh->weightsStoredPerVertex = 0U;
     mesh->skinnedVertexCount = 0U;
+    mesh->bindPoses = NULL_POINTER;
+    mesh->bindPoseCount = 0U;
     mesh->vertexCount = 0U;
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;
@@ -662,6 +664,57 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     /* The name of the model as a whole, taken from its first part, which is what
      * the file offers and what a log wants. */
     stringAppend(mesh->name, GEOMETRY_NAME_LIMIT, primitives[0].name);
+
+    /* The bind pose, which begins where the last primitive record ended. The
+     * first pass consumed every record whole — including the two fields after
+     * the faces that an earlier version of it stopped short of — so the cursor
+     * is already here and this needs no seek.
+     *
+     * Nothing here refuses the mesh. A bind pose that will not read costs the
+     * ability to pose the model and nothing else, and a model that draws is
+     * worth more than one that is thrown away for a section no one has needed
+     * until now. */
+    if (anyBoneAssignments)
+    {
+        Unsigned32 poseCount = resourceCursorReadUnsigned32(&cursor);
+
+        /* A quaternion and a translation each: twenty-eight bytes at the very
+         * least, so a count past that is not a count. The same shape of guard
+         * as the element and primitive counts above, and for the same reason —
+         * one of those refused 238 of 239 readable containers on a real disc. */
+        if (!cursor.overran && poseCount > 0U && (MemorySize)poseCount <= sizeInBytes / 28UL)
+        {
+            GeometryBindPose *poses = (GeometryBindPose *)memoryArenaAllocate(
+                arena, (MemorySize)poseCount * sizeof(GeometryBindPose), sizeof(Real32));
+
+            if (poses == NULL_POINTER)
+            {
+                return GEOMETRY_READ_OUT_OF_ARENA;
+            }
+            for (index = 0U; index < poseCount; index++)
+            {
+                Unsigned32 axis;
+
+                for (axis = 0U; axis < 4U; axis++)
+                {
+                    poses[index].rotation[axis] = resourceCursorReadReal32(&cursor);
+                }
+                for (axis = 0U; axis < 3U; axis++)
+                {
+                    poses[index].translation[axis] = resourceCursorReadReal32(&cursor);
+                }
+            }
+            if (!cursor.overran)
+            {
+                mesh->bindPoses = poses;
+                mesh->bindPoseCount = poseCount;
+            }
+        }
+        /* The passes below seek before they read, but each clears this for
+           itself only after seeking; leaving it set here would make the first
+           of them look as though it had overrun. */
+        cursor.overran = BOOLEAN_FALSE;
+    }
 
     positions = (Real32 *)memoryArenaAllocate(arena, (MemorySize)vertexCount * 3UL * sizeof(Real32),
                                               sizeof(Real32));

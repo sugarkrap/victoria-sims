@@ -96,4 +96,25 @@ ResourceNodeResult resourceNodeRead(ResourceNodeDescription *description, const 
 void resourceNodeGetWorldTransform(const ResourceNodeDescription *description, Unsigned32 nodeIndex,
                                    Real32 *matrix);
 
+/* A quaternion and a translation as a column major four by four.
+ *
+ * Exposed rather than kept private because the bind pose in a GMDC is stored in
+ * exactly this form, and a second implementation of the quaternion convention
+ * would be free to disagree with this one about handedness the moment either
+ * changed. The rotation is x, y, z, w — the order the files write it. */
+void resourceNodeBuildTransform(const Real32 *rotation, const Real32 *translation, Real32 *matrix);
+
+/* left times right, both column major four by fours. Aliasing result with
+   either input is not allowed. */
+void resourceNodeMultiplyTransforms(const Real32 *left, const Real32 *right, Real32 *result);
+
+/* Which node carries this bone identifier, or -1 when none does.
+ *
+ * A primitive's bone list holds identifiers, not positions in the node list.
+ * That distinction is invisible on a tree where the two happen to agree and
+ * silently wrong on one where they do not, so nothing here indexes by a bone
+ * number; it searches for it. */
+Integer32 resourceNodeFindByBoneIdentifier(const ResourceNodeDescription *description,
+                                           Unsigned32 boneIdentifier);
+
 #endif
