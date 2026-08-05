@@ -310,6 +310,8 @@ static GeometryReadResult translateCollectionResult(ResourceCollectionResult res
     }
 }
 
+static void clearMesh(GeometryMesh *mesh);
+
 GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes, MemorySize sizeInBytes,
                                       MemoryArena *arena)
 {
@@ -341,28 +343,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     Real32 *boneWeights = NULL_POINTER;
     Unsigned16 *indices;
 
-    mesh->name[0] = '\0';
-    mesh->resourceName[0] = '\0';
-    mesh->positions = NULL_POINTER;
-    mesh->normals = NULL_POINTER;
-    mesh->textureCoordinates = NULL_POINTER;
-    mesh->boneAssignments = NULL_POINTER;
-    mesh->boneWeights = NULL_POINTER;
-    mesh->weightsStoredPerVertex = 0U;
-    mesh->skinnedVertexCount = 0U;
-    mesh->bindPoses = NULL_POINTER;
-    mesh->bindPoseCount = 0U;
-    mesh->vertexCount = 0U;
-    mesh->indices = NULL_POINTER;
-    mesh->indexCount = 0U;
-    mesh->primitives = NULL_POINTER;
-    mesh->primitiveCount = 0U;
-    mesh->storedPrimitiveCount = 0U;
-    mesh->componentCount = 0U;
-    mesh->unusedElementCount = 0U;
-    mesh->versionMark = 0U;
-    mesh->containerVersion = 0U;
-    mesh->elementCount = 0U;
+    clearMesh(mesh);
 
     /* The wrapper — version mark, links to resources elsewhere, the block type
      * list — is the same for every scenegraph resource and is read in one
@@ -961,6 +942,243 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->indexCount = indexTotal;
     mesh->primitives = primitives;
     mesh->storedPrimitiveCount = storedPrimitives;
+    return GEOMETRY_READ_OK;
+}
+
+/* Every field to its empty value, so a mesh that fails to read is not left
+   holding whatever the caller's storage had in it. Shared by the reader and the
+   merge: a field added to GeometryMesh and cleared in only one of them would be
+   uninitialised down whichever path was forgotten. */
+static void clearMesh(GeometryMesh *mesh)
+{
+    mesh->name[0] = '\0';
+    mesh->resourceName[0] = '\0';
+    mesh->positions = NULL_POINTER;
+    mesh->normals = NULL_POINTER;
+    mesh->textureCoordinates = NULL_POINTER;
+    mesh->boneAssignments = NULL_POINTER;
+    mesh->boneWeights = NULL_POINTER;
+    mesh->weightsStoredPerVertex = 0U;
+    mesh->skinnedVertexCount = 0U;
+    mesh->bindPoses = NULL_POINTER;
+    mesh->bindPoseCount = 0U;
+    mesh->vertexCount = 0U;
+    mesh->indices = NULL_POINTER;
+    mesh->indexCount = 0U;
+    mesh->primitives = NULL_POINTER;
+    mesh->primitiveCount = 0U;
+    mesh->storedPrimitiveCount = 0U;
+    mesh->componentCount = 0U;
+    mesh->unusedElementCount = 0U;
+    mesh->versionMark = 0U;
+    mesh->containerVersion = 0U;
+    mesh->elementCount = 0U;
+}
+
+GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *const *sources,
+                                     Unsigned32 sourceCount, MemoryArena *arena)
+{
+    Unsigned32 vertexTotal = 0U;
+    Unsigned32 indexTotal = 0U;
+    Unsigned32 primitiveTotal = 0U;
+    Boolean anyNormals = BOOLEAN_FALSE;
+    Boolean anyTextures = BOOLEAN_FALSE;
+    Boolean anySkinning = BOOLEAN_FALSE;
+    Unsigned32 weightsStored = 0U;
+    Unsigned32 vertexBase = 0U;
+    Unsigned32 indexBase = 0U;
+    Unsigned32 primitiveBase = 0U;
+    Unsigned32 which;
+    Real32 *positions;
+    Real32 *normals = NULL_POINTER;
+    Real32 *textures = NULL_POINTER;
+    Unsigned8 *boneAssignments = NULL_POINTER;
+    Real32 *boneWeights = NULL_POINTER;
+    Unsigned16 *indices;
+    GeometryPrimitive *primitives;
+
+    clearMesh(merged);
+    if (sources == NULL_POINTER || sourceCount == 0U)
+    {
+        return GEOMETRY_READ_NO_GEOMETRY;
+    }
+
+    for (which = 0U; which < sourceCount; which++)
+    {
+        const GeometryMesh *source = sources[which];
+
+        if (source == NULL_POINTER || source->positions == NULL_POINTER ||
+            source->vertexCount == 0U)
+        {
+            continue;
+        }
+        vertexTotal += source->vertexCount;
+        indexTotal += source->indexCount;
+        primitiveTotal += source->storedPrimitiveCount;
+        anyNormals = (source->normals != NULL_POINTER) ? BOOLEAN_TRUE : anyNormals;
+        anyTextures = (source->textureCoordinates != NULL_POINTER) ? BOOLEAN_TRUE : anyTextures;
+        if (source->boneAssignments != NULL_POINTER)
+        {
+            anySkinning = BOOLEAN_TRUE;
+            if (source->weightsStoredPerVertex > weightsStored)
+            {
+                weightsStored = source->weightsStoredPerVertex;
+            }
+        }
+        if (source->bindPoseCount > merged->bindPoseCount)
+        {
+            merged->bindPoses = source->bindPoses;
+            merged->bindPoseCount = source->bindPoseCount;
+        }
+    }
+
+    if (vertexTotal == 0U || indexTotal == 0U || primitiveTotal == 0U)
+    {
+        return GEOMETRY_READ_NO_GEOMETRY;
+    }
+    /* The indices are half words, so the join has a ceiling the parts did not
+       individually. Refused rather than wrapped: an index that wraps points at
+       another part's vertex and draws a triangle across the model. */
+    if (vertexTotal > 0xFFFFU)
+    {
+        return GEOMETRY_READ_TOO_MANY_VERTICES;
+    }
+
+    positions = (Real32 *)memoryArenaAllocate(arena, (MemorySize)vertexTotal * 3UL * sizeof(Real32),
+                                              sizeof(Real32));
+    indices = (Unsigned16 *)memoryArenaAllocate(arena, (MemorySize)indexTotal * sizeof(Unsigned16),
+                                                sizeof(Unsigned16));
+    primitives = (GeometryPrimitive *)memoryArenaAllocate(
+        arena, (MemorySize)primitiveTotal * sizeof(GeometryPrimitive), sizeof(MemorySize));
+    if (positions == NULL_POINTER || indices == NULL_POINTER || primitives == NULL_POINTER)
+    {
+        return GEOMETRY_READ_OUT_OF_ARENA;
+    }
+    if (anyNormals)
+    {
+        normals = (Real32 *)memoryArenaAllocate(arena, (MemorySize)vertexTotal * 3UL * sizeof(Real32),
+                                                sizeof(Real32));
+        if (normals == NULL_POINTER)
+        {
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+    }
+    if (anyTextures)
+    {
+        textures = (Real32 *)memoryArenaAllocate(arena, (MemorySize)vertexTotal * 2UL * sizeof(Real32),
+                                                 sizeof(Real32));
+        if (textures == NULL_POINTER)
+        {
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+    }
+    if (anySkinning)
+    {
+        boneAssignments = (Unsigned8 *)memoryArenaAllocate(
+            arena, (MemorySize)vertexTotal * 4UL * sizeof(Unsigned8), sizeof(Unsigned8));
+        boneWeights = (Real32 *)memoryArenaAllocate(
+            arena, (MemorySize)vertexTotal * 4UL * sizeof(Real32), sizeof(Real32));
+        if (boneAssignments == NULL_POINTER || boneWeights == NULL_POINTER)
+        {
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+    }
+
+    for (which = 0U; which < sourceCount; which++)
+    {
+        const GeometryMesh *source = sources[which];
+        Unsigned32 index;
+
+        if (source == NULL_POINTER || source->positions == NULL_POINTER ||
+            source->vertexCount == 0U)
+        {
+            continue;
+        }
+
+        for (index = 0U; index < source->vertexCount; index++)
+        {
+            Unsigned32 axis;
+
+            for (axis = 0U; axis < 3U; axis++)
+            {
+                positions[(vertexBase + index) * 3U + axis] = source->positions[index * 3U + axis];
+                if (normals != NULL_POINTER)
+                {
+                    normals[(vertexBase + index) * 3U + axis] =
+                        (source->normals != NULL_POINTER) ? source->normals[index * 3U + axis] : 0.0f;
+                }
+            }
+            if (textures != NULL_POINTER)
+            {
+                textures[(vertexBase + index) * 2U] =
+                    (source->textureCoordinates != NULL_POINTER)
+                        ? source->textureCoordinates[index * 2U]
+                        : 0.0f;
+                textures[(vertexBase + index) * 2U + 1U] =
+                    (source->textureCoordinates != NULL_POINTER)
+                        ? source->textureCoordinates[index * 2U + 1U]
+                        : 0.0f;
+            }
+            if (boneAssignments != NULL_POINTER)
+            {
+                for (axis = 0U; axis < 4U; axis++)
+                {
+                    /* A part with no weights of its own is left unassigned
+                       rather than weighted to bone nought, which would drag it
+                       to wherever that bone went. */
+                    boneAssignments[(vertexBase + index) * 4U + axis] =
+                        (source->boneAssignments != NULL_POINTER)
+                            ? source->boneAssignments[index * 4U + axis]
+                            : (Unsigned8)GEOMETRY_BONE_NONE;
+                    boneWeights[(vertexBase + index) * 4U + axis] =
+                        (source->boneWeights != NULL_POINTER)
+                            ? source->boneWeights[index * 4U + axis]
+                            : 0.0f;
+                }
+            }
+        }
+
+        for (index = 0U; index < source->indexCount; index++)
+        {
+            indices[indexBase + index] = (Unsigned16)(source->indices[index] + vertexBase);
+        }
+
+        for (index = 0U; index < source->storedPrimitiveCount; index++)
+        {
+            primitives[primitiveBase + index] = source->primitives[index];
+            primitives[primitiveBase + index].firstIndex += indexBase;
+            primitives[primitiveBase + index].firstVertex += vertexBase;
+        }
+
+        vertexBase += source->vertexCount;
+        indexBase += source->indexCount;
+        primitiveBase += source->storedPrimitiveCount;
+    }
+
+    stringAppend(merged->name, GEOMETRY_NAME_LIMIT, primitives[0].name);
+    merged->positions = positions;
+    merged->normals = normals;
+    merged->textureCoordinates = textures;
+    merged->vertexCount = vertexTotal;
+    merged->indices = indices;
+    merged->indexCount = indexTotal;
+    merged->primitives = primitives;
+    merged->primitiveCount = primitiveBase;
+    merged->storedPrimitiveCount = primitiveBase;
+    merged->componentCount = sourceCount;
+    merged->boneAssignments = boneAssignments;
+    merged->boneWeights = boneWeights;
+    merged->weightsStoredPerVertex = weightsStored;
+    if (boneAssignments != NULL_POINTER)
+    {
+        for (which = 0U; which < vertexTotal; which++)
+        {
+            if (boneAssignments[which * 4U] != (Unsigned8)GEOMETRY_BONE_NONE)
+            {
+                merged->skinnedVertexCount++;
+            }
+        }
+    }
     return GEOMETRY_READ_OK;
 }
 

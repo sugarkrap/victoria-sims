@@ -239,6 +239,33 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
  * known in advance. Writes three floats to each. */
 void geometryMeshGetBounds(const GeometryMesh *mesh, Real32 *minimum, Real32 *maximum);
 
+/* Joins several meshes into one that can be drawn in a single call.
+ *
+ * A Sim is not one model: it is a body, a face and hair, each its own container
+ * with its own material. They are merged here rather than drawn as three
+ * meshes because the primitives of the result already say which range of
+ * indices belongs to which part — that is what a GeometryPrimitive is — so one
+ * upload can still be painted a part at a time.
+ *
+ * Every source's primitives come across with their ranges shifted, so a part
+ * that was one primitive stays one and a part that was several stays several.
+ * Their bone lists come across untouched, which is right only because a bone
+ * number is a skeleton-wide identifier rather than a position in any one
+ * container's table.
+ *
+ * The merged mesh carries normals and texture coordinates if ANY source did; a
+ * source carrying none contributes zeroes rather than being refused, because
+ * one part without coordinates should not cost the whole Sim its skin.
+ *
+ * Allocated once from the totals rather than grown, because the arena is a bump
+ * pointer with nothing to grow into. Every source must still be readable here.
+ *
+ * The bind pose is taken from whichever source carries the most entries. That
+ * is sound only while the parts share a skeleton — which a Sim's do — and a
+ * caller joining unrelated models must not rely on it. */
+GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *const *sources,
+                                     Unsigned32 sourceCount, MemoryArena *arena);
+
 /* Moves every vertex by a column major four by four, and every normal by its
    rotation alone — translating a direction would turn it into a point.
    Rewrites the mesh's arrays, which are the caller's arena. */

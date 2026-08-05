@@ -391,4 +391,40 @@ Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation 
  * than compounding. */
 Boolean discContentKeepBindPose(DiscContentSearch *search, MemoryArena *arena);
 
+/* Follows one named model in an open package all the way to its vertices.
+ *
+ * CRES names a shape, the shape names a mesh, the mesh is in a container: the
+ * same chain the search walks, but starting from a name rather than from
+ * whatever the package happened to hold first. That is what a Sim needs — its
+ * parts are known by name and there are three of them in one package, so
+ * "the first model in this file" is not a question worth asking there.
+ *
+ * The mesh is left in the arena, so a caller merging several must not rewind
+ * between them. materialName is filled with the material the shape binds, or
+ * left empty when it binds none.
+ *
+ * False when any hop fails, and the log line the caller writes should say which
+ * — a missing shape and an unreadable container are different problems. */
+/* Where the chain from a name to a container stopped. One code per hop, never
+   one for several: "did not resolve" was the first version of this and it named
+   four different failures identically, which is a report that cannot be acted
+   on. */
+typedef enum DiscModelResult
+{
+    DISC_MODEL_OK = 0,
+    DISC_MODEL_NO_TREE,
+    DISC_MODEL_TREE_UNREADABLE,
+    DISC_MODEL_NO_SHAPE_NODE,
+    DISC_MODEL_SHAPE_NOT_IN_PACKAGE,
+    DISC_MODEL_SHAPE_UNREADABLE,
+    DISC_MODEL_NO_GEOMETRY_NAMED,
+    DISC_MODEL_GEOMETRY_UNREADABLE
+} DiscModelResult;
+
+const char *discModelResultGetName(DiscModelResult result);
+
+DiscModelResult discContentReadNamedModel(MemoryArena *arena, const Package *package,
+                                          const char *resourceName, GeometryMesh *mesh,
+                                          char *materialName, MemorySize materialCapacity);
+
 #endif

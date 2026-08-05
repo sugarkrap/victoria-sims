@@ -320,6 +320,7 @@ typedef enum DiscPhase
     DISC_PHASE_FETCH_TEXTURE,
     DISC_PHASE_FETCH_LEVEL,
     DISC_PHASE_SEEK_SKIN,
+    DISC_PHASE_SEEK_SIM,
     DISC_PHASE_SEEK_ANIMATION,
     DISC_PHASE_DONE
 } DiscPhase;
@@ -388,6 +389,46 @@ static Boolean animationUsedRestPose = BOOLEAN_FALSE;
    recomputed from the clock every frame rather than carried forward. */
 static Boolean poseIsAnimated = BOOLEAN_FALSE;
 static Real32 poseTick = 0.0f;
+
+/* The parts a Sim is assembled from, by the names the game gives them.
+ *
+ * Taken from openTS2's own CreateNakedBaseSim, which builds its base case from
+ * exactly these four: a skeleton, and three models that skin to it. They are
+ * looked for by name because that is how the game refers to them — nothing
+ * about a package's contents says "this is the body", only the resource's own
+ * name does.
+ *
+ * This phase reports what it found and draws none of it. Whether the disc
+ * actually carries these, and what is in them, is the question that decides how
+ * a whole Sim gets assembled, and it is not one to answer by assuming. */
+#define SIM_PART_COUNT 4U
+static const char *const simPartNames[SIM_PART_COUNT] = { "auskel_cres", "amBodyNaked_cres",
+                                                          "amFace_cres", "amHairBald_cres" };
+static ResourceIndex simIndex;
+static ResourceNodeDescription simPartTree;
+static Boolean simIndexBegun = BOOLEAN_FALSE;
+static Boolean simIndexBuilding = BOOLEAN_FALSE;
+static Unsigned32 simPartCursor = 0U;
+static Unsigned32 simPartsFound = 0U;
+static Unsigned32 simPartFileIndex = 0U;
+
+/* The three that carry geometry. The skeleton names no shape at all — it is
+   what the others hang on — so it is probed for and then not drawn. */
+#define SIM_DRAWN_PART_COUNT 3U
+static const char *const simDrawnPartNames[SIM_DRAWN_PART_COUNT] = { "amBodyNaked_cres",
+                                                                     "amFace_cres",
+                                                                     "amHairBald_cres" };
+static GeometryMesh simParts[SIM_DRAWN_PART_COUNT];
+/* Set once the parts are joined and drawn, which stops the animation search
+   from posing them. The palette is built against discSearch.modelTree, and that
+   tree still belongs to the model the search found — not to these parts. Posing
+   a Sim by another model's skeleton resolves its bones to the wrong joints and
+   deforms it differently on every frame, which does not read as a wrong pose so
+   much as a body coming apart. Giving these parts their own skeleton is the
+   next piece of work; until then they are drawn in the bind pose. */
+static Boolean simIsAssembled = BOOLEAN_FALSE;
+
+#define SIM_INDEX_CAPACITY 32768U
 
 /* Where the arena stood before the texture was read, kept because the texture
    has to survive between steps.
@@ -897,6 +938,248 @@ static Boolean fetchLargestLevel(char *message, MemorySize messageCapacity)
     return BOOLEAN_TRUE;
 }
 
+/* Reads the three parts a Sim is drawn from and joins them into one model.
+ *
+ * All three are in one package, which the probe above established rather than
+ * assumed, so this is a single file read followed by three walks of the same
+ * chain: a name to a tree, a tree to a shape, a shape to a container.
+ *
+ * Nothing is skinned here and nothing is painted per part yet. What this
+ * answers is whether the three fit together into something person-shaped — and
+ * if they do not, everything built on top of them would have been built on a
+ * mistake. */
+typedef enum SimAssembly
+{
+    SIM_ASSEMBLY_PENDING = 0,
+    SIM_ASSEMBLY_FAILED,
+    SIM_ASSEMBLY_DONE
+} SimAssembly;
+
+/* Reads one part's chain: a name to a tree, the tree's shape reference to a
+ * shape, the shape's mesh name to a container.
+ *
+ * Every hop is looked up across the whole disc rather than inside one package,
+ * because that is where the parts actually are. Returns false only for a read
+ * the store has not answered; a hop that resolves to nothing is reported
+ * through result and is not a reason to retry. */
+static Boolean readSimPart(const char *resourceName, GeometryMesh *mesh, DiscModelResult *result)
+{
+    static ResourceNodeDescription tree;
+    const ResourceIndexEntry *entry;
+    Unsigned8 *bytes;
+    MemorySize size;
+    ShapeDescription shape;
+    Unsigned32 index;
+    Boolean anyShapeNode = BOOLEAN_FALSE;
+
+    *result = DISC_MODEL_NO_TREE;
+    entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, resourceName);
+    if (entry == NULL_POINTER)
+    {
+        return BOOLEAN_TRUE;
+    }
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (bytes == NULL_POINTER || resourceNodeRead(&tree, bytes, size) != RESOURCE_NODE_OK)
+    {
+        *result = DISC_MODEL_TREE_UNREADABLE;
+        return BOOLEAN_TRUE;
+    }
+
+    /* The first shape reference the tree carries that the disc can answer. */
+    entry = NULL_POINTER;
+    for (index = 0U; index < tree.storedNodeCount && entry == NULL_POINTER; index++)
+    {
+        if (!tree.nodes[index].hasShape)
+        {
+            continue;
+        }
+        anyShapeNode = BOOLEAN_TRUE;
+        /* By instance alone: the key's group says which collection the shape
+           was filed under, and the instance words are its name hashed, which
+           identify it wherever it was filed. */
+        entry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_SHPE,
+                                  tree.nodes[index].shapeKey.instanceIdentifier,
+                                  tree.nodes[index].shapeKey.instanceIdentifierHigh);
+    }
+    if (entry == NULL_POINTER)
+    {
+        *result = anyShapeNode ? DISC_MODEL_SHAPE_NOT_IN_PACKAGE : DISC_MODEL_NO_SHAPE_NODE;
+        return BOOLEAN_TRUE;
+    }
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (bytes == NULL_POINTER || scenegraphReadShape(&shape, bytes, size) != SCENEGRAPH_READ_OK)
+    {
+        *result = DISC_MODEL_SHAPE_UNREADABLE;
+        return BOOLEAN_TRUE;
+    }
+
+    /* A shape does not name a container. It names a geometry NODE, and that
+       node references the container — one more hop, and the one this went
+       looking for a container by name without and found nothing. */
+    entry = NULL_POINTER;
+    for (index = 0U; index < shape.storedMeshCount && entry == NULL_POINTER; index++)
+    {
+        if (shape.meshNames[index][0] == '\0')
+        {
+            continue;
+        }
+        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_GMND,
+                                       shape.meshNames[index]);
+    }
+    if (entry == NULL_POINTER)
+    {
+        *result = DISC_MODEL_NO_GEOMETRY_NAMED;
+        return BOOLEAN_TRUE;
+    }
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+    {
+        GeometryNodeDescription node;
+
+        if (bytes == NULL_POINTER ||
+            scenegraphReadGeometryNode(&node, bytes, size) != SCENEGRAPH_READ_OK ||
+            !node.hasGeometry)
+        {
+            *result = DISC_MODEL_NO_GEOMETRY_NAMED;
+            return BOOLEAN_TRUE;
+        }
+        entry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_GMDC,
+                                  node.geometryKey.instanceIdentifier,
+                                  node.geometryKey.instanceIdentifierHigh);
+    }
+    if (entry == NULL_POINTER)
+    {
+        *result = DISC_MODEL_GEOMETRY_UNREADABLE;
+        return BOOLEAN_TRUE;
+    }
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (bytes == NULL_POINTER ||
+        geometryReaderOpen(mesh, bytes, size, globalArena) != GEOMETRY_READ_OK)
+    {
+        *result = DISC_MODEL_GEOMETRY_UNREADABLE;
+        return BOOLEAN_TRUE;
+    }
+    *result = DISC_MODEL_OK;
+    return BOOLEAN_TRUE;
+}
+
+/* Reads the three parts a Sim is drawn from and joins them into one model.
+ *
+ * Nothing is skinned here and nothing is painted per part yet. What this
+ * answers is whether the three fit together into something person-shaped — and
+ * if they do not, everything built on top of them would rest on a mistake. */
+static SimAssembly assembleTheSim(void)
+{
+    static GeometryMesh whole;
+    const GeometryMesh *parts[SIM_DRAWN_PART_COUNT];
+    MemorySize marker = memoryArenaGetMarker(globalArena);
+    Unsigned32 gathered = 0U;
+    Unsigned32 which;
+    char message[512];
+
+    for (which = 0U; which < SIM_DRAWN_PART_COUNT; which++)
+    {
+        DiscModelResult chain;
+
+        if (!readSimPart(simDrawnPartNames[which], &simParts[which], &chain))
+        {
+            /* The store has not answered. Everything read so far goes back and
+               the whole chain is walked again, which costs the reads already
+               done and keeps the arena honest. */
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[which]);
+        stringAppend(message, sizeof(message), " — ");
+        if (chain == DISC_MODEL_OK)
+        {
+            parts[gathered] = &simParts[which];
+            gathered++;
+            appendCount(message, sizeof(message), simParts[which].vertexCount);
+            stringAppend(message, sizeof(message), " vertices, ");
+            appendCount(message, sizeof(message), simParts[which].indexCount / 3U);
+            stringAppend(message, sizeof(message), " triangles, ");
+            appendCount(message, sizeof(message), simParts[which].skinnedVertexCount);
+            stringAppend(message, sizeof(message), " of them weighted, spanning ");
+            {
+                /* Where each part actually sits. Three parts of one body should
+                   occupy overlapping space at a comparable scale; anything else
+                   and joining them is not the same as assembling them. */
+                Real32 minimum[3];
+                Real32 maximum[3];
+                Unsigned32 axis;
+
+                geometryMeshGetBounds(&simParts[which], minimum, maximum);
+                for (axis = 0U; axis < 3U; axis++)
+                {
+                    if (axis > 0U)
+                    {
+                        stringAppend(message, sizeof(message), " by ");
+                    }
+                    appendThousandths(message, sizeof(message), minimum[axis]);
+                    stringAppend(message, sizeof(message), "..");
+                    appendThousandths(message, sizeof(message), maximum[axis]);
+                }
+            }
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), discModelResultGetName(chain));
+        }
+        platformLogMessage(message);
+    }
+
+    if (gathered == 0U)
+    {
+        return SIM_ASSEMBLY_FAILED;
+    }
+    if (geometryMeshMerge(&whole, parts, gathered, globalArena) != GEOMETRY_READ_OK)
+    {
+        platformLogMessage("engine: a Sim's parts would not join into one model");
+        return SIM_ASSEMBLY_FAILED;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: a whole Sim — ");
+    appendCount(message, sizeof(message), gathered);
+    stringAppend(message, sizeof(message), " part(s) joined into ");
+    appendCount(message, sizeof(message), whole.vertexCount);
+    stringAppend(message, sizeof(message), " vertices and ");
+    appendCount(message, sizeof(message), whole.indexCount / 3U);
+    stringAppend(message, sizeof(message), " triangles across ");
+    appendCount(message, sizeof(message), whole.storedPrimitiveCount);
+    stringAppend(message, sizeof(message), " range(s), ");
+    appendCount(message, sizeof(message), whole.skinnedVertexCount);
+    stringAppend(message, sizeof(message), " of them weighted");
+    platformLogMessage(message);
+
+    /* The joined model replaces whatever the search drew. It is painted with
+       the one texture already fetched, which belongs to none of these parts —
+       a whole Sim wearing a face's skin is what a single texture can do, and
+       painting the ranges properly is the next piece of work. */
+    discSearch.mesh = whole;
+    renderSetMesh(&discSearch.mesh, globalArena);
+    /* The vertices moved out from under the copy the pose was working from, and
+       nothing may pose them again until they have a skeleton of their own. */
+    poseIsAnimated = BOOLEAN_FALSE;
+    simIsAssembled = BOOLEAN_TRUE;
+    return SIM_ASSEMBLY_DONE;
+}
+
 /* Ends the load, or starts the search for a skinned mesh first.
  *
  * Called from every place the load would otherwise be finished, so the search
@@ -924,9 +1207,49 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
         platformLogMessage("engine: not enough room to index the disc for a skinned mesh");
     }
 
+    /* What a whole Sim is made of, before anything is done with it. Runs ahead
+       of the animation search because it is the cheaper question and the one
+       the next piece of work turns on. */
+    if (discSearch.mesh.boneAssignments != NULL_POINTER && !simIndexBegun)
+    {
+        /* The whole chain, because a Sim's parts do not keep it in one place:
+           the tree is in Sims06 and the shape it names is not, so resolving a
+           reference means asking the disc rather than asking the package. That
+           is how the game's own content manager resolves them too — a
+           scenegraph reference is global, and treating it as package-local
+           found three trees and not one shape. */
+        static const Unsigned32 wantedTypes[4] = { (Unsigned32)PACKAGE_TYPE_CRES,
+                                                   (Unsigned32)PACKAGE_TYPE_SHPE,
+                                                   (Unsigned32)PACKAGE_TYPE_GMND,
+                                                   (Unsigned32)PACKAGE_TYPE_GMDC };
+
+        simIndexBegun = BOOLEAN_TRUE;
+        if (resourceIndexBegin(&simIndex, discFileSystem, globalArena, SIM_INDEX_CAPACITY,
+                               wantedTypes, 4U))
+        {
+            simIndexBuilding = BOOLEAN_TRUE;
+            simPartCursor = 0U;
+            simPartsFound = 0U;
+            platformLogMessage("engine: asking the index whether this disc carries the parts a "
+                               "whole Sim is built from");
+            discPhase = DISC_PHASE_SEEK_SIM;
+            return ENGINE_DISC_WORKING;
+        }
+        platformLogMessage("engine: not enough room to index the disc for a Sim's parts");
+    }
+
     /* A skinned mesh is on screen, so there is finally something an animation
        can be applied to. Until now every mesh drawn was rigid and a pose would
        have had nothing to move. */
+    if (simIsAssembled && !animationIndexBegun)
+    {
+        animationIndexBegun = BOOLEAN_TRUE;
+        platformLogMessage("engine: the assembled Sim is left in its bind pose — the palette would "
+                           "be built against the skeleton of the model the search found, which is "
+                           "not these parts', and posing by another model's bones takes a body "
+                           "apart rather than moving it");
+    }
+
     if (discSearch.mesh.boneAssignments != NULL_POINTER && !animationIndexBegun)
     {
         static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_ANIM };
@@ -970,6 +1293,128 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
         return discLoadStatus;
+    }
+
+    if (discPhase == DISC_PHASE_SEEK_SIM)
+    {
+        const ResourceIndexEntry *entry;
+        MemorySize marker;
+        Unsigned8 *bytes;
+        MemorySize size;
+
+        if (simIndexBuilding)
+        {
+            if (resourceIndexStep(&simIndex) == RESOURCE_INDEX_WORKING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            simIndexBuilding = BOOLEAN_FALSE;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), simIndex.countByType[0]);
+            stringAppend(message, sizeof(message), " transform tree(s) across ");
+            appendCount(message, sizeof(message), simIndex.filesIndexed);
+            stringAppend(message, sizeof(message), " package(s) to look among");
+            platformLogMessage(message);
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (simPartCursor >= SIM_PART_COUNT)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), simPartsFound);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), (Unsigned32)SIM_PART_COUNT);
+            stringAppend(message, sizeof(message),
+                         " of a whole Sim's parts are on this disc by name");
+            platformLogMessage(message);
+            /* Every part named a package, and on this disc it was the same one
+               each time, so the whole Sim is one file read. */
+            if (simPartsFound == SIM_PART_COUNT)
+            {
+                SimAssembly assembly = assembleTheSim();
+
+                if (assembly == SIM_ASSEMBLY_PENDING)
+                {
+                    return ENGINE_DISC_WORKING;
+                }
+            }
+            discPhase = DISC_PHASE_DONE;
+            return finishOrSeekSkin();
+        }
+
+        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES,
+                                       simPartNames[simPartCursor]);
+        if (entry != NULL_POINTER)
+        {
+            simPartFileIndex = entry->fileIndex;
+        }
+        if (entry == NULL_POINTER)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   ");
+            stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
+            stringAppend(message, sizeof(message), " — not on this disc under that name");
+            platformLogMessage(message);
+            simPartCursor++;
+            return ENGINE_DISC_WORKING;
+        }
+
+        marker = memoryArenaGetMarker(globalArena);
+        if (!readIndexedResource(entry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
+        if (bytes != NULL_POINTER &&
+            resourceNodeRead(&simPartTree, bytes, size) == RESOURCE_NODE_OK)
+        {
+            const VirtualFileEntry *holder =
+                virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
+            Unsigned32 shapes = 0U;
+            Unsigned32 bones = 0U;
+            Unsigned32 index;
+
+            for (index = 0U; index < simPartTree.storedNodeCount; index++)
+            {
+                if (simPartTree.nodes[index].hasShape)
+                {
+                    shapes++;
+                }
+                /* The sentinel a node carries when it is not a joint, so this
+                   counts the ones that are. */
+                if (simPartTree.nodes[index].boneIdentifier != 0x7FFFFFFFUL)
+                {
+                    bones++;
+                }
+            }
+            simPartsFound++;
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), simPartTree.storedNodeCount);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), simPartTree.nodeCount);
+            stringAppend(message, sizeof(message), " node(s) kept, ");
+            appendCount(message, sizeof(message), bones);
+            stringAppend(message, sizeof(message), " of them bones, naming ");
+            appendCount(message, sizeof(message), shapes);
+            stringAppend(message, sizeof(message), " shape(s), in ");
+            stringAppend(message, sizeof(message),
+                         (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message),
+                         " — found by name, but its tree would not read");
+        }
+        platformLogMessage(message);
+        memoryArenaRewindToMarker(globalArena, marker);
+        simPartCursor++;
+        return ENGINE_DISC_WORKING;
     }
 
     if (discPhase == DISC_PHASE_SEEK_ANIMATION)

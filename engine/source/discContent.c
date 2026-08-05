@@ -1,5 +1,6 @@
 #include "victoria/discContent.h"
 
+#include "utils/resourceHash.h"
 #include "utils/strings.h"
 #include "victoria/compression.h"
 #include "victoria/freestandingRuntime.h"
@@ -899,6 +900,138 @@ static void describeBoneChain(const ResourceNodeDescription *tree, const Animati
         current = node->parentIndex;
         guard++;
     }
+}
+
+const char *discModelResultGetName(DiscModelResult result)
+{
+    switch (result)
+    {
+    case DISC_MODEL_OK:
+        return "read";
+    case DISC_MODEL_NO_TREE:
+        return "no tree of that name in this package";
+    case DISC_MODEL_TREE_UNREADABLE:
+        return "its tree would not read";
+    case DISC_MODEL_NO_SHAPE_NODE:
+        return "its tree names no shape";
+    case DISC_MODEL_SHAPE_NOT_IN_PACKAGE:
+        return "the shape it names is not in this package";
+    case DISC_MODEL_SHAPE_UNREADABLE:
+        return "its shape would not read";
+    case DISC_MODEL_NO_GEOMETRY_NAMED:
+        return "no container matched the mesh its shape names";
+    case DISC_MODEL_GEOMETRY_UNREADABLE:
+        return "its container would not read";
+    default:
+        return "an unnamed result";
+    }
+}
+
+DiscModelResult discContentReadNamedModel(MemoryArena *arena, const Package *package,
+                                          const char *resourceName, GeometryMesh *mesh,
+                                          char *materialName, MemorySize materialCapacity)
+{
+    const PackageResource *nodeResource;
+    const PackageResource *shapeResource = NULL_POINTER;
+    const PackageResource *geometry;
+    const Unsigned8 *bytes;
+    MemorySize size;
+    Boolean compressed;
+    /* On the stack rather than in the search: this is a tree read to find one
+       shape reference in it, and nothing after wants it. A Sim's parts each
+       carry a hundred and eighteen nodes, so it is not small — but the web
+       build's stack is the reason the search keeps its own, and this runs on
+       the load path where that stack is not the constraint. */
+    static ResourceNodeDescription tree;
+    ShapeDescription shape;
+    Unsigned32 index;
+
+    if (materialName != NULL_POINTER && materialCapacity > 0UL)
+    {
+        materialName[0] = '\0';
+    }
+
+    nodeResource = scenegraphFindResourceByInstance(package, (Unsigned32)PACKAGE_TYPE_CRES,
+                                                    resourceHashInstance(resourceName),
+                                                    resourceHashInstanceHigh(resourceName));
+    if (nodeResource == NULL_POINTER)
+    {
+        return DISC_MODEL_NO_TREE;
+    }
+
+    bytes = scenegraphReadResourceBytes(arena, package, nodeResource, &size, &compressed);
+    if (bytes == NULL_POINTER || resourceNodeRead(&tree, bytes, size) != RESOURCE_NODE_OK)
+    {
+        return DISC_MODEL_TREE_UNREADABLE;
+    }
+
+    /* The first node that references a shape. A Sim's part names exactly one,
+       which the probe established before any of this was written. */
+    {
+        Unsigned32 shapeNodes = 0U;
+
+        for (index = 0U; index < tree.storedNodeCount; index++)
+        {
+            if (!tree.nodes[index].hasShape)
+            {
+                continue;
+            }
+            shapeNodes++;
+            shapeResource = scenegraphFindResource(package, &tree.nodes[index].shapeKey);
+            if (shapeResource == NULL_POINTER)
+            {
+                /* The key carries a group, and a shape filed under another one
+                   is the same shape. Tried by instance alone before giving up,
+                   because a name identifies a resource and a group does not. */
+                shapeResource = scenegraphFindResourceByInstance(
+                    package, (Unsigned32)PACKAGE_TYPE_SHPE,
+                    tree.nodes[index].shapeKey.instanceIdentifier,
+                    tree.nodes[index].shapeKey.instanceIdentifierHigh);
+            }
+            if (shapeResource != NULL_POINTER)
+            {
+                break;
+            }
+        }
+        if (shapeResource == NULL_POINTER)
+        {
+            return (shapeNodes == 0U) ? DISC_MODEL_NO_SHAPE_NODE : DISC_MODEL_SHAPE_NOT_IN_PACKAGE;
+        }
+    }
+
+    bytes = scenegraphReadResourceBytes(arena, package, shapeResource, &size, &compressed);
+    if (bytes == NULL_POINTER || scenegraphReadShape(&shape, bytes, size) != SCENEGRAPH_READ_OK)
+    {
+        return DISC_MODEL_SHAPE_UNREADABLE;
+    }
+    if (materialName != NULL_POINTER && shape.storedMaterialCount > 0U)
+    {
+        stringAppend(materialName, materialCapacity, shape.materials[0].materialName);
+    }
+
+    /* The first mesh the shape names that resolves to a container. */
+    geometry = NULL_POINTER;
+    for (index = 0U; index < shape.storedMeshCount && geometry == NULL_POINTER; index++)
+    {
+        if (shape.meshNames[index][0] == '\0')
+        {
+            continue;
+        }
+        geometry = scenegraphFindGeometryNamed(arena, package, shape.meshNames[index]);
+    }
+    if (geometry == NULL_POINTER)
+    {
+        return DISC_MODEL_NO_GEOMETRY_NAMED;
+    }
+
+    bytes = scenegraphReadResourceBytes(arena, package, geometry, &size, &compressed);
+    if (bytes == NULL_POINTER)
+    {
+        return DISC_MODEL_GEOMETRY_UNREADABLE;
+    }
+    return (geometryReaderOpen(mesh, bytes, size, arena) == GEOMETRY_READ_OK)
+               ? DISC_MODEL_OK
+               : DISC_MODEL_GEOMETRY_UNREADABLE;
 }
 
 Boolean discContentKeepBindPose(DiscContentSearch *search, MemoryArena *arena)
