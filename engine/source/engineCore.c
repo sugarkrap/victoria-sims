@@ -1906,6 +1906,17 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
            key, and those keys are not in the file that describes one Sim — they
            are in the packages the game ships, which are now mounted and
            indexed. This says how many of them there are to go after. */
+        if (!discSearch.foundInPreferred && discSearch.modelHasTree)
+        {
+            /* Said when the model came from outside the game's own mesh
+               directory. A character file describes one Sim's face and the
+               skeleton under it; the body it wears is chosen at run time from
+               resources it does not name, so there is nothing else in there to
+               draw however hard this looks. */
+            platformLogMessage("engine: this is not one of the game's own meshes, so it may hold "
+                               "only a part of a model");
+        }
+
         if (discSearch.shapeReferences > 0U)
         {
             message[0] = '\0';

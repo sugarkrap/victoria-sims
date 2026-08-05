@@ -112,5 +112,20 @@ int main(void)
     checkThat(&failureCount, "and an empty suffix matches anything",
               stringEndsWithIgnoringCase("anything", ""));
 
+    printf("\n-- finding a directory in a path --\n");
+    checkThat(&failureCount, "matches a directory in the middle",
+              stringContainsIgnoringCase("TSData/Res/Sims3D/abodynude.package", "Sims3D"));
+    checkThat(&failureCount, "ignoring case on both sides",
+              stringContainsIgnoringCase("tsdata/res/SIMS3D/x.package", "sims3d"));
+    checkThat(&failureCount, "matches at the very start",
+              stringContainsIgnoringCase("Sims3D/x", "Sims3D"));
+    checkThat(&failureCount, "and at the very end", stringContainsIgnoringCase("a/Sims3D", "Sims3D"));
+    checkThat(&failureCount, "refuses one that is not there",
+              !stringContainsIgnoringCase("TSData/Res/Materials/x.package", "Sims3D"));
+    /* A needle longer than the text cannot be in it, and the search must stop
+       rather than read past the end looking. */
+    checkThat(&failureCount, "refuses a needle longer than the text",
+              !stringContainsIgnoringCase("ab", "abcdef"));
+
     return checkSummarize(failureCount, "strings");
 }

@@ -73,6 +73,17 @@ typedef struct DiscContentSearch
     MemoryArena *arena;
     MemorySize arenaMarker;
     Unsigned32 nextIndex;
+    /* The disc is walked twice: the game's own character meshes first, then
+       everything else.
+     *
+     * Taking the first package that yields a model was right while nothing
+       yielded one. It is wrong now: the first is a tutorial neighbourhood's
+       character file, which holds a face and the skeleton it hangs on and no
+       body at all — a Sim's body is assembled at run time from outfit
+       resources, not linked from its scenegraph. The game's own meshes are
+       whole models, and they are on the disc. */
+    Boolean walkingPreferred;
+    Boolean foundInPreferred;
 
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];

@@ -35,6 +35,8 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->arena = arena;
     search->arenaMarker = memoryArenaGetMarker(arena);
     search->nextIndex = 0U;
+    search->walkingPreferred = BOOLEAN_TRUE;
+    search->foundInPreferred = BOOLEAN_FALSE;
     search->packagePath[0] = '\0';
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
@@ -66,6 +68,11 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
         search->versionsSeen[index] = 0U;
     }
 }
+
+/* Where the game keeps the meshes a Sim is built from. Not a guess about this
+   disc: it is the directory the archive's own entries named, and the packages
+   mounted out of it are the ones holding whole models rather than one face. */
+#define PREFERRED_DIRECTORY "Sims3D"
 
 static Boolean endsWithPackage(const char *path)
 {
@@ -432,12 +439,29 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
 
     if (search->nextIndex >= search->fileSystem->entryCount)
     {
-        return DISC_CONTENT_NONE_FOUND;
+        if (!search->walkingPreferred)
+        {
+            return DISC_CONTENT_NONE_FOUND;
+        }
+        /* Nothing among the game's own meshes. Round again over everything,
+           which is where this always looked and is still better than nothing. */
+        search->walkingPreferred = BOOLEAN_FALSE;
+        search->nextIndex = 0U;
+        return DISC_CONTENT_PENDING;
     }
 
     entry = virtualFileSystemGetEntry(search->fileSystem, search->nextIndex);
     if (entry == NULL_POINTER || !endsWithPackage(entry->path) ||
         entry->sizeInBytes > (Unsigned64)LARGEST_PACKAGE_BYTES || entry->sizeInBytes == 0U)
+    {
+        search->nextIndex++;
+        return DISC_CONTENT_PENDING;
+    }
+    /* On the first round, only the directory the game keeps its character
+       meshes in. On the second, anything — including that directory again,
+       which costs one wasted pass over packages that already failed and saves
+       a second flag to remember that they did. */
+    if (search->walkingPreferred && !stringContainsIgnoringCase(entry->path, PREFERRED_DIRECTORY))
     {
         search->nextIndex++;
         return DISC_CONTENT_PENDING;
@@ -560,6 +584,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
 
     findTextureForMaterial(search, &package);
 
+    search->foundInPreferred = search->walkingPreferred;
     search->packagePath[0] = '\0';
     stringAppend(search->packagePath, DISC_CONTENT_PATH_LIMIT, entry->path);
     return DISC_CONTENT_FOUND;

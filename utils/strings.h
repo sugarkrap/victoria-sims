@@ -25,6 +25,11 @@ Boolean stringStartsWith(const char *text, const char *prefix);
    what a package is. */
 Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix);
 
+/* Whether needle appears anywhere in text, ignoring case. For deciding what a
+   path is by what directory it is under, which on a disc laid out by somebody
+   else is the only thing there is to go on. */
+Boolean stringContainsIgnoringCase(const char *text, const char *needle);
+
 /* Stops at the first character that is not a digit, so trailing junk is
    ignored rather than rejected. Returns zero for an empty or non-numeric
    string, which callers treat as "unset". */

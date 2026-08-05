@@ -57,6 +57,39 @@ Boolean stringEndsWithIgnoringCase(const char *text, const char *suffix)
     return BOOLEAN_TRUE;
 }
 
+Boolean stringContainsIgnoringCase(const char *text, const char *needle)
+{
+    MemorySize textLength = stringLength(text);
+    MemorySize needleLength = stringLength(needle);
+    MemorySize at;
+
+    if (needleLength == 0UL)
+    {
+        return BOOLEAN_TRUE;
+    }
+    if (textLength < needleLength)
+    {
+        return BOOLEAN_FALSE;
+    }
+    for (at = 0UL; at + needleLength <= textLength; at += 1UL)
+    {
+        MemorySize index;
+
+        for (index = 0UL; index < needleLength; index += 1UL)
+        {
+            if (characterToLowerCase(text[at + index]) != characterToLowerCase(needle[index]))
+            {
+                break;
+            }
+        }
+        if (index == needleLength)
+        {
+            return BOOLEAN_TRUE;
+        }
+    }
+    return BOOLEAN_FALSE;
+}
+
 MemorySize stringParseUnsigned(const char *text)
 {
     MemorySize value = 0UL;
