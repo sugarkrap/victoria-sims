@@ -59,6 +59,20 @@ WEB_IMPORT("uploadTexture")
 extern Integer32 hostUploadTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
                                    Unsigned32 heightInPixels);
 
+/* One range of the mesh's indices, so the host can draw a part at a time. Sent
+   after the mesh and before any part texture, because a texture belongs to a
+   part and there are no parts until these arrive. */
+WEB_IMPORT("setMeshPart")
+extern void hostSetMeshPart(Unsigned32 partIndex, Unsigned32 firstIndex, Unsigned32 indexCount);
+
+/* A texture for one part, which the host binds into a group of that part's own.
+   WebGPU binds a texture through a bind group rather than to a slot, so a part
+   with its own texture needs its own group — which is the whole reason this
+   could not simply reuse uploadTexture. */
+WEB_IMPORT("uploadPartTexture")
+extern Integer32 hostUploadPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                                       Unsigned32 widthInPixels, Unsigned32 heightInPixels);
+
 #define TRIANGLE_UNIFORM_BUFFER_BYTES 16UL
 
 static Unsigned32 shaderProgramCount = 0;
@@ -289,6 +303,25 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     memoryArenaRewindToMarker(arena, marker);
 
     meshVertexCountUploaded = mesh->vertexCount;
+    {
+        Unsigned32 part;
+        Unsigned32 partCount = (mesh->storedPrimitiveCount < RENDER_PART_LIMIT)
+                                   ? mesh->storedPrimitiveCount
+                                   : RENDER_PART_LIMIT;
+
+        for (part = 0U; part < partCount; part++)
+        {
+            Unsigned32 indexCount = mesh->primitives[part].indexCount;
+
+            /* A model with more parts than can be held draws the rest under the
+               last range, so nothing goes missing and the join is visible. */
+            if (part + 1U == RENDER_PART_LIMIT && mesh->storedPrimitiveCount > RENDER_PART_LIMIT)
+            {
+                indexCount = mesh->indexCount - mesh->primitives[part].firstIndex;
+            }
+            hostSetMeshPart(part, mesh->primitives[part].firstIndex, indexCount);
+        }
+    }
     meshCameraFrame(&meshCamera, mesh);
     meshIsReady = BOOLEAN_TRUE;
     platformLogMessage("render: mesh uploaded to the WebGPU backend");
@@ -403,29 +436,49 @@ void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
     memoryArenaRewindToMarker(arena, marker);
 }
 
-/* The host holds one texture for the model, so this cannot give each part its
- * own yet — doing that means a bind group per part on the host side, which is
- * JavaScript and WGSL work rather than anything decidable here.
- *
- * The first part's texture becomes the model's, and every other part is drawn
- * with it. That is wrong in a visible, diagnosable way: a Sim comes out with
- * its body wearing its face. It is not silent — the log says so the first time
- * a second part asks — because a backend quietly disagreeing with another about
- * what a model looks like is the harder bug to find. */
-static Boolean saidPartTexturesAreShared = BOOLEAN_FALSE;
+/* Charged per part, as the OpenGL ES backend charges them, so a device that
+   cannot afford a Sim's three textures refuses the third rather than the
+   driver refusing it later. */
+static MemorySize partTextureChargedBytes[RENDER_PART_LIMIT];
 
 void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
                           Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
-    if (partIndex == 0U)
+    MemorySize wantedBytes;
+
+    if (partIndex >= RENDER_PART_LIMIT)
     {
-        renderSetTexture(rgbaPixels, widthInPixels, heightInPixels);
         return;
     }
-    if (!saidPartTexturesAreShared)
+    if (rgbaPixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
     {
-        saidPartTexturesAreShared = BOOLEAN_TRUE;
-        platformLogMessage("render: the WebGPU backend holds one texture for the whole model, so "
-                           "every part is painted with the first part's");
+        if (partTextureChargedBytes[partIndex] > 0UL)
+        {
+            graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                        partTextureChargedBytes[partIndex]);
+            partTextureChargedBytes[partIndex] = 0UL;
+        }
+        return;
     }
+
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+    if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold this part's texture");
+        return;
+    }
+    if (hostUploadPartTexture(partIndex, rgbaPixels, widthInPixels, heightInPixels) == 0)
+    {
+        platformLogMessage("render: the host would not take this part's texture");
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, wantedBytes);
+        return;
+    }
+    /* Released only once the new one is in, so the ceiling cannot admit a
+       texture it then turns out not to hold. */
+    if (partTextureChargedBytes[partIndex] > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                    partTextureChargedBytes[partIndex]);
+    }
+    partTextureChargedBytes[partIndex] = wantedBytes;
 }
