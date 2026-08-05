@@ -184,6 +184,15 @@ megabytes in twelve seconds — and rebuilds a shader every frame. Using it afte
 per-part textures are set throws them away, which put a Sim's body back in a
 face the moment it started moving.
 
+**Both backends had that defect, and fixing one did not fix the other.** On
+OpenGL `renderUpdateMeshVertices` became a `glBufferSubData`; on WebGPU it kept
+calling `hostUploadMesh`, which creates new buffers, empties the part ranges and
+destroys the part textures. So the web build lost its three skins on the first
+animated frame and drew the whole Sim in one call under whatever was left —
+which is what the banded arm was. The host now has an `updateMeshVertices` of
+its own that writes over the buffer already there and refuses a vertex count
+other than the one it holds. `tests/verifyRuntimeUpload.mjs` pins it.
+
 The three backends differ deliberately: OpenGL ES 2.0 and WebGPU paint parts
 separately; the software rasterizer ignores textures entirely, because the
 hardware at the floor of the ladder cannot afford to sample per pixel.
@@ -208,12 +217,6 @@ the browser to test it.
 
 ## Known soft spots
 
-- **The WebGPU build shows banding on the Sim's arm that the OpenGL ES build
-  does not.** Unexplained. What is ruled out: all three materials resolve, all
-  three textures decode at full resolution, all three bind groups build with no
-  fallback logged, the sampler repeats on both axes as the GL one does for
-  power-of-two images, the pixels come from shared C code, and the mesh is not
-  re-uploaded after the parts are painted. First thing to look at next.
 - **The web build is slow**, minutes rather than seconds. The store answers one
   read per step and a step is a frame, so indexing 1,411 packages costs at least
   1,411 frames before anything else. Letting several reads be outstanding at
@@ -238,8 +241,8 @@ the browser to test it.
 
 The disc has now contradicted a reasonable inference more than a dozen times,
 and the fix has always been the same: stop reasoning about what it should
-contain and make the engine report what it saw. Beyond that, this session added
-four failure modes worth knowing before repeating them.
+contain and make the engine report what it saw. Beyond that, these sessions
+added five failure modes worth knowing before repeating them.
 
 **A test that cannot fail is not evidence.** The Hermite curve was added, the
 rest-pose check was recorded *at the time* as unable to discriminate it, and it
@@ -266,5 +269,16 @@ first primitive draws from component nought. Joined without shifting them,
 to avoid transforming shared vertices twice, and leaves a Sim's head behind
 while its body lies down — reported as `posed 1173 of 1838`, which is exactly
 the body's count and the number that gave it away.
+
+**A shared name is not a shared implementation.** The WebGPU banding was hunted
+for a whole session — materials, decoders, samplers, bind groups, shaders — and
+listed as unexplained with six things ruled out. One of those six was "the mesh
+is not re-uploaded after the parts are painted", which was believed because the
+call was named `renderUpdateMeshVertices` and the OpenGL one with that name does
+not re-upload. The WebGPU one did. Every backend implements the same header;
+that is a promise about the signature, not about the behaviour. When two
+backends disagree, read the one that is wrong rather than the interface both
+claim to satisfy — and when a fix is made on one backend, check whether the
+defect it fixed exists on the others.
 
 The logs are verbose on purpose. That is the method, not clutter.

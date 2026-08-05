@@ -180,7 +180,7 @@ done
 $(ARCHIVER) rcs $(4) $(2)/*.o
 endef
 
-.PHONY: all linux web armv5 armv7 oabi verify check clean
+.PHONY: all linux web armv5 armv7 oabi verify verifyWeb check clean
 
 all: linux
 
@@ -262,6 +262,15 @@ verify: $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
 	@$(ARCHIVE_VERIFIER)
+
+# The web checks, which need the module built and a node to run it under rather
+# than a compiler. Kept out of `verify` so a machine without either still gets
+# the rest, and named here rather than left to be remembered by hand — the two
+# defects these caught, an odd index count and a pose that stripped a Sim of its
+# skins, both reached a browser because nothing ran them.
+verifyWeb: $(WEB_MODULE)
+	@node tests/verifyRuntimeUpload.mjs
+	@node tests/verifyWebModule.mjs
 
 VERIFIER_SUPPORT := utils/assert.c
 

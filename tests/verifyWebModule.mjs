@@ -68,6 +68,10 @@ const imports = {
         setMeshPart: (partIndex, firstIndex, indexCount) => {
             calls.push({ name: "setMeshPart", partIndex, firstIndex, indexCount });
         },
+        updateMeshVertices: (vertexPointer, vertexCount) => {
+            calls.push({ name: "updateMeshVertices", vertexCount });
+            return 1;
+        },
         uploadPartTexture: (partIndex, pixelPointer, width, height) => {
             calls.push({ name: "uploadPartTexture", partIndex, width, height });
             return 1;
@@ -241,6 +245,7 @@ const refusalImports = {
         createMeshPipeline: () => 1,
         uploadMesh: () => 1,
         setMeshPart: () => {},
+        updateMeshVertices: () => 1,
         uploadPartTexture: () => 1,
         uploadTexture: () => 1,
         setMeshUniforms: () => {},

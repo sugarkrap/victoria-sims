@@ -48,6 +48,21 @@ WEB_IMPORT("uploadMesh")
 extern Integer32 hostUploadMesh(const Real32 *interleavedVertices, Unsigned32 vertexCount,
                                 const Unsigned16 *indices, Unsigned32 indexCount);
 
+/* New positions for the mesh already uploaded, written over the buffer the host
+ * is holding rather than into one of their own.
+ *
+ * Distinct from uploadMesh because uploadMesh means a new model: it throws away
+ * the part ranges and the part textures, since neither means anything against a
+ * mesh they did not come from. An animation re-sends its vertices every frame,
+ * and sending them through uploadMesh stripped the Sim of its three skins on
+ * the first frame it moved — after which the whole body drew in one call under
+ * whatever single texture was left, banding the arms with a face.
+ *
+ * The host refuses a vertex count other than the one it holds, because that is
+ * a different model and this is the entry point that cannot make one. */
+WEB_IMPORT("updateMeshVertices")
+extern Integer32 hostUpdateMeshVertices(const Real32 *interleavedVertices, Unsigned32 vertexCount);
+
 /* Sixteen floats of matrix followed by four of light direction, which is the
    padding WebGPU wants anyway. */
 WEB_IMPORT("setMeshUniforms")
@@ -410,7 +425,9 @@ void renderShutdown(void)
 
 /* Re-sends the vertices of a mesh already uploaded. Charges the ledger nothing
    and builds no pipeline: both are already there, and the host replaces the
-   buffer contents rather than adding to them. */
+   buffer contents rather than adding to them. It also leaves the part ranges
+   and part textures alone, which uploadMesh would not — see the note on
+   hostUpdateMeshVertices for what that cost. */
 void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
 {
     MemorySize marker;
@@ -432,7 +449,7 @@ void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
         return;
     }
     interleaveMeshVertices(mesh, interleaved);
-    (void)hostUploadMesh(interleaved, mesh->vertexCount, mesh->indices, mesh->indexCount);
+    (void)hostUpdateMeshVertices(interleaved, mesh->vertexCount);
     memoryArenaRewindToMarker(arena, marker);
 }
 

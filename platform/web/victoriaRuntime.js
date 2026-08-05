@@ -14,6 +14,9 @@ const runtimeState = {
     meshUniformBuffer: null,
     meshBindGroup: null,
     meshVertexBuffer: null,
+    // The vertex buffer's size, so an update can refuse a mesh of a different
+    // shape rather than writing past the end of what was uploaded.
+    meshVertexBytes: 0,
     meshIndexBuffer: null,
     meshTexture: null,
     meshSampler: null,
@@ -320,10 +323,19 @@ const importObject = {
             // size looked correct for as long as the teapot was the only model.
             const indexBytes = (indexCount * 2 + 3) & ~3;
 
+            // Whatever the last mesh took, given back. A GPU buffer dropped on
+            // the floor is not collected on any schedule worth relying on.
+            if (runtimeState.meshVertexBuffer) {
+                runtimeState.meshVertexBuffer.destroy();
+            }
+            if (runtimeState.meshIndexBuffer) {
+                runtimeState.meshIndexBuffer.destroy();
+            }
             runtimeState.meshVertexBuffer = runtimeState.device.createBuffer({
                 size: vertexBytes,
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
             });
+            runtimeState.meshVertexBytes = vertexBytes;
             runtimeState.device.queue.writeBuffer(
                 runtimeState.meshVertexBuffer, 0,
                 new Uint8Array(memory, vertexPointer, vertexBytes));
@@ -351,6 +363,28 @@ const importObject = {
             runtimeState.meshParts = [];
             runtimeState.meshPartTextures = [];
             runtimeState.meshPartBindGroups = [];
+            return 1;
+        },
+
+        // New positions for the mesh already here. Writes over the buffer rather
+        // than making one, which is the whole point of it: uploadMesh clears the
+        // part ranges and destroys the part textures, and an animation calling
+        // that once a frame left the Sim wearing one skin over its whole body
+        // from the first frame it moved.
+        //
+        // Refuses a different vertex count instead of resizing. A mesh of
+        // another shape is another model, and building one is uploadMesh's job.
+        updateMeshVertices(vertexPointer, vertexCount) {
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const vertexBytes = vertexCount * 32;
+
+            if (!runtimeState.meshVertexBuffer || vertexBytes !== runtimeState.meshVertexBytes ||
+                vertexPointer + vertexBytes > memory.byteLength) {
+                return 0;
+            }
+            runtimeState.device.queue.writeBuffer(
+                runtimeState.meshVertexBuffer, 0,
+                new Uint8Array(memory, vertexPointer, vertexBytes));
             return 1;
         },
 
