@@ -1935,6 +1935,23 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                                "only a part of a model");
         }
 
+        /* What the search turned down before it settled. A run that took the
+           first model it met and a run that walked past forty rigid ones to get
+           here look identical otherwise. */
+        if (discSearch.rigidModelsPassed > 0U)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: walked past ");
+            appendCount(message, sizeof(message), discSearch.rigidModelsPassed);
+            stringAppend(message, sizeof(message), " rigid model(s) looking for a skinned one");
+            if (discSearch.mesh.boneAssignments == NULL_POINTER)
+            {
+                stringAppend(message, sizeof(message),
+                             ", found none, and came back for the first of them");
+            }
+            platformLogMessage(message);
+        }
+
         if (discSearch.shapeReferences > 0U)
         {
             message[0] = '\0';

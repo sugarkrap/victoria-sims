@@ -37,6 +37,10 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->nextIndex = 0U;
     search->walkingPreferred = BOOLEAN_TRUE;
     search->foundInPreferred = BOOLEAN_FALSE;
+    search->wantingSkinned = BOOLEAN_TRUE;
+    search->rigidModelFound = BOOLEAN_FALSE;
+    search->rigidModelIndex = 0U;
+    search->rigidModelsPassed = 0U;
     search->packagePath[0] = '\0';
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
@@ -80,6 +84,14 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
    The meshes a Sim is built from are under the plain Sims3D, and they are the
    only ones that can say what a bone element looks like. */
 #define PREFERRED_EXCLUDES "Locale"
+
+/* How many rigid models the first round will walk past before settling for one.
+ *
+ * Each is a package read, and on the web every package read is a round trip, so
+ * this is the difference between a search that looks and one that stalls the
+ * load. Forty-eight because the preferred directory holds hundreds of packages
+ * and a disc that has a body mesh at all will not hide it behind fifty faces. */
+#define RIGID_MODELS_TO_WALK_PAST 48U
 
 static Boolean endsWithPackage(const char *path)
 {
@@ -585,6 +597,20 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
 
     if (search->nextIndex >= search->fileSystem->entryCount)
     {
+        /* Nothing skinned among the game's own meshes, but something was there.
+           Back to the first model that was passed over for being rigid, which
+           is the one this would have taken before it started asking.
+         *
+           Its file index rather than its bytes: holding the model would mean
+           holding a whole package's allocation underneath every later attempt,
+           and the arena is a stack. One package is cheaper to read twice than
+           to keep. */
+        if (search->wantingSkinned && search->rigidModelFound)
+        {
+            search->wantingSkinned = BOOLEAN_FALSE;
+            search->nextIndex = search->rigidModelIndex;
+            return DISC_CONTENT_PENDING;
+        }
         if (!search->walkingPreferred)
         {
             return DISC_CONTENT_NONE_FOUND;
@@ -592,6 +618,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         /* Nothing among the game's own meshes. Round again over everything,
            which is where this always looked and is still better than nothing. */
         search->walkingPreferred = BOOLEAN_FALSE;
+        search->wantingSkinned = BOOLEAN_FALSE;
         search->nextIndex = 0U;
         return DISC_CONTENT_PENDING;
     }
@@ -728,6 +755,38 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
             memoryArenaRewindToMarker(search->arena, attemptMarker);
             return DISC_CONTENT_PENDING;
         }
+    }
+
+    /* A readable model that is welded to one joint rather than weighted across
+     * several. Noted and walked past on the first round.
+     *
+     * The first package on this disc that yields a model is a face, and a face
+     * is rigid — so the search kept arriving somewhere reasonable and never
+     * anywhere with a skeleton to apply. Which package holds a body is not
+     * something to guess from a name; whether a mesh carries bone assignments
+     * is something the mesh itself answers. */
+    if (search->wantingSkinned && search->mesh.boneAssignments == NULL_POINTER)
+    {
+        if (!search->rigidModelFound)
+        {
+            search->rigidModelFound = BOOLEAN_TRUE;
+            search->rigidModelIndex = search->nextIndex - 1U;
+        }
+        search->rigidModelsPassed++;
+        /* Bounded, because every one of these is a package read and on the web
+           a package read is a round trip. A disc with no skinned mesh in it at
+           all would otherwise walk the whole preferred set before admitting it,
+           and the walk is the expensive part of loading.
+         *
+           At the limit it takes the model in hand rather than going back for
+           the first one: that one would have to be read again, and this one is
+           already here. */
+        if (search->rigidModelsPassed < RIGID_MODELS_TO_WALK_PAST)
+        {
+            memoryArenaRewindToMarker(search->arena, attemptMarker);
+            return DISC_CONTENT_PENDING;
+        }
+        search->wantingSkinned = BOOLEAN_FALSE;
     }
 
     placePartByItsNode(search);

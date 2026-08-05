@@ -89,6 +89,28 @@ typedef struct DiscContentSearch
     Boolean walkingPreferred;
     Boolean foundInPreferred;
 
+    /* Whether a model has to be skinned to be taken.
+     *
+     * The first package that yields one is a face, and a face is rigid — it
+     * hangs off a single joint whole. So the search kept landing somewhere
+     * perfectly reasonable and never anywhere with a skeleton to apply, and no
+     * amount of narrowing by directory name fixed that, because which package
+     * holds a body is not written in its path.
+     *
+     * Whether a mesh carries bone assignments is, though, and the mesh answers
+     * it. So the first round asks for one and walks past what it finds instead;
+     * if the round ends with nothing skinned, it goes back for the first model
+     * it passed over rather than coming away empty. */
+    Boolean wantingSkinned;
+    Boolean rigidModelFound;
+    /* Which file it was in, not the model itself. Keeping the model would mean
+       keeping a package's allocation under every later attempt, and the arena
+       is a stack — one package is cheaper to read twice than to hold. */
+    Unsigned32 rigidModelIndex;
+    /* How many were walked past, which says whether the disc is full of rigid
+       models or the search only ever met the one. */
+    Unsigned32 rigidModelsPassed;
+
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];
     GeometryMesh mesh;

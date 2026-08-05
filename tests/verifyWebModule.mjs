@@ -293,8 +293,20 @@ calls.length = 0;
 
     check("reaches a drawable state", status === 2);
     check("asked the page for ranges rather than the image", rangesFetched > 0);
-    check(`read less than the image (${bytesFetched} of ${image.length} bytes)`,
-          bytesFetched < image.length);
+    // Ranges, not the whole image — but no longer less than the image, and the
+    // reason is worth stating rather than papering over with a bigger number.
+    //
+    // The search now walks past a model that carries no bone assignments,
+    // looking for one that does. Every package in this fixture is rigid, so it
+    // reads all of them, finds nothing skinned, and goes back for the first —
+    // reading that one twice. That is the fallback path costing what it costs,
+    // and this fixture takes the worst case of it every run.
+    //
+    // Still bounded well under two passes, which is the property that matters:
+    // a search that read the image over and over would sail past "less than the
+    // image" the moment the fixture grew.
+    check(`reads a bounded amount (${bytesFetched} of ${image.length} bytes)`,
+          bytesFetched < image.length * 2);
     check("built a mesh pipeline once it had geometry",
           calls.some((call) => call.name === "createMeshPipeline"));
 
