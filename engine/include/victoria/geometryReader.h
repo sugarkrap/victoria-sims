@@ -276,6 +276,12 @@ typedef struct GeometryMesh
      * all zeroes. One is this reader's problem and the other is the disc's, and
      * they call for opposite next moves. */
     Unsigned32 morphMappedVertexCount;
+    /* True when the slot-to-channel assignment was inferred rather than read.
+     *
+     * See the note in geometryReader.c on where that happens and on what
+     * evidence. A caller reporting a deformation should say so, because an
+     * inference and a reading are not the same kind of fact. */
+    Boolean morphChannelsInferred;
 
     /* Element kinds met and not used, with the format each was in. Reported
      * because what a mesh carries decides what the renderer has to be able to

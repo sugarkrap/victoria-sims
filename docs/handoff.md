@@ -44,6 +44,7 @@ The Linux binary takes:
 | `--graphics-memory-mebibytes=N` | Pretends the driver has that much, so a small device can be simulated on a large machine. |
 | `--still-camera[=DEGREES]` | Stops the camera orbiting and holds it at an angle. Half a turn by default, because **nought is a Sim's back**. |
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
+| `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
 
 Use both together whenever anything is being judged by eye across frames. An
 orbiting camera makes two captures two different views, and the difference gets
@@ -145,18 +146,38 @@ A container declares its deformation channels and carries per-vertex data to
 move by them. Both are read; a Sim's face deforms and its body does not.
 
 ```
-amFace      27 channels, 4 delta sets, a map read for all 521 vertices,
-            reaching 352 of them; 26 channels reached, 14 by enough to see
-amBodyNaked  3 channels, 2 delta sets, a map read for all 1173 vertices
-             and every word of it nought
+amFace      27 channels, 4 delta sets, a map over all 521 vertices reaching 352
+amBodyNaked  3 channels, 2 delta sets, a map over all 1173 vertices, all nought
 amHairBald   none
+
+channel 1 botmorphs/fatbot  moves 1173 vertices, furthest by 0.094
+channel 2 botmorphs/pregbot moves 1173 vertices, furthest by 0.086
 ```
 
-**The body's `botmorphs/fatbot` and `botmorphs/pregbot` are declared and empty.**
-Not a failure to read them: the counter says the map was *read* for all 1173
-vertices and is genuinely all noughts, which is what distinguishes the disc's
-problem from this reader's. The fat and pregnancy shapes are not in that
-container. Where they are is still open.
+**A body's map is empty and its deltas are not, and the slot is the channel.**
+This is the one inference in the deformation path and it is flagged as one —
+`morphChannelsInferred` on the mesh, and the run says `channels were INFERRED
+from an empty map` in as many words.
+
+The evidence, because an inference deserves its working shown. Every body mesh
+on the disc — the nude one and eight outfits across ages, genders and ages —
+carries a map of all noughts while its delta sets hold displacements of three
+hundredths. Three other places were ruled out first: a catalogue entry's key
+list holds only CRES, SHPE and TXMT, so no morph resource; a body's shape names
+exactly one geometry node, so no morph mesh; and the container's unused elements
+are normal deltas and indices, not a second addressing scheme.
+
+What separates a body from a face is arithmetic. A face declares twenty-six
+channels and carries four delta sets, so a vertex must say which four of the
+twenty-six its slots stand for — a map is the only way to say it. A body
+declares one or two and carries exactly that many sets. Nothing to
+disambiguate, and the file does not bother.
+
+**If a Sim ever deforms into something that is not a fatter Sim, that rule is
+the first thing to doubt.** `verifyGeometryReader.c` holds both halves: an empty
+map over deltas is filled in, and a map that says something is left alone —
+the second matters more, because firing the inference on a face would silently
+re-address every channel it has.
 
 **The channel list keeps a blank first entry, and compacting it would be
 catastrophic.** A slot's byte of nought means "this slot moves nothing", so
@@ -385,10 +406,12 @@ the browser to test it.
   directory natively, so the catalogue side is done; `webDiscStore` is what would
   change. `<input webkitdirectory>` gives a `FileList` and works everywhere;
   `showDirectoryPicker()` gives a persistent handle in Chromium.
-- **The body's fat and pregnancy shapes are not found.** `botmorphs/fatbot` and
-  `botmorphs/pregbot` are declared by `amBodyNaked` and carry an empty map. The
-  886 XML catalogue entries are the place to look, and reading those needs an
-  XML property set reader this does not have.
+- **The slot-is-the-channel rule for bodies is inferred, not read.** Measured
+  and flagged, and the checks pin both halves — but no part of the format says
+  it, and a body deforming into the wrong shape is where to start if one does.
+- **886 XML catalogue entries are skipped.** Reading them needs an XML property
+  set reader this does not have. `facearchetype`, `facemodifier` and
+  `meshoverlay` never appeared in the binary sample and are presumably there.
 - **115 catalogue entries index past the end of their key list.** Unexplained,
   and worth a measurement rather than a rationalisation: it may be a second
   sidecar, a different index property, or entries whose shape index means

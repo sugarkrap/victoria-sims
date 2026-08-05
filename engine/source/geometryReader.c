@@ -1144,6 +1144,53 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         }
     }
 
+    /* A map that is entirely nought, over a container that carries deltas.
+     *
+     * A body's map is like this on every mesh on the disc — the nude one and
+     * eight outfits across ages and genders — while its delta sets hold real
+     * displacements of three hundredths against a model 1.879 across. Empty
+     * addressing over data that is plainly meant to be used.
+     *
+     * What separates a body from a face is how many channels there are. A face
+     * declares twenty-six and carries four delta sets, so a vertex must say
+     * which four of the twenty-six its slots stand for, and the map is the only
+     * way to say it. A body declares one or two and carries exactly that many
+     * sets. There is nothing to disambiguate, and the file does not bother: the
+     * slot IS the channel.
+     *
+     * So an all-nought map over a container with deltas is read as slot N
+     * driving channel N + 1 — plus one because nought is the absence of a
+     * channel, not a channel. This is an inference and is flagged as one. If it
+     * is wrong, a body deforms into something that is not a fatter body, which
+     * is exactly the sort of wrong that shows on screen at once. */
+    if (morphChannels != NULL_POINTER && morphSlots > 0U && mesh->morphTargetCount > 1U)
+    {
+        MemorySize slotTotal = (MemorySize)vertexCount * (MemorySize)morphSlots;
+        MemorySize at;
+        Boolean anyAssigned = BOOLEAN_FALSE;
+
+        for (at = 0UL; at < slotTotal && !anyAssigned; at++)
+        {
+            anyAssigned = (morphChannels[at] != 0U) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+        }
+        if (!anyAssigned)
+        {
+            for (at = 0UL; at < slotTotal; at++)
+            {
+                Unsigned32 slot = (Unsigned32)(at % morphSlots);
+
+                /* Only as far as the declared channels reach. A container with
+                   more delta sets than channels leaves the extra slots unused
+                   rather than naming a channel that does not exist. */
+                if (slot + 1U < mesh->morphTargetCount)
+                {
+                    morphChannels[at] = (Unsigned16)(slot + 1U);
+                }
+            }
+            mesh->morphChannelsInferred = BOOLEAN_TRUE;
+        }
+    }
+
     mesh->positions = positions;
     mesh->normals = normals;
     mesh->textureCoordinates = textures;
@@ -1198,6 +1245,7 @@ static void clearMesh(GeometryMesh *mesh)
     mesh->morphSlotDeltas = NULL_POINTER;
     mesh->morphSlotCount = 0U;
     mesh->morphMappedVertexCount = 0U;
+    mesh->morphChannelsInferred = BOOLEAN_FALSE;
     mesh->vertexCount = 0U;
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;

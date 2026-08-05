@@ -43,6 +43,14 @@ typedef struct EngineConfiguration
     Boolean poseIsHeld;
     /* Which tick to hold it on. Only read when poseIsHeld. */
     Real32 poseHeldTick;
+
+    /* Hold one deformation channel at full strength instead of sweeping.
+     *
+     * Nought sweeps, which is the default and is right for finding out what a
+     * model can do. A number is right for judging one shape against another:
+     * with the camera and the pose held too, three runs at nought, one and two
+     * give three frames that differ in exactly one thing. */
+    Unsigned32 heldMorphChannel;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);

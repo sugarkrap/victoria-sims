@@ -325,6 +325,7 @@ int main(int argumentCount, char **argumentValues)
     Real32 cameraAngleDegrees = 180.0f;
     Boolean poseIsHeld = BOOLEAN_FALSE;
     Real32 poseHeldTick = 0.0f;
+    Unsigned32 heldMorphChannel = 0U;
     const char *inspectPath = NULL_POINTER;
     MemorySize graphicsMemoryLimitBytes = 0UL;
     const char *discPath = NULL_POINTER;
@@ -351,6 +352,12 @@ int main(int argumentCount, char **argumentValues)
             /* For judging one frame against another. See the note on
                EngineConfiguration.cameraIsStill. */
             cameraIsStill = BOOLEAN_TRUE;
+        }
+        else if (stringStartsWith(argument, "--morph=") == BOOLEAN_TRUE)
+        {
+            /* One deformation channel, held at full. The run's own log lists
+               the channels and their numbers. */
+            heldMorphChannel = (Unsigned32)stringParseUnsigned(argument + stringLength("--morph="));
         }
         else if (stringEquals(argument, "--still-pose") == BOOLEAN_TRUE)
         {
@@ -417,6 +424,7 @@ int main(int argumentCount, char **argumentValues)
     configuration.cameraAngleDegrees = cameraAngleDegrees;
     configuration.poseIsHeld = poseIsHeld;
     configuration.poseHeldTick = poseHeldTick;
+    configuration.heldMorphChannel = heldMorphChannel;
 
     if (discPath != NULL_POINTER)
     {

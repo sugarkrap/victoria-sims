@@ -502,6 +502,8 @@ static Unsigned32 simMorphChannels = 0U;
 static Unsigned32 simMorphMovers[SIM_MORPH_MOVER_LIMIT];
 static Unsigned32 simMorphMoverCount = 0U;
 static Unsigned32 simMorphShowing = 0xFFFFFFFFUL;
+/* One channel, held. Nought sweeps. */
+static Unsigned32 simMorphHeldChannel = 0U;
 static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
 
 /* The stem of the texture a part should wear INSTEAD of the one its shape
@@ -1200,7 +1202,10 @@ static void reportMorphTargets(const GeometryMesh *part)
         }
         stringAppend(message, sizeof(message), "carrying ");
         appendCount(message, sizeof(message), part->morphSlotCount);
-        stringAppend(message, sizeof(message), " delta set(s) over a map read for ");
+        stringAppend(message, sizeof(message),
+                     (part->morphChannelsInferred == BOOLEAN_TRUE)
+                         ? " delta set(s) whose channels were INFERRED from an empty map read for "
+                         : " delta set(s) over a map read for ");
         appendCount(message, sizeof(message), part->morphMappedVertexCount);
         stringAppend(message, sizeof(message), " vertices, reaching ");
         appendCount(message, sizeof(message), touched);
@@ -1426,6 +1431,29 @@ static Unsigned32 catalogueShown = 0U;
    an overlay or a skin tone has no mesh — so it is counted apart from the ones
    that named a shape and could not find it. */
 static Unsigned32 catalogueNotAShape = 0U;
+static Unsigned32 catalogueKeysShown = 0U;
+/* Following a resolved shape the rest of the way, for a handful of entries.
+ *
+ * The nude body declares fatbot and pregbot and carries an empty map, so the
+ * fat and pregnancy shapes are not in it. The obvious question is whether a
+ * body that is not nude carries them, and the chain to find out is the one just
+ * built — shape, geometry node, container — so this walks it for the first few
+ * and reports what their containers actually hold.
+ *
+ * A read each, hence the states. */
+typedef enum CatalogueFollow
+{
+    CATALOGUE_FOLLOW_IDLE = 0,
+    CATALOGUE_FOLLOW_SHAPE,
+    CATALOGUE_FOLLOW_NODE,
+    CATALOGUE_FOLLOW_CONTAINER
+} CatalogueFollow;
+
+#define CATALOGUE_FOLLOW_LIMIT 8U
+static CatalogueFollow catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+static const ResourceIndexEntry *catalogueFollowEntry = NULL_POINTER;
+static Unsigned32 catalogueFollowed = 0U;
+static char catalogueFollowName[PROPERTY_NAME_LIMIT];
 
 static void rememberCatalogueKind(const char *kind, const char *name)
 {
@@ -1543,10 +1571,7 @@ static void reportCatalogue(void)
  * rule a browser's store enforces. The entry that wanted it is gone by now, so
  * what it needed — its instance words, its shape index, its name — was kept.
  *
- * The sidecar is matched on instance alone, the index not carrying groups. A
- * catalogue entry and its key list share both, so this is right wherever two
- * types do not collide on an instance, which is everywhere seen so far. Said
- * out loud because it is an assumption and not a guarantee. */
+ * How the sidecar is matched, and why, is on the lookup below. */
 static SimAssembly stepTheSidecar(MemorySize marker)
 {
     /* Matched on group and instance both, which is what a sidecar shares.
@@ -1615,6 +1640,54 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                 else
                 {
                     catalogueResolved++;
+                    /* Only bodies. A hair or a pair of shoes has nothing to say
+                       about where a fat morph lives, and eight reads three deep
+                       is enough to answer the question. */
+                    if (catalogueFollowed < CATALOGUE_FOLLOW_LIMIT &&
+                        stringContainsIgnoringCase(catalogueEntryName, "body"))
+                    {
+                        catalogueFollowed++;
+                        catalogueFollowEntry = shape;
+                        catalogueFollow = CATALOGUE_FOLLOW_SHAPE;
+                        catalogueFollowName[0] = '\0';
+                        stringAppend(catalogueFollowName, PROPERTY_NAME_LIMIT,
+                                     catalogueEntryName);
+                    }
+                }
+                /* Every key of a body's list, with its type. Only key 1 has
+                 * been followed so far and a list holds three to five — and
+                 * every body container on this disc declares fatbot over an
+                 * all-zero map, so the deltas are somewhere this has not
+                 * looked. The rest of the list is the nearest place. */
+                if (stringContainsIgnoringCase(catalogueEntryName, "body") &&
+                    catalogueKeysShown < 3U)
+                {
+                    char keyMessage[512];
+                    Unsigned32 at;
+
+                    catalogueKeysShown++;
+                    keyMessage[0] = '\0';
+                    stringAppend(keyMessage, sizeof(keyMessage), "engine:   ");
+                    stringAppend(keyMessage, sizeof(keyMessage), catalogueEntryName);
+                    stringAppend(keyMessage, sizeof(keyMessage), " keys —");
+                    for (at = 0U; at < list.storedKeyCount; at++)
+                    {
+                        const ResourceKeyEntry *each = &list.keys[at];
+
+                        stringAppend(keyMessage, sizeof(keyMessage), " ");
+                        appendCount(keyMessage, sizeof(keyMessage), at);
+                        stringAppend(keyMessage, sizeof(keyMessage), ":");
+                        appendHexadecimal(keyMessage, sizeof(keyMessage), each->typeIdentifier);
+                        stringAppend(keyMessage, sizeof(keyMessage),
+                                     (resourceIndexFind(&simIndex, each->typeIdentifier,
+                                                        each->instanceIdentifier,
+                                                        each->instanceIdentifierHigh) !=
+                                      NULL_POINTER)
+                                         ? "(here)"
+                                         : "(elsewhere)");
+                        stringAppend(keyMessage, sizeof(keyMessage), ";");
+                    }
+                    platformLogMessage(keyMessage);
                 }
                 /* A few in full, because a count of successes says the chain
                    closes and nothing about what it closes onto. */
@@ -1651,12 +1724,217 @@ static SimAssembly stepTheSidecar(MemorySize marker)
     return SIM_ASSEMBLY_PENDING;
 }
 
+/* Shape to geometry node to container, one read a step, for an entry whose
+   shape already resolved. The last hop is the one worth having: what a clothed
+   body's container declares and how much of it the map actually reaches. */
+static SimAssembly stepTheFollow(MemorySize marker)
+{
+    Unsigned8 *bytes;
+    MemorySize size;
+    const ResourceIndexEntry *entry = catalogueFollowEntry;
+
+    if (entry == NULL_POINTER)
+    {
+        catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+        return SIM_ASSEMBLY_PENDING;
+    }
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+    catalogueFollowEntry = NULL_POINTER;
+
+    if (bytes == NULL_POINTER)
+    {
+        catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    if (catalogueFollow == CATALOGUE_FOLLOW_SHAPE)
+    {
+        ShapeDescription shape;
+
+        catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+        if (scenegraphReadShape(&shape, bytes, size) == SCENEGRAPH_READ_OK)
+        {
+            Unsigned32 which;
+            char shapeMessage[512];
+
+            /* Every node it names, not only the first that resolves. A morph
+             * mesh would be a second node here, and the follow below takes one
+             * and stops — so a list of one settles that the fat shape is not
+             * reached this way, and a list of several says exactly where it
+             * is. */
+            shapeMessage[0] = '\0';
+            stringAppend(shapeMessage, sizeof(shapeMessage), "engine:   ");
+            stringAppend(shapeMessage, sizeof(shapeMessage), catalogueFollowName);
+            stringAppend(shapeMessage, sizeof(shapeMessage), " shape names ");
+            appendCount(shapeMessage, sizeof(shapeMessage), shape.meshCount);
+            stringAppend(shapeMessage, sizeof(shapeMessage), " node(s) —");
+            for (which = 0U; which < shape.storedMeshCount; which++)
+            {
+                stringAppend(shapeMessage, sizeof(shapeMessage), " ");
+                stringAppend(shapeMessage, sizeof(shapeMessage), shape.meshNames[which]);
+                stringAppend(shapeMessage, sizeof(shapeMessage), ";");
+            }
+            platformLogMessage(shapeMessage);
+
+            for (which = 0U; which < shape.storedMeshCount && catalogueFollowEntry == NULL_POINTER;
+                 which++)
+            {
+                if (shape.meshNames[which][0] == '\0')
+                {
+                    continue;
+                }
+                catalogueFollowEntry = resourceIndexFindNamed(
+                    &simIndex, (Unsigned32)PACKAGE_TYPE_GMND, shape.meshNames[which]);
+            }
+            if (catalogueFollowEntry != NULL_POINTER)
+            {
+                catalogueFollow = CATALOGUE_FOLLOW_NODE;
+            }
+        }
+    }
+    else if (catalogueFollow == CATALOGUE_FOLLOW_NODE)
+    {
+        GeometryNodeDescription node;
+
+        catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+        if (scenegraphReadGeometryNode(&node, bytes, size) == SCENEGRAPH_READ_OK && node.hasGeometry)
+        {
+            catalogueFollowEntry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_GMDC,
+                                                     node.geometryKey.instanceIdentifier,
+                                                     node.geometryKey.instanceIdentifierHigh);
+            if (catalogueFollowEntry != NULL_POINTER)
+            {
+                catalogueFollow = CATALOGUE_FOLLOW_CONTAINER;
+            }
+        }
+    }
+    else
+    {
+        static GeometryMesh worn;
+        char message[512];
+
+        catalogueFollow = CATALOGUE_FOLLOW_IDLE;
+        if (geometryReaderOpen(&worn, bytes, size, globalArena) == GEOMETRY_READ_OK)
+        {
+            Unsigned32 touched = 0U;
+            Unsigned32 vertex;
+            Unsigned32 which;
+
+            for (vertex = 0U; vertex < worn.vertexCount && worn.morphSlotCount > 0U; vertex++)
+            {
+                Unsigned32 slot;
+
+                for (slot = 0U; slot < worn.morphSlotCount; slot++)
+                {
+                    if (worn.morphSlotChannels[(MemorySize)vertex * worn.morphSlotCount + slot] !=
+                        0U)
+                    {
+                        touched++;
+                        break;
+                    }
+                }
+            }
+
+            /* Whether the deltas hold anything, which the map's being empty
+             * does not answer.
+             *
+             * A face vertex can belong to four of twenty-seven channels, so it
+             * needs a word per vertex saying which. A body declares one real
+             * channel. If its deltas carry real displacements while its map is
+             * all noughts, then the map is not how a body's deltas are
+             * addressed — the slot is — and the fat shape has been in the
+             * container all along, unreachable only through the face's rule. */
+            {
+                Real32 furthest = 0.0f;
+                MemorySize slots = (MemorySize)worn.vertexCount * worn.morphSlotCount;
+                MemorySize at;
+
+                for (at = 0UL; at < slots && worn.morphSlotDeltas != NULL_POINTER; at++)
+                {
+                    Real32 lengthSquared =
+                        (worn.morphSlotDeltas[at * 3UL] * worn.morphSlotDeltas[at * 3UL]) +
+                        (worn.morphSlotDeltas[at * 3UL + 1UL] * worn.morphSlotDeltas[at * 3UL + 1UL]) +
+                        (worn.morphSlotDeltas[at * 3UL + 2UL] * worn.morphSlotDeltas[at * 3UL + 2UL]);
+
+                    if (lengthSquared > furthest)
+                    {
+                        furthest = lengthSquared;
+                    }
+                }
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:     ");
+                appendCount(message, sizeof(message), worn.morphSlotCount);
+                stringAppend(message, sizeof(message), " delta set(s), furthest displacement ");
+                appendThousandths(message, sizeof(message), mathSquareRoot(furthest));
+                platformLogMessage(message);
+            }
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   ");
+            stringAppend(message, sizeof(message), catalogueFollowName);
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), worn.vertexCount);
+            stringAppend(message, sizeof(message), " vertices, ");
+            appendCount(message, sizeof(message), worn.morphTargetCount);
+            stringAppend(message, sizeof(message), " channel(s), a map over ");
+            appendCount(message, sizeof(message), worn.morphMappedVertexCount);
+            stringAppend(message, sizeof(message), " reaching ");
+            appendCount(message, sizeof(message), touched);
+            platformLogMessage(message);
+
+            /* What the container carried and this reader passed over. The map
+             * is present and empty on every body met, so the assignment has to
+             * be somewhere else in the container — and the likeliest somewhere
+             * is a sparse form: index elements naming which vertices a delta
+             * set applies to, instead of a word per vertex. Those are read by
+             * nobody here and are listed among the unused. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:     met and not used —");
+            for (which = 0U; which < worn.unusedElementCount; which++)
+            {
+                const char *elementName = geometryElementGetName(worn.unusedElements[which]);
+
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message),
+                             (elementName != NULL_POINTER) ? elementName : "unnamed");
+                stringAppend(message, sizeof(message), " as format ");
+                appendCount(message, sizeof(message), worn.unusedElementFormats[which]);
+                stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:     channels —");
+            for (which = 0U; which < worn.morphTargetCount && which < 8U; which++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message), worn.morphTargets[which].groupName);
+                stringAppend(message, sizeof(message), "/");
+                stringAppend(message, sizeof(message), worn.morphTargets[which].channelName);
+                stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+    return SIM_ASSEMBLY_PENDING;
+}
+
 static SimAssembly stepTheCatalogue(MemorySize marker)
 {
     const ResourceIndexEntry *entry = NULL_POINTER;
     Unsigned8 *bytes;
     MemorySize size;
 
+    if (catalogueFollow != CATALOGUE_FOLLOW_IDLE)
+    {
+        return stepTheFollow(marker);
+    }
     if (catalogueWantsKeyList == BOOLEAN_TRUE)
     {
         return stepTheSidecar(marker);
@@ -4383,6 +4661,7 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         return BOOLEAN_FALSE;
     }
 
+    simMorphHeldChannel = configuration->heldMorphChannel;
     poseIsHeldStill = configuration->poseIsHeld;
     poseHeldTick = configuration->poseHeldTick;
     if (poseIsHeldStill == BOOLEAN_TRUE)
@@ -4507,7 +4786,37 @@ static void advanceThePose(Real32 elapsedSeconds)
      * Only the channels that move a vertex far enough to see, because a window
      * showing a face that does not change reads as the deformation having
      * broken rather than as a channel with nothing in it. */
-    if (simMorphMoverCount > 0U)
+    if (simMorphHeldChannel > 0U && simMorphHeldChannel < simMorphChannels)
+    {
+        Unsigned32 channel;
+
+        for (channel = 0U; channel < SIM_MORPH_WEIGHT_LIMIT; channel++)
+        {
+            simMorphWeights[channel] = 0.0f;
+        }
+        simMorphWeights[simMorphHeldChannel] = 1.0f;
+        discSearch.morphWeights = simMorphWeights;
+        discSearch.morphWeightCount = simMorphChannels;
+
+        if (simMorphShowing != simMorphHeldChannel)
+        {
+            char message[256];
+
+            simMorphShowing = simMorphHeldChannel;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: holding channel ");
+            appendCount(message, sizeof(message), simMorphHeldChannel);
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message),
+                         discSearch.mesh.morphTargets[simMorphHeldChannel].groupName);
+            stringAppend(message, sizeof(message), "/");
+            stringAppend(message, sizeof(message),
+                         discSearch.mesh.morphTargets[simMorphHeldChannel].channelName);
+            stringAppend(message, sizeof(message), " at full strength");
+            platformLogMessage(message);
+        }
+    }
+    else if (simMorphMoverCount > 0U)
     {
         Unsigned32 window = (Unsigned32)(elapsedSeconds / SIM_MORPH_SECONDS_PER_CHANNEL);
         Unsigned32 slot = window % simMorphMoverCount;

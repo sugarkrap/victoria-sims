@@ -72,6 +72,7 @@ Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPi
     configuration.cameraAngleDegrees = 0.0f;
     configuration.poseIsHeld = BOOLEAN_FALSE;
     configuration.poseHeldTick = 0.0f;
+    configuration.heldMorphChannel = 0U;
 
     return (Unsigned32)engineInitialize(&configuration);
 }

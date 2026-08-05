@@ -340,7 +340,8 @@ static void buildContainer(Builder *builder, Unsigned32 blockVersion, Unsigned32
  * unused slot 255. Two weights are stored and the third implied, so the reader
  * has to work the missing one back out rather than leave the vertex weighing
  * three quarters of itself. */
-static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boolean withWeights)
+static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion,
+                                  Boolean withWeights, Boolean emptyMorphMap)
 {
     static const Real32 positions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
     /* Slots into the primitive's bone list below, not bones: the first three
@@ -416,7 +417,12 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
          *
          * Read backwards every one of those bytes is nought and no vertex
          * deforms, which the checks below can tell from the right answer. */
-        static const Unsigned32 morphMap[3] = { 0x01000000UL, 0x00020000UL, 0x00000000UL };
+        static const Unsigned32 assignedMap[3] = { 0x01000000UL, 0x00020000UL, 0x00000000UL };
+        /* A body's map, which is every word nought while its deltas hold real
+           displacements. See the note in geometryReader.c on what is inferred
+           from that and why. */
+        static const Unsigned32 blankMap[3] = { 0x00000000UL, 0x00000000UL, 0x00000000UL };
+        const Unsigned32 *morphMap = (emptyMorphMap == BOOLEAN_TRUE) ? blankMap : assignedMap;
         /* The two delta sets. Each carries a usable value only where the map
            names it, and 9 everywhere else — a slot read against the wrong set,
            or a set read against the wrong slot, lands on a 9 and is loud. */
@@ -776,7 +782,7 @@ int main(void)
         static Builder builder;
         GeometryMesh skinned;
 
-        buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+        buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
         result = geometryReaderOpen(&skinned, builder.bytes, builder.length, &arena);
         checkThat(&failureCount, "reads a container carrying bone data", result == GEOMETRY_READ_OK);
         if (result != GEOMETRY_READ_OK)
@@ -829,7 +835,7 @@ int main(void)
                them anyway and weighting each vertex fully to its first bone
                would draw a body rigidly welded to its own joints, which looks
                like a skinning bug rather than a missing element. */
-            buildSkinnedContainer(&builder, 4U, BOOLEAN_FALSE);
+            buildSkinnedContainer(&builder, 4U, BOOLEAN_FALSE, BOOLEAN_FALSE);
             result = geometryReaderOpen(&lopsided, builder.bytes, builder.length, &arena);
             checkThat(&failureCount, "still reads the mesh", result == GEOMETRY_READ_OK);
             checkThat(&failureCount, "but keeps no bone data from it",
@@ -935,7 +941,7 @@ int main(void)
             static const Real32 weights[3] = { 0.0f, 1.0f, 2.0f };
             Unsigned32 deformed;
 
-            buildSkinnedContainer(&morphBuilder, 4U, BOOLEAN_TRUE);
+            buildSkinnedContainer(&morphBuilder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
             (void)geometryReaderOpen(&deforming, morphBuilder.bytes, morphBuilder.length, &arena);
             deformed = geometryMeshApplyMorph(&deforming, weights, 3U);
 
@@ -952,6 +958,44 @@ int main(void)
                the array in place across a frame that wants no deformation. */
             checkThat(&failureCount, "a channel at rest moves nothing",
                       geometryMeshApplyMorph(&deforming, weights, 1U) == 0U);
+        }
+
+        printf("\n-- a body's map, which is empty over deltas that are not --\n");
+        {
+            /* Every body mesh on the retail disc — the nude one and eight
+             * outfits across ages and genders — carries a morph map of all
+             * noughts while its delta sets hold displacements of three
+             * hundredths against a model 1.879 across. A face needs a map
+             * because a vertex picks four channels out of twenty-six; a body
+             * declares one or two and carries exactly that many delta sets, so
+             * the slot is the channel and the file does not spell it out.
+             *
+             * Two checks, and the second matters more than the first: the
+             * inference must NOT fire on a map that says something, or every
+             * face on the disc would be silently re-addressed. */
+            static Builder blankBuilder;
+            static GeometryMesh blankMapped;
+            static const Real32 weights[3] = { 0.0f, 1.0f, 2.0f };
+
+            buildSkinnedContainer(&blankBuilder, 4U, BOOLEAN_TRUE, BOOLEAN_TRUE);
+            (void)geometryReaderOpen(&blankMapped, blankBuilder.bytes, blankBuilder.length, &arena);
+
+            checkThat(&failureCount, "an empty map over deltas is filled in",
+                      blankMapped.morphChannelsInferred == BOOLEAN_TRUE);
+            checkThat(&failureCount, "slot nought driving channel one",
+                      blankMapped.morphSlotCount == 2U &&
+                          blankMapped.morphSlotChannels[0] == 1U);
+            checkThat(&failureCount, "and slot one driving channel two",
+                      blankMapped.morphSlotChannels[1] == 2U);
+            checkThat(&failureCount, "so every vertex deforms rather than none",
+                      geometryMeshApplyMorph(&blankMapped, weights, 3U) == 3U);
+
+            /* The guard. The fixture next door has a map that names channels,
+               and touching it would re-address a face. */
+            checkThat(&failureCount, "a map that says something is left alone",
+                      skinned.morphChannelsInferred == BOOLEAN_FALSE);
+            checkThat(&failureCount, "keeping the slots it actually named",
+                      skinned.morphSlotChannels[0] == 1U && skinned.morphSlotChannels[1] == 0U);
         }
 
         printf("\n-- joining several containers into one model --\n");
@@ -1066,8 +1110,8 @@ int main(void)
                     static GeometryMesh bothParts;
                     const GeometryMesh *bothOfThem[2];
 
-                    buildSkinnedContainer(&firstBuilder, 4U, BOOLEAN_TRUE);
-                    buildSkinnedContainer(&secondBuilder, 4U, BOOLEAN_TRUE);
+                    buildSkinnedContainer(&firstBuilder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
+                    buildSkinnedContainer(&secondBuilder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
                     (void)geometryReaderOpen(&firstPart, firstBuilder.bytes, firstBuilder.length,
                                              &arena);
                     (void)geometryReaderOpen(&secondPart, secondBuilder.bytes, secondBuilder.length,
@@ -1157,7 +1201,7 @@ int main(void)
                    instead — the mistake that drew a face with a limb stretched
                    out of it, and the reason this check exists rather than a
                    comment saying be careful. */
-                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
                 (void)geometryReaderOpen(&resting, builder.bytes, builder.length, &arena);
                 for (bone = 0U; bone < 10U; bone++)
                 {
@@ -1177,7 +1221,7 @@ int main(void)
             {
                 GeometryMesh again;
 
-                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE, BOOLEAN_FALSE);
                 (void)geometryReaderOpen(&again, builder.bytes, builder.length, &arena);
                 /* A palette too short for the bones named. Moving nothing is
                    the right answer: a vertex blended from bones that are not
