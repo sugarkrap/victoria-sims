@@ -6,6 +6,25 @@
 #include "render/meshCamera.h"
 #include "victoria/renderInterface.h"
 
+/* Radians a second the camera goes round the model. Settable so a frame
+   being compared against another can be taken from the same angle — see the
+   note on renderSetCameraOrbitRate for why that is worth a knob. */
+static Real32 cameraOrbitRate = RENDER_CAMERA_ORBIT_DEFAULT;
+/* Where the orbit starts from, so holding the camera still can hold it
+   somewhere worth looking at rather than wherever nought happens to be. */
+static Real32 cameraStartAngle = 0.0f;
+
+void renderSetCameraOrbitRate(Real32 radiansPerSecond)
+{
+    cameraOrbitRate = radiansPerSecond;
+}
+
+void renderSetCameraAngle(Real32 radians)
+{
+    cameraStartAngle = radians;
+}
+
+
 /* WebGPU has no C entry point in a bare wasm32 module, so the backend is a
    thin command layer over host functions. Everything that decides what to draw
    stays here in C; the host only executes. */
@@ -386,7 +405,7 @@ void renderDrawFrame(Real32 elapsedSeconds)
         /* Matrix then light, laid out the way the shader's uniform block
            expects, so the host has nothing to rearrange. */
         Real32 uniforms[20];
-        Real32 angle = elapsedSeconds * 0.6f;
+        Real32 angle = cameraStartAngle + (elapsedSeconds * cameraOrbitRate);
 
         meshCameraBuildMatrix(&meshCamera, angle, viewportAspect, uniforms);
         meshCameraGetLightDirection(angle, &uniforms[16]);

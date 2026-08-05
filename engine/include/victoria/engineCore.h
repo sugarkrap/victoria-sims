@@ -21,6 +21,28 @@ typedef struct EngineConfiguration
        An empty catalogue means "walk it as a disc image"; a catalogue that is
        already filled is taken as it is, which is how a folder arrives. */
     VirtualFileSystem *fileSystem;
+
+    /* Holds the camera still instead of orbiting the model.
+     *
+     * For comparing frames by eye, which is the one thing an orbiting camera
+     * makes impossible: two captures a moment apart are two different views,
+     * and the difference gets attributed to whatever changed in the code. That
+     * has already cost a round of work here once. The orbit stays the default
+     * because a still model hides its own silhouette. */
+    Boolean cameraIsStill;
+    /* Where to hold it, in degrees. Only read when cameraIsStill. Nought is
+       behind a Sim, so this defaults to half a turn at the caller. */
+    Real32 cameraAngleDegrees;
+
+    /* Holds the animation on one frame instead of playing it.
+     *
+     * The companion to cameraIsStill, and for the same reason: with the camera
+     * fixed and the pose fixed, anything still moving on screen is the one
+     * thing being looked at. Judging a deformation against a model that is also
+     * walking is judging two motions at once. */
+    Boolean poseIsHeld;
+    /* Which tick to hold it on. Only read when poseIsHeld. */
+    Real32 poseHeldTick;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);

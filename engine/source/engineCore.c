@@ -471,8 +471,32 @@ static GeometryMesh simParts[SIM_DRAWN_PART_COUNT];
  * shape. */
 #define SIM_MORPH_WEIGHT_LIMIT 64U
 static Real32 simMorphWeights[SIM_MORPH_WEIGHT_LIMIT];
+
+/* Whether the animation plays, and where it stops if it does not. */
+static Boolean poseIsHeldStill = BOOLEAN_FALSE;
+static Real32 poseHeldTick = 0.0f;
 static Unsigned32 simMorphChannels = 0U;
-static Boolean simMorphReported = BOOLEAN_FALSE;
+
+/* The channels worth showing, and which of them is showing now.
+ *
+ * Not all of them. Twelve of a face's twenty-six move their vertices by under a
+ * thousandth of a unit against a model 1.879 across, which is nothing anyone
+ * can see — cycling through those would be twelve windows of a still face and
+ * would read as the deformation having stopped working.
+ *
+ * One at a time, because all of them together is not an instrument. The mouth
+ * alone is driven by nine channels, so at full strength they fight over the
+ * same vertices and the result says nothing about whether any one of them is
+ * right. A single named channel swung up and back can be checked against its
+ * name: l_cheekpuff had better puff the left cheek. */
+#define SIM_MORPH_MOVER_LIMIT 32U
+/* Below this a channel is not worth a window. A thousandth of a unit on a model
+   1.879 across is half a pixel at any sane distance. */
+#define SIM_MORPH_VISIBLE_SHIFT 0.002f
+#define SIM_MORPH_SECONDS_PER_CHANNEL 4.0f
+static Unsigned32 simMorphMovers[SIM_MORPH_MOVER_LIMIT];
+static Unsigned32 simMorphMoverCount = 0U;
+static Unsigned32 simMorphShowing = 0xFFFFFFFFUL;
 static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
 
 /* The stem of the texture a part should wear INSTEAD of the one its shape
@@ -1147,6 +1171,7 @@ static void reportDeformationReach(const GeometryMesh *mesh)
     Unsigned32 channel;
     Unsigned32 unreached = 0U;
 
+    simMorphMoverCount = 0U;
     if (mesh->morphTargetCount == 0U)
     {
         return;
@@ -1200,6 +1225,15 @@ static void reportDeformationReach(const GeometryMesh *mesh)
             unreached++;
             continue;
         }
+        /* Kept for the sweep below. The measurement is already being done here,
+           and doing it twice would be two walks of the mesh to reach the same
+           list. */
+        if (mathSquareRoot(furthest) >= SIM_MORPH_VISIBLE_SHIFT &&
+            simMorphMoverCount < SIM_MORPH_MOVER_LIMIT)
+        {
+            simMorphMovers[simMorphMoverCount] = channel;
+            simMorphMoverCount++;
+        }
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine:   channel ");
         appendCount(message, sizeof(message), channel);
@@ -1219,7 +1253,9 @@ static void reportDeformationReach(const GeometryMesh *mesh)
     appendCount(message, sizeof(message), mesh->morphTargetCount - 1U - unreached);
     stringAppend(message, sizeof(message), " of ");
     appendCount(message, sizeof(message), mesh->morphTargetCount - 1U);
-    stringAppend(message, sizeof(message), " declared channel(s) are reached by a vertex");
+    stringAppend(message, sizeof(message), " declared channel(s) are reached by a vertex, ");
+    appendCount(message, sizeof(message), simMorphMoverCount);
+    stringAppend(message, sizeof(message), " of them by enough to see");
     platformLogMessage(message);
 }
 
@@ -1681,7 +1717,7 @@ static SimAssembly stepTheSim(void)
             {
                 simMorphWeights[channel] = 0.0f;
             }
-            simMorphReported = BOOLEAN_FALSE;
+            simMorphShowing = 0xFFFFFFFFUL;
         }
 
         discSearch.mesh = whole;
@@ -3884,6 +3920,32 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         return BOOLEAN_FALSE;
     }
 
+    poseIsHeldStill = configuration->poseIsHeld;
+    poseHeldTick = configuration->poseHeldTick;
+    if (poseIsHeldStill == BOOLEAN_TRUE)
+    {
+        char message[128];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the pose is held on tick ");
+        appendThousandths(message, sizeof(message), poseHeldTick);
+        stringAppend(message, sizeof(message), ", so only the deformation moves");
+        platformLogMessage(message);
+    }
+    if (configuration->cameraIsStill == BOOLEAN_TRUE)
+    {
+        char message[128];
+
+        renderSetCameraOrbitRate(0.0f);
+        renderSetCameraAngle(configuration->cameraAngleDegrees * (VICTORIA_PI / 180.0f));
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the camera is held still at ");
+        appendThousandths(message, sizeof(message), configuration->cameraAngleDegrees);
+        stringAppend(message, sizeof(message),
+                     " degrees, so two frames can be compared; nought is behind a Sim");
+        platformLogMessage(message);
+    }
+
     /* After the renderer, because the backend may want to upload what it is
        given, and before the first frame so nothing is drawn twice. */
     loadDiscContent(configuration->fileSystem);
@@ -3946,6 +4008,16 @@ static void advanceThePose(Real32 elapsedSeconds)
      * truncated division rather than repeated subtraction, which at eight
      * hundred ticks a second would be thousands of iterations an hour into a
      * run; there is no floating point modulus to call freestanding. */
+    if (poseIsHeldStill == BOOLEAN_TRUE)
+    {
+        /* Held, but still rebuilt every frame. Skipping the pose entirely would
+           leave the mesh wherever the deformation last put it, since the two
+           share the one restore — so the animation is re-applied to the same
+           tick rather than not applied. */
+        tick = poseHeldTick;
+        poseTick = tick;
+    }
+    else
     {
         Real32 duration = (Real32)posedAnimation.durationTicks;
         Real32 elapsedTicks = elapsedSeconds / ANIMATION_TICK_SECONDS;
@@ -3959,49 +4031,60 @@ static void advanceThePose(Real32 elapsedSeconds)
         poseTick = tick;
     }
 
-    /* The deformation, swung between rest and full on its own slow clock —
-     * slower than the animation, so the two are told apart on screen rather
-     * than reading as one motion.
+    /* One channel at a time, swung from rest to full and back over four
+     * seconds, then on to the next.
      *
-     * Every channel at once, which is a caricature and is meant to be. What it
-     * proves is that the per-vertex map reaches the mesh and that the deltas
-     * are in rest space: a face pulled into every one of its shapes together
-     * still has to be a face, and still has to move with the pose rather than
-     * swimming against it. Driving one channel would look like nothing much
-     * either way.
+     * This began as every channel at once, which was a mistake worth recording:
+     * nine of a face's channels drive the mouth, so at full strength they fight
+     * over the same vertices and what arrives is a mangled mouth that says
+     * nothing about whether any single channel is right. A caricature is not an
+     * instrument. One named channel at a time can be checked against its own
+     * name, which is the only thing here that can be checked at all.
      *
-     * Channel nought is skipped because it is not a channel — see the note on
-     * geometryMeshApplyMorph. */
-    if (simMorphChannels > 1U)
+     * Only the channels that move a vertex far enough to see, because a window
+     * showing a face that does not change reads as the deformation having
+     * broken rather than as a channel with nothing in it. */
+    if (simMorphMoverCount > 0U)
     {
-        Real32 strength = 0.5f + (0.5f * mathSine(elapsedSeconds * 0.35f));
+        Unsigned32 window = (Unsigned32)(elapsedSeconds / SIM_MORPH_SECONDS_PER_CHANNEL);
+        Unsigned32 slot = window % simMorphMoverCount;
+        Real32 phase = elapsedSeconds - ((Real32)window * SIM_MORPH_SECONDS_PER_CHANNEL);
+        Real32 strength = mathSine(VICTORIA_PI * phase / SIM_MORPH_SECONDS_PER_CHANNEL);
         Unsigned32 channel;
 
-        for (channel = 1U; channel < simMorphChannels; channel++)
+        if (strength < 0.0f)
         {
-            simMorphWeights[channel] = strength;
+            strength = 0.0f;
         }
+        for (channel = 0U; channel < SIM_MORPH_WEIGHT_LIMIT; channel++)
+        {
+            simMorphWeights[channel] = 0.0f;
+        }
+        simMorphWeights[simMorphMovers[slot]] = strength;
         discSearch.morphWeights = simMorphWeights;
         discSearch.morphWeightCount = simMorphChannels;
+
+        if (slot != simMorphShowing)
+        {
+            char message[256];
+            Unsigned32 named = simMorphMovers[slot];
+
+            simMorphShowing = slot;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: deforming by channel ");
+            appendCount(message, sizeof(message), named);
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message), discSearch.mesh.morphTargets[named].groupName);
+            stringAppend(message, sizeof(message), "/");
+            stringAppend(message, sizeof(message), discSearch.mesh.morphTargets[named].channelName);
+            stringAppend(message, sizeof(message), " alone, for the next four seconds");
+            platformLogMessage(message);
+        }
     }
 
     if (discContentPoseFromAnimation(&discSearch, &posedAnimation, tick, globalArena))
     {
-        if (!simMorphReported && discSearch.verticesDeformed > 0U)
-        {
-            char message[256];
 
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: deformed ");
-            appendCount(message, sizeof(message), discSearch.verticesDeformed);
-            stringAppend(message, sizeof(message), " vertices over ");
-            appendCount(message, sizeof(message), simMorphChannels - 1U);
-            stringAppend(message, sizeof(message),
-                         " channel(s) before posing them, which is the order a morph has to "
-                         "come in");
-            platformLogMessage(message);
-            simMorphReported = BOOLEAN_TRUE;
-        }
         /* The vertices moved; the mesh is otherwise the one already uploaded.
            renderSetMesh here would charge the graphics ledger for a second
            buffer every frame and compile the program again with it. */

@@ -7,6 +7,25 @@
 #include "victoria/renderInterface.h"
 #include "victoria/softwareSurface.h"
 
+/* Radians a second the camera goes round the model. Settable so a frame
+   being compared against another can be taken from the same angle — see the
+   note on renderSetCameraOrbitRate for why that is worth a knob. */
+static Real32 cameraOrbitRate = RENDER_CAMERA_ORBIT_DEFAULT;
+/* Where the orbit starts from, so holding the camera still can hold it
+   somewhere worth looking at rather than wherever nought happens to be. */
+static Real32 cameraStartAngle = 0.0f;
+
+void renderSetCameraOrbitRate(Real32 radiansPerSecond)
+{
+    cameraOrbitRate = radiansPerSecond;
+}
+
+void renderSetCameraAngle(Real32 radians)
+{
+    cameraStartAngle = radians;
+}
+
+
 /* Same geometry and colours as the shader backends, so the three can be
    compared frame to frame rather than taken on trust. */
 static const RasterizerVertex triangleVertices[3] = {
@@ -381,7 +400,7 @@ static void drawMesh(Real32 elapsedSeconds)
     Unsigned32 kept;
     Unsigned32 position;
 
-    projectMesh(elapsedSeconds * 0.6f);
+    projectMesh(cameraStartAngle + (elapsedSeconds * cameraOrbitRate));
     kept = orderTrianglesBackToFront();
 
     for (position = 0U; position < kept; position++)

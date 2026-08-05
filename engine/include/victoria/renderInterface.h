@@ -72,6 +72,32 @@ void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
 void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
                       Unsigned32 heightInPixels);
 
+/* How fast the camera goes round the model, in radians a second. */
+#define RENDER_CAMERA_ORBIT_DEFAULT 0.6f
+
+/* Sets that rate. Nought holds the camera still.
+ *
+ * This exists because of a specific and repeated mistake. Two screenshots of an
+ * orbiting model are two different views, and comparing them attributes the
+ * camera's motion to whatever changed in the code — a correctly posed head seen
+ * from the side has no skull behind it and looks exactly like a torn one, which
+ * cost a full round of misdirected work once already. Anything being judged by
+ * eye across frames wants this at nought, and `--still-camera` is the way to
+ * ask for it from the command line.
+ *
+ * The orbit is otherwise worth keeping: a still model hides everything about
+ * its silhouette, and three of this engine's bugs were visible only in motion. */
+void renderSetCameraOrbitRate(Real32 radiansPerSecond);
+
+/* Where the camera starts, in radians. The orbit is added to this, so with the
+ * rate at nought this is simply where the camera stays.
+ *
+ * Nought is behind a Sim — which is not a fact anyone could have predicted from
+ * the code, and was found by holding the camera there and getting a back. Half
+ * a turn is the front. */
+#define RENDER_CAMERA_FRONT (3.14159265358979323846f)
+void renderSetCameraAngle(Real32 radians);
+
 void renderDrawFrame(Real32 elapsedSeconds);
 void renderShutdown(void);
 

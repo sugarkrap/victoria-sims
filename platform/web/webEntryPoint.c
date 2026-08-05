@@ -66,6 +66,12 @@ Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPi
     configuration.widthInPixels = widthInPixels;
     configuration.heightInPixels = heightInPixels;
     configuration.graphicsMemoryLimitBytes = (MemorySize)graphicsMemoryLimitBytes;
+    /* No way to ask for it from a page yet, and a field left uninitialised is a
+       field that eventually holds something. */
+    configuration.cameraIsStill = BOOLEAN_FALSE;
+    configuration.cameraAngleDegrees = 0.0f;
+    configuration.poseIsHeld = BOOLEAN_FALSE;
+    configuration.poseHeldTick = 0.0f;
 
     return (Unsigned32)engineInitialize(&configuration);
 }

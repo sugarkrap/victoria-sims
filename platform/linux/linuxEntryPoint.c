@@ -320,6 +320,11 @@ int main(int argumentCount, char **argumentValues)
 {
     EngineConfiguration configuration;
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
+    Boolean cameraIsStill = BOOLEAN_FALSE;
+    /* Half a turn, which is a Sim's front. Nought is its back. */
+    Real32 cameraAngleDegrees = 180.0f;
+    Boolean poseIsHeld = BOOLEAN_FALSE;
+    Real32 poseHeldTick = 0.0f;
     const char *inspectPath = NULL_POINTER;
     MemorySize graphicsMemoryLimitBytes = 0UL;
     const char *discPath = NULL_POINTER;
@@ -340,6 +345,30 @@ int main(int argumentCount, char **argumentValues)
         else if (stringEquals(argument, "--quiet") == BOOLEAN_TRUE)
         {
             windowState.profilerReportIntervalMicroseconds = 0ULL;
+        }
+        else if (stringEquals(argument, "--still-camera") == BOOLEAN_TRUE)
+        {
+            /* For judging one frame against another. See the note on
+               EngineConfiguration.cameraIsStill. */
+            cameraIsStill = BOOLEAN_TRUE;
+        }
+        else if (stringEquals(argument, "--still-pose") == BOOLEAN_TRUE)
+        {
+            poseIsHeld = BOOLEAN_TRUE;
+        }
+        else if (stringStartsWith(argument, "--still-pose=") == BOOLEAN_TRUE)
+        {
+            /* A tick to hold on, for looking at a moment other than the first. */
+            poseIsHeld = BOOLEAN_TRUE;
+            poseHeldTick = (Real32)stringParseUnsigned(argument + stringLength("--still-pose="));
+        }
+        else if (stringStartsWith(argument, "--still-camera=") == BOOLEAN_TRUE)
+        {
+            /* An angle in degrees, for looking at something other than the
+               front. Whole degrees are enough for pointing a camera. */
+            cameraIsStill = BOOLEAN_TRUE;
+            cameraAngleDegrees =
+                (Real32)stringParseUnsigned(argument + stringLength("--still-camera="));
         }
         else if (stringStartsWith(argument, "--inspect-disc=") == BOOLEAN_TRUE)
         {
@@ -384,6 +413,10 @@ int main(int argumentCount, char **argumentValues)
     configuration.heightInPixels = windowState.heightInPixels;
     configuration.graphicsMemoryLimitBytes = graphicsMemoryLimitBytes;
     configuration.fileSystem = NULL_POINTER;
+    configuration.cameraIsStill = cameraIsStill;
+    configuration.cameraAngleDegrees = cameraAngleDegrees;
+    configuration.poseIsHeld = poseIsHeld;
+    configuration.poseHeldTick = poseHeldTick;
 
     if (discPath != NULL_POINTER)
     {

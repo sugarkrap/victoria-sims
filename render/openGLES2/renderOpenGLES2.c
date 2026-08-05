@@ -8,6 +8,25 @@
 #include "render/meshCamera.h"
 #include "victoria/renderInterface.h"
 
+/* Radians a second the camera goes round the model. Settable so a frame
+   being compared against another can be taken from the same angle — see the
+   note on renderSetCameraOrbitRate for why that is worth a knob. */
+static Real32 cameraOrbitRate = RENDER_CAMERA_ORBIT_DEFAULT;
+/* Where the orbit starts from, so holding the camera still can hold it
+   somewhere worth looking at rather than wherever nought happens to be. */
+static Real32 cameraStartAngle = 0.0f;
+
+void renderSetCameraOrbitRate(Real32 radiansPerSecond)
+{
+    cameraOrbitRate = radiansPerSecond;
+}
+
+void renderSetCameraAngle(Real32 radians)
+{
+    cameraStartAngle = radians;
+}
+
+
 /* Vendor queries for total graphics memory. Neither is core in OpenGL ES 2.0,
    so both are guarded by an extension string check before use. */
 #ifndef GL_NVX_GPU_MEMORY_INFO_DEDICATED_VIDMEM
@@ -614,7 +633,7 @@ static void drawMesh(Real32 elapsedSeconds)
 {
     Real32 matrix[16];
     Real32 light[3];
-    Real32 angle = elapsedSeconds * 0.6f;
+    Real32 angle = cameraStartAngle + (elapsedSeconds * cameraOrbitRate);
     const GLsizei vertexStride = (GLsizei)(8 * sizeof(GLfloat));
 
     meshCameraBuildMatrix(&meshCamera, angle, viewportAspect, matrix);
