@@ -111,6 +111,12 @@ typedef struct DiscContentSearch
        models or the search only ever met the one. */
     Unsigned32 rigidModelsPassed;
 
+    /* Set when the search has been pointed at one package by name of index
+       rather than left to walk. Nothing else is opened, and what that package
+       holds is taken as it is. */
+    Boolean limitedToOneFile;
+    Unsigned32 onlyFileIndex;
+
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];
     GeometryMesh mesh;
@@ -224,6 +230,16 @@ typedef struct DiscContentSearch
 } DiscContentSearch;
 
 void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, MemoryArena *arena);
+
+/* Begins again over one package and no others.
+ *
+ * For when something else has already worked out which package is worth
+ * reading — the index can say which containers carry bone assignments, and
+ * that is a better answer than any rule about directory names. Takes whatever
+ * that package yields: the caller has already decided this is the one, so a
+ * model in it that turns out rigid is still the model to draw. */
+void discContentBeginInFile(DiscContentSearch *search, VirtualFileSystem *fileSystem,
+                            MemoryArena *arena, Unsigned32 fileIndex);
 
 /* Tries one package. */
 DiscContentStatus discContentStep(DiscContentSearch *search);

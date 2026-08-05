@@ -41,6 +41,8 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->rigidModelFound = BOOLEAN_FALSE;
     search->rigidModelIndex = 0U;
     search->rigidModelsPassed = 0U;
+    search->limitedToOneFile = BOOLEAN_FALSE;
+    search->onlyFileIndex = 0U;
     search->packagePath[0] = '\0';
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
@@ -71,6 +73,20 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     {
         search->versionsSeen[index] = 0U;
     }
+}
+
+void discContentBeginInFile(DiscContentSearch *search, VirtualFileSystem *fileSystem,
+                            MemoryArena *arena, Unsigned32 fileIndex)
+{
+    discContentBegin(search, fileSystem, arena);
+    search->limitedToOneFile = BOOLEAN_TRUE;
+    search->onlyFileIndex = fileIndex;
+    search->nextIndex = fileIndex;
+    /* Neither round applies: the caller is not asking this to look, it is
+       telling it where to look. Asking for a skinned model here as well would
+       let the search reject the one package it was pointed at. */
+    search->walkingPreferred = BOOLEAN_FALSE;
+    search->wantingSkinned = BOOLEAN_FALSE;
 }
 
 /* Where the game keeps the meshes a Sim is built from. Not a guess about this
@@ -594,6 +610,13 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     const Unsigned8 *geometryBytes;
     MemorySize geometrySize;
     VirtualReadResult read;
+
+    /* Pointed at one package: it is either that one or nothing, and walking on
+       past it would quietly answer a different question than the one asked. */
+    if (search->limitedToOneFile && search->nextIndex != search->onlyFileIndex)
+    {
+        return DISC_CONTENT_NONE_FOUND;
+    }
 
     if (search->nextIndex >= search->fileSystem->entryCount)
     {

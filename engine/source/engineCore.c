@@ -947,10 +947,26 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             appendCount(message, sizeof(message), skinScanned);
             stringAppend(message, sizeof(message), " container(s)");
             platformLogMessage(message);
-            memoryArenaRewindToMarker(globalArena, marker);
-            discPhase = DISC_PHASE_DONE;
-            discLoadStatus = ENGINE_DISC_READY;
-            return discLoadStatus;
+
+            /* Read that package properly rather than stopping at having found
+               it. The probe opened a container on its own, which is enough to
+               answer where skinning lives and not enough to draw: a model needs
+               the shape that names its materials and the tree that places it,
+               and those come from the same walk everything else goes through.
+             *
+               Its file index is kept before the arena is given back — the entry
+               it came from sits below this marker and survives, but reading a
+               pointer after rewinding it is a habit worth not having. */
+            {
+                Unsigned32 skinnedFile = entry->fileIndex;
+
+                memoryArenaRewindToMarker(globalArena, marker);
+                platformLogMessage("engine: reading that package instead, for a model with a "
+                                   "skeleton under it");
+                discContentBeginInFile(&discSearch, discFileSystem, globalArena, skinnedFile);
+                discPhase = DISC_PHASE_CONTENT;
+                return ENGINE_DISC_WORKING;
+            }
         }
 
         memoryArenaRewindToMarker(globalArena, marker);
@@ -1944,6 +1960,24 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
 
         if (status != DISC_CONTENT_FOUND)
         {
+            /* A search that was pointed at one package and came away with
+               nothing is not a failed load. Something is already drawn and
+               uploaded — this was an attempt to draw something better — so the
+               engine keeps what it has and says why, rather than reporting a
+               disc it read perfectly well as unreadable. */
+            if (discSearch.limitedToOneFile)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message),
+                             "engine: that package holds skinned geometry but no model this can "
+                             "follow (");
+                stringAppend(message, sizeof(message), discContentStatusGetName(status));
+                stringAppend(message, sizeof(message), ") — keeping what was already drawn");
+                platformLogMessage(message);
+                discPhase = DISC_PHASE_DONE;
+                discLoadStatus = ENGINE_DISC_READY;
+                return discLoadStatus;
+            }
             reportDiscFailure(discContentStatusGetName(status));
             return discLoadStatus;
         }
