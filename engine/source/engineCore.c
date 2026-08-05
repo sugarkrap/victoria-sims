@@ -283,11 +283,39 @@ typedef enum DiscPhase
     DISC_PHASE_INDEX,
     DISC_PHASE_FETCH_TEXTURE,
     DISC_PHASE_FETCH_LEVEL,
+    DISC_PHASE_SEEK_SKIN,
     DISC_PHASE_DONE
 } DiscPhase;
 
 static DiscPhase discPhase = DISC_PHASE_CONTENT;
 static ResourceIndex textureIndex;
+
+/* Looking for a mesh with a skeleton, once the one drawn turns out not to have
+ * one.
+ *
+ * Walking directories has now been asked twice and answered twice: under the
+ * plain Sims3D there are three packages with geometry in them and both models
+ * they yield are rigid. A Sim's body is not a model sitting in a package — it
+ * is assembled at run time from resources the character file never names — so
+ * looking harder in the same place will not find it.
+ *
+ * The index can look everywhere at once. This runs after something is already
+ * on screen and changes nothing about it; it exists to answer where skinned
+ * geometry actually lives, which is the question the next piece of work starts
+ * from. */
+static ResourceIndex skinIndex;
+static Boolean skinIndexBegun = BOOLEAN_FALSE;
+static Boolean skinIndexBuilding = BOOLEAN_FALSE;
+static Unsigned32 skinCursor = 0U;
+static Unsigned32 skinScanned = 0U;
+
+#define SKIN_INDEX_CAPACITY 32768U
+
+/* How many containers to open looking for one. Each is a read and on the web a
+   read is a round trip, so this is a survey and not an exhaustive search: if
+   two hundred and fifty six containers drawn from across the whole disc hold no
+   bone data, the answer is not "look at more of them". */
+#define SKIN_SCAN_LIMIT 256U
 
 /* Where the arena stood before the texture was read, kept because the texture
    has to survive between steps.
@@ -797,6 +825,37 @@ static Boolean fetchLargestLevel(char *message, MemorySize messageCapacity)
     return BOOLEAN_TRUE;
 }
 
+/* Ends the load, or starts the search for a skinned mesh first.
+ *
+ * Called from every place the load would otherwise be finished, so the search
+ * happens once whichever way the texture went. Everything drawable is already
+ * uploaded by this point — this only delays the disc reporting itself loaded,
+ * and only when what it drew has no skeleton. */
+static EngineDiscLoadStatus finishOrSeekSkin(void)
+{
+    if (discSearch.mesh.boneAssignments == NULL_POINTER && !skinIndexBegun)
+    {
+        static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_GMDC };
+
+        skinIndexBegun = BOOLEAN_TRUE;
+        if (resourceIndexBegin(&skinIndex, discFileSystem, globalArena, SKIN_INDEX_CAPACITY,
+                               wantedTypes, 1U))
+        {
+            skinIndexBuilding = BOOLEAN_TRUE;
+            skinCursor = 0U;
+            skinScanned = 0U;
+            platformLogMessage("engine: what was drawn has no skeleton — asking the index where the "
+                               "disc keeps geometry that does");
+            discPhase = DISC_PHASE_SEEK_SKIN;
+            return ENGINE_DISC_WORKING;
+        }
+        platformLogMessage("engine: not enough room to index the disc for a skinned mesh");
+    }
+    discPhase = DISC_PHASE_DONE;
+    discLoadStatus = ENGINE_DISC_READY;
+    return discLoadStatus;
+}
+
 EngineDiscLoadStatus engineStepDiscLoad(void)
 {
     /* Wide enough for every refusal reason at once. A truncated diagnostic is
@@ -806,6 +865,96 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
         return discLoadStatus;
+    }
+
+    if (discPhase == DISC_PHASE_SEEK_SKIN)
+    {
+        static GeometryMesh probe;
+        const ResourceIndexEntry *entry;
+        MemorySize marker;
+        Unsigned8 *bytes;
+        MemorySize size;
+
+        if (skinIndexBuilding)
+        {
+            if (resourceIndexStep(&skinIndex) == RESOURCE_INDEX_WORKING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+            skinIndexBuilding = BOOLEAN_FALSE;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), skinIndex.countByType[0]);
+            stringAppend(message, sizeof(message), " geometry container(s) across ");
+            appendCount(message, sizeof(message), skinIndex.filesIndexed);
+            stringAppend(message, sizeof(message), " package(s) to look through");
+            platformLogMessage(message);
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (skinCursor >= skinIndex.count || skinScanned >= SKIN_SCAN_LIMIT)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: opened ");
+            appendCount(message, sizeof(message), skinScanned);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), skinIndex.count);
+            stringAppend(message, sizeof(message),
+                         " container(s) and none carried bone assignments");
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_DONE;
+            discLoadStatus = ENGINE_DISC_READY;
+            return discLoadStatus;
+        }
+
+        entry = &skinIndex.entries[skinCursor];
+        marker = memoryArenaGetMarker(globalArena);
+        /* Exactly one read per step. Two would alternate forever on a store that
+           answers PENDING, which is a lesson this file has already paid for. */
+        if (!readIndexedResource(entry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        skinCursor++;
+        skinScanned++;
+
+        if (bytes != NULL_POINTER &&
+            geometryReaderOpen(&probe, bytes, size, globalArena) == GEOMETRY_READ_OK &&
+            probe.boneAssignments != NULL_POINTER)
+        {
+            const VirtualFileEntry *holder =
+                virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: skinned geometry is on this disc — ");
+            stringAppend(message, sizeof(message), probe.resourceName);
+            stringAppend(message, sizeof(message), ", ");
+            appendCount(message, sizeof(message), probe.skinnedVertexCount);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), probe.vertexCount);
+            stringAppend(message, sizeof(message), " vertices weighted, ");
+            appendCount(message, sizeof(message), probe.weightsStoredPerVertex);
+            stringAppend(message, sizeof(message), " weight(s) stored per vertex, in ");
+            stringAppend(message, sizeof(message),
+                         (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
+            platformLogMessage(message);
+            /* Found after scanning this many, which says whether skinned meshes
+               are everywhere or rare enough that the next search needs to know
+               exactly where to look. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: found after opening ");
+            appendCount(message, sizeof(message), skinScanned);
+            stringAppend(message, sizeof(message), " container(s)");
+            platformLogMessage(message);
+            memoryArenaRewindToMarker(globalArena, marker);
+            discPhase = DISC_PHASE_DONE;
+            discLoadStatus = ENGINE_DISC_READY;
+            return discLoadStatus;
+        }
+
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
     }
 
     if (discPhase == DISC_PHASE_INDEX)
@@ -899,9 +1048,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         renderSetMesh(&discSearch.mesh, globalArena);
         uploadFoundTexture();
         memoryArenaRewindToMarker(globalArena, textureFetchMarker);
-        discPhase = DISC_PHASE_DONE;
-        discLoadStatus = ENGINE_DISC_READY;
-        return discLoadStatus;
+        return finishOrSeekSkin();
     }
 
     if (discPhase == DISC_PHASE_FETCH_TEXTURE)
@@ -991,9 +1138,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             renderSetMesh(&discSearch.mesh, globalArena);
         }
 
-        discPhase = DISC_PHASE_DONE;
-        discLoadStatus = ENGINE_DISC_READY;
-        return discLoadStatus;
+        return finishOrSeekSkin();
     }
 
     /* Says what the disc's large non-package files actually are, before any of
@@ -2126,8 +2271,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
            when a package held its own texture, and it had the same ordering. */
         renderSetMesh(&discSearch.mesh, globalArena);
         uploadFoundTexture();
-        discPhase = DISC_PHASE_DONE;
-        discLoadStatus = ENGINE_DISC_READY;
+        return finishOrSeekSkin();
     }
     return discLoadStatus;
 }

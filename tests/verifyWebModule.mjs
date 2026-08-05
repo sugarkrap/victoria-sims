@@ -296,17 +296,21 @@ calls.length = 0;
     // Ranges, not the whole image — but no longer less than the image, and the
     // reason is worth stating rather than papering over with a bigger number.
     //
-    // The search now walks past a model that carries no bone assignments,
-    // looking for one that does. Every package in this fixture is rigid, so it
-    // reads all of them, finds nothing skinned, and goes back for the first —
-    // reading that one twice. That is the fallback path costing what it costs,
-    // and this fixture takes the worst case of it every run.
+    // This fixture takes the worst case of two searches every run, because
+    // every model in it is rigid:
     //
-    // Still bounded well under two passes, which is the property that matters:
-    // a search that read the image over and over would sail past "less than the
-    // image" the moment the fixture grew.
+    //   - the content walk reads every package looking for one with bone
+    //     assignments, finds none, and goes back for the first — reading it
+    //     twice;
+    //   - the skinned-geometry survey then indexes the disc again and opens
+    //     every container it finds, to answer where skinned meshes live.
+    //
+    // A disc with a skinned mesh in it pays neither in full. Three passes is
+    // the ceiling those two together can reach here; the property worth holding
+    // is that it is a small multiple at all, since a search that re-read the
+    // image per package would leave any fixed number behind immediately.
     check(`reads a bounded amount (${bytesFetched} of ${image.length} bytes)`,
-          bytesFetched < image.length * 2);
+          bytesFetched < image.length * 3);
     check("built a mesh pipeline once it had geometry",
           calls.some((call) => call.name === "createMeshPipeline"));
 
