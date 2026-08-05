@@ -39,6 +39,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/animationReader.c \
                   engine/source/textureReader.c engine/source/textureDecode.c \
                   engine/source/material.c \
+                  engine/source/propertySet.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -240,13 +241,15 @@ RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollectio
 INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
 ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
+PROPERTY_SET_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPropertySet
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
-		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER)
+		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
+		$(PROPERTY_SET_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -264,6 +267,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
 	@$(ARCHIVE_VERIFIER)
+	@$(PROPERTY_SET_VERIFIER)
 
 # The web checks, which need the module built and a node to run it under rather
 # than a compiler. Kept out of `verify` so a machine without either still gets
@@ -383,6 +387,12 @@ $(PACKAGE_READER_VERIFIER): tests/verifyPackageReader.c engine/source/packageRea
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPackageReader.c engine/source/packageReader.c \
 		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
+
+$(PROPERTY_SET_VERIFIER): tests/verifyPropertySet.c engine/source/propertySet.c utils/strings.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPropertySet.c engine/source/propertySet.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
 		$(VERIFIER_SUPPORT)

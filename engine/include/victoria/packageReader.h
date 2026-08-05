@@ -22,6 +22,12 @@
 #define PACKAGE_TYPE_TXTR 0x1C4A276CUL
 #define PACKAGE_TYPE_LIFO 0xED534136UL
 #define PACKAGE_TYPE_ANIM 0xFB00791EUL
+/* cTSSkinEntry — one catalogue entry: a hairstyle, an outfit, a brow, an eye,
+   a face archetype. Not a scenegraph resource; it is a property set naming
+   one. */
+#define PACKAGE_TYPE_SKIN_ENTRY 0xEBCF3E27UL
+/* cTSSimOutfitData — what one Sim has on. */
+#define PACKAGE_TYPE_SIM_APPEARANCE 0xAC598EACUL
 #define PACKAGE_TYPE_DIRECTORY 0xE86B1EEFUL
 
 /* A resource's identity. All four words together: two resources differing only

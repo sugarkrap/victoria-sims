@@ -7,6 +7,7 @@
 #include "victoria/memoryBudget.h"
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
+#include "victoria/propertySet.h"
 #include "victoria/renderInterface.h"
 #include "victoria/compression.h"
 #include "victoria/resourceIndex.h"
@@ -438,6 +439,9 @@ typedef enum SimHop
     SIM_HOP_MATERIAL,
     SIM_HOP_TEXTURE,
     SIM_HOP_TOP_LEVEL,
+    /* Reading the catalogue, which is where everything a Sim wears and every
+       part beyond the four hardcoded names is described. */
+    SIM_HOP_CATALOGUE,
     SIM_HOP_FINISHED
 } SimHop;
 
@@ -1067,6 +1071,63 @@ static void reportSimPart(Unsigned32 partIndex, DiscModelResult result)
     platformLogMessage(message);
 }
 
+/* Everything a shape names, not only the one thing that gets followed.
+ *
+ * A shape lists several geometry nodes and several material bindings, and the
+ * assembly takes the first node that resolves and stops. That is fine for
+ * drawing and useless for finding out what is being left behind — and two
+ * things are plainly being left behind: a Sim has no brows, eyes or lips, and
+ * the body's fat and pregnancy channels declare themselves and carry no
+ * per-vertex data. Both are resources named somewhere and followed by nobody.
+ *
+ * So this prints the whole list, with whether each name resolves in the index.
+ * A name that resolves and is not followed is a lead; a name that does not is
+ * either not on this disc or not spelled the way it is being looked up, and the
+ * two want telling apart. */
+static void reportWholeShape(const char *partName, const ShapeDescription *shape)
+{
+    char message[512];
+    Unsigned32 index;
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   ");
+    stringAppend(message, sizeof(message), partName);
+    stringAppend(message, sizeof(message), " names ");
+    appendCount(message, sizeof(message), shape->meshCount);
+    stringAppend(message, sizeof(message), " geometry node(s) and ");
+    appendCount(message, sizeof(message), shape->materialCount);
+    stringAppend(message, sizeof(message), " material binding(s)");
+    platformLogMessage(message);
+
+    for (index = 0U; index < shape->storedMeshCount; index++)
+    {
+        if (shape->meshNames[index][0] == '\0')
+        {
+            continue;
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:     node ");
+        stringAppend(message, sizeof(message), shape->meshNames[index]);
+        stringAppend(message, sizeof(message), " at detail ");
+        appendCount(message, sizeof(message), shape->meshLevelsOfDetail[index]);
+        stringAppend(message, sizeof(message),
+                     (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_GMND,
+                                             shape->meshNames[index]) != NULL_POINTER)
+                         ? " — on this disc"
+                         : " — not found by that name");
+        platformLogMessage(message);
+    }
+    for (index = 0U; index < shape->storedMaterialCount; index++)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:     binds ");
+        stringAppend(message, sizeof(message), shape->materials[index].primitiveName);
+        stringAppend(message, sizeof(message), " to ");
+        stringAppend(message, sizeof(message), shape->materials[index].materialName);
+        platformLogMessage(message);
+    }
+}
+
 /* What a part can be deformed into, as the container itself names it.
  *
  * A probe, not a feature: nothing applies these yet. It is here because the
@@ -1321,6 +1382,174 @@ static SimAssembly finishThePart(MemorySize marker)
     return SIM_ASSEMBLY_PENDING;
 }
 
+/* What the catalogue says a Sim can be made of.
+ *
+ * The four names a whole Sim is built from here are hardcoded, and that is why
+ * it has no brows, eyes or lips and wears nothing: those are not scenegraph
+ * resources to be walked to, they are catalogue entries — property sets naming
+ * a shape — and until now nothing read a property set at all.
+ *
+ * A probe, not the feature. It reads entries one at a time, tallies them by the
+ * kind each declares, and keeps the first name of each kind so the log can say
+ * what is actually on the disc rather than what the reference says should be.
+ * Bounded, because the catalogue runs to thousands and the point is to learn
+ * what kinds exist, not to hold them.
+ *
+ * One read per step, like every other hop, because a browser's store answers
+ * exactly one. */
+#define CATALOGUE_SAMPLE_LIMIT 600U
+#define CATALOGUE_KIND_LIMIT 16U
+static Unsigned32 catalogueCursor = 0U;
+static Unsigned32 catalogueRead = 0U;
+static Unsigned32 catalogueKindCount = 0U;
+static char catalogueKinds[CATALOGUE_KIND_LIMIT][PROPERTY_NAME_LIMIT];
+static char catalogueExamples[CATALOGUE_KIND_LIMIT][PROPERTY_NAME_LIMIT];
+static Unsigned32 catalogueKindTotals[CATALOGUE_KIND_LIMIT];
+static Unsigned32 catalogueWithShape = 0U;
+static Unsigned32 catalogueNotBinary = 0U;
+
+static void rememberCatalogueKind(const char *kind, const char *name)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < catalogueKindCount; index++)
+    {
+        if (stringEqualsIgnoringCase(catalogueKinds[index], kind) == BOOLEAN_TRUE)
+        {
+            catalogueKindTotals[index]++;
+            /* The first entry of a kind often has no name, so the example is
+               the first named one rather than simply the first. An example of
+               "(unnamed)" says nothing about what the kind holds. */
+            if (catalogueExamples[index][0] == '\0' && name[0] != '\0')
+            {
+                stringAppend(catalogueExamples[index], PROPERTY_NAME_LIMIT, name);
+            }
+            return;
+        }
+    }
+    if (catalogueKindCount >= CATALOGUE_KIND_LIMIT)
+    {
+        return;
+    }
+    catalogueKinds[catalogueKindCount][0] = '\0';
+    stringAppend(catalogueKinds[catalogueKindCount], PROPERTY_NAME_LIMIT, kind);
+    catalogueExamples[catalogueKindCount][0] = '\0';
+    stringAppend(catalogueExamples[catalogueKindCount], PROPERTY_NAME_LIMIT, name);
+    catalogueKindTotals[catalogueKindCount] = 1U;
+    catalogueKindCount++;
+}
+
+static void reportCatalogue(void)
+{
+    char message[512];
+    Unsigned32 index;
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: read ");
+    appendCount(message, sizeof(message), catalogueRead);
+    stringAppend(message, sizeof(message), " catalogue entr(ies), ");
+    appendCount(message, sizeof(message), catalogueWithShape);
+    stringAppend(message, sizeof(message), " of them naming a shape, ");
+    appendCount(message, sizeof(message), catalogueNotBinary);
+    stringAppend(message, sizeof(message), " spelled as XML rather than the binary form");
+    platformLogMessage(message);
+
+    for (index = 0U; index < catalogueKindCount; index++)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        appendCount(message, sizeof(message), catalogueKindTotals[index]);
+        stringAppend(message, sizeof(message), " of kind ");
+        stringAppend(message, sizeof(message), (catalogueKinds[index][0] != '\0')
+                                                   ? catalogueKinds[index]
+                                                   : "(none declared)");
+        stringAppend(message, sizeof(message), ", such as ");
+        stringAppend(message, sizeof(message), (catalogueExamples[index][0] != '\0')
+                                                   ? catalogueExamples[index]
+                                                   : "(unnamed)");
+        platformLogMessage(message);
+    }
+}
+
+static SimAssembly stepTheCatalogue(MemorySize marker)
+{
+    const ResourceIndexEntry *entry = NULL_POINTER;
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    while (catalogueCursor < simIndex.count &&
+           simIndex.entries[catalogueCursor].typeIdentifier !=
+               (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY)
+    {
+        catalogueCursor++;
+    }
+    if (catalogueCursor >= simIndex.count || catalogueRead >= CATALOGUE_SAMPLE_LIMIT)
+    {
+        reportCatalogue();
+        simHop = SIM_HOP_FINISHED;
+        return SIM_ASSEMBLY_DONE;
+    }
+
+    entry = &simIndex.entries[catalogueCursor];
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+    catalogueCursor++;
+    if (bytes != NULL_POINTER)
+    {
+        static Property properties[48];
+        PropertySet set;
+
+        set.properties = properties;
+        set.propertyCapacity = 48U;
+        if (propertySetRead(&set, bytes, size) == PROPERTY_SET_OK)
+        {
+            catalogueRead++;
+            /* The first two entries in full. Which keys a catalogue entry
+               actually carries is not something to take from a reference and
+               assume — the reference was written against a different disc, and
+               the one key looked up so far came back empty. */
+            if (catalogueRead <= 2U)
+            {
+                char message[512];
+                Unsigned32 which;
+
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:   entry of ");
+                appendCount(message, sizeof(message), set.propertyCount);
+                stringAppend(message, sizeof(message), " propert(ies) —");
+                for (which = 0U; which < set.storedPropertyCount; which++)
+                {
+                    stringAppend(message, sizeof(message), " ");
+                    stringAppend(message, sizeof(message), properties[which].name);
+                    if (properties[which].kind == PROPERTY_VALUE_STRING)
+                    {
+                        stringAppend(message, sizeof(message), "=");
+                        stringAppend(message, sizeof(message), properties[which].stringValue);
+                    }
+                    stringAppend(message, sizeof(message), ";");
+                }
+                platformLogMessage(message);
+            }
+            if (propertySetFind(&set, "shape") != NULL_POINTER ||
+                propertySetFind(&set, "shapekeyidx") != NULL_POINTER)
+            {
+                catalogueWithShape++;
+            }
+            rememberCatalogueKind(propertySetGetString(&set, "type", ""),
+                                  propertySetGetString(&set, "name", ""));
+        }
+        else
+        {
+            catalogueNotBinary++;
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+    return SIM_ASSEMBLY_PENDING;
+}
+
 /* The painting hops: a material, then its texture, then the top level that
    texture kept somewhere else. One read each, like everything else here. */
 static SimAssembly stepThePaint(MemorySize marker)
@@ -1331,8 +1560,11 @@ static SimAssembly stepThePaint(MemorySize marker)
 
     if (simHopPart >= simGathered)
     {
-        simHop = SIM_HOP_FINISHED;
-        return SIM_ASSEMBLY_DONE;
+        simHop = SIM_HOP_CATALOGUE;
+        catalogueCursor = 0U;
+        catalogueRead = 0U;
+        catalogueKindCount = 0U;
+        return SIM_ASSEMBLY_PENDING;
     }
 
     if (simHop == SIM_HOP_MATERIAL)
@@ -1558,6 +1790,7 @@ static SimAssembly stepTheSim(void)
         if (bytes != NULL_POINTER &&
             scenegraphReadShape(&simHopShape, bytes, size) == SCENEGRAPH_READ_OK)
         {
+            reportWholeShape(simDrawnPartNames[simHopPart], &simHopShape);
             /* A shape does not name a container. It names a geometry node, and
                that node references the container. */
             for (index = 0U; index < simHopShape.storedMeshCount && simHopEntry == NULL_POINTER;
@@ -1780,6 +2013,9 @@ static SimAssembly stepTheSim(void)
     case SIM_HOP_TOP_LEVEL:
         return stepThePaint(marker);
 
+    case SIM_HOP_CATALOGUE:
+        return stepTheCatalogue(marker);
+
     default:
         break;
     }
@@ -1826,17 +2062,21 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
            found three trees and not one shape. */
         /* Every hop a part needs, so a Sim is one index and not a dependency
            on whichever earlier phase happened to have built one. */
-        static const Unsigned32 wantedTypes[7] = { (Unsigned32)PACKAGE_TYPE_CRES,
+        static const Unsigned32 wantedTypes[8] = { (Unsigned32)PACKAGE_TYPE_CRES,
                                                    (Unsigned32)PACKAGE_TYPE_SHPE,
                                                    (Unsigned32)PACKAGE_TYPE_GMND,
                                                    (Unsigned32)PACKAGE_TYPE_GMDC,
                                                    (Unsigned32)PACKAGE_TYPE_TXMT,
                                                    (Unsigned32)PACKAGE_TYPE_TXTR,
-                                                   (Unsigned32)PACKAGE_TYPE_LIFO };
+                                                   (Unsigned32)PACKAGE_TYPE_LIFO,
+                                                   /* The catalogue, which names everything a Sim
+                                                      wears and everything it is built from beyond
+                                                      the four names hardcoded here. */
+                                                   (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY };
 
         simIndexBegun = BOOLEAN_TRUE;
         if (resourceIndexBegin(&simIndex, discFileSystem, globalArena, SIM_INDEX_CAPACITY,
-                               wantedTypes, 7U))
+                               wantedTypes, 8U))
         {
             simIndexBuilding = BOOLEAN_TRUE;
             simPartCursor = 0U;
