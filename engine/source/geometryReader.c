@@ -5,11 +5,58 @@
 
 #define GEOMETRY_TYPE_IDENTIFIER 0xAC4F8687UL
 
-/* Element payload layouts. The file records a format per element; only the two
- * that carry the geometry we draw are handled, and anything else is skipped
- * whole rather than guessed at. */
+/* Element payload layouts. The file records a format per element; anything not
+ * handled is skipped whole rather than guessed at. */
+#define ELEMENT_FORMAT_ONE_FLOAT 0UL
 #define ELEMENT_FORMAT_TWO_FLOATS 1UL
 #define ELEMENT_FORMAT_THREE_FLOATS 2UL
+
+const char *geometryElementGetName(Unsigned32 identifier)
+{
+    /* The names the format's own table gives, in-game spelling where there is
+       one, since that is what the exporter wrote and what a search will find. */
+    switch (identifier)
+    {
+    case (Unsigned32)GEOMETRY_ELEMENT_POSITION:
+        return "positions";
+    case (Unsigned32)GEOMETRY_ELEMENT_NORMAL:
+        return "normals";
+    case (Unsigned32)GEOMETRY_ELEMENT_TEXTURE_COORDINATE:
+        return "texture coordinates";
+    case (Unsigned32)GEOMETRY_ELEMENT_TANGENT:
+        return "tangents";
+    case (Unsigned32)GEOMETRY_ELEMENT_BONE_ASSIGNMENT:
+        return "bone assignments";
+    case (Unsigned32)GEOMETRY_ELEMENT_BONE_WEIGHT:
+        return "bone weights";
+    case 0x69D92B93UL:
+        return "binormals";
+    case 0x9BB38AFBUL:
+        return "binormals, the other kind";
+    case 0xDB830795UL:
+        return "colours";
+    case 0xEB720693UL:
+        return "colour deltas";
+    case 0xCB7206A1UL:
+        return "texture coordinate deltas";
+    case 0x5CF2CFE1UL:
+        return "morph vertex deltas";
+    case 0xCB6F3A6AUL:
+        return "morph normal deltas";
+    case 0x1C4AFC56UL:
+        return "morph vertex indices";
+    case 0x7C4DEE82UL:
+        return "morph normal indices";
+    case 0xDCF2CFDCUL:
+        return "morph vertex map";
+    case 0x114113C3UL:
+        return "vertex identifiers";
+    case 0x114113CDUL:
+        return "region mask";
+    default:
+        return NULL_POINTER;
+    }
+}
 
 /* Indices narrowed from words to half words at block version 3. Below that they
  * are full words, everywhere they appear — the component's element list and the
@@ -118,12 +165,113 @@ static Boolean copyRealValues(Real32 *destination, ResourceCursor *cursor, const
     return cursor->overran ? BOOLEAN_FALSE : BOOLEAN_TRUE;
 }
 
+/* One packed word per vertex, unpacked into four slots.
+ *
+ * The word's low byte is the first slot, which is the order the weights come
+ * in. Read a byte at a time rather than cast, because the payload is at
+ * whatever offset the file put it at and an unaligned word read is a fault on
+ * ARMv5 rather than a slow path. */
+static Boolean copyBoneAssignments(Unsigned8 *destination, ResourceCursor *cursor,
+                                   const ElementSpan *span, Unsigned32 vertexCount)
+{
+    Unsigned32 vertex;
+
+    if (span == NULL_POINTER || (MemorySize)span->payloadBytes < (MemorySize)vertexCount * 4UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+    cursor->position = span->payloadPosition;
+    cursor->overran = BOOLEAN_FALSE;
+    for (vertex = 0U; vertex < vertexCount; vertex++)
+    {
+        Unsigned32 packed = resourceCursorReadUnsigned32(cursor);
+        Unsigned32 slot;
+
+        for (slot = 0U; slot < 4U; slot++)
+        {
+            destination[vertex * 4U + slot] = (Unsigned8)((packed >> (slot * 8U)) & 0xFFU);
+        }
+    }
+    return cursor->overran ? BOOLEAN_FALSE : BOOLEAN_TRUE;
+}
+
+/* One, two or three weights per vertex into three slots.
+ *
+ * The file leaves the last weight out and expects it worked back from the
+ * others, since they sum to one. Doing that here rather than in each caller is
+ * the difference between one place that knows the rule and several that half
+ * remember it. A remainder below zero means the stored weights already sum past
+ * one, which is a file this cannot fix — clamped, not rejected, because the
+ * vertex still has to go somewhere. */
+static Boolean copyBoneWeights(Real32 *destination, ResourceCursor *cursor, const ElementSpan *span,
+                               Unsigned32 storedPerVertex, Unsigned32 vertexCount)
+{
+    Unsigned32 vertex;
+
+    if (span == NULL_POINTER || storedPerVertex == 0U || storedPerVertex > 3U ||
+        (MemorySize)span->payloadBytes < (MemorySize)vertexCount * (MemorySize)storedPerVertex * 4UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+    cursor->position = span->payloadPosition;
+    cursor->overran = BOOLEAN_FALSE;
+    for (vertex = 0U; vertex < vertexCount; vertex++)
+    {
+        Real32 remainder = 1.0f;
+        Unsigned32 slot;
+
+        /* Four slots for three stored weights: the fourth bone's weight is the
+           one the file left out. */
+        for (slot = 0U; slot < 4U; slot++)
+        {
+            Real32 weight = 0.0f;
+
+            if (slot < storedPerVertex)
+            {
+                weight = resourceCursorReadReal32(cursor);
+                remainder -= weight;
+            }
+            else if (slot == storedPerVertex)
+            {
+                weight = (remainder > 0.0f) ? remainder : 0.0f;
+            }
+            destination[vertex * 4U + slot] = weight;
+        }
+    }
+    return cursor->overran ? BOOLEAN_FALSE : BOOLEAN_TRUE;
+}
+
+/* Notes an element kind the mesh did not end up using.
+ *
+ * Once per kind rather than once per component, so a model with several
+ * components does not report the same element a dozen times. */
+static void rememberUnusedElement(GeometryMesh *mesh, Unsigned32 identifier, Unsigned32 format)
+{
+    Unsigned32 seen;
+
+    for (seen = 0U; seen < mesh->unusedElementCount; seen++)
+    {
+        if (mesh->unusedElements[seen] == identifier && mesh->unusedElementFormats[seen] == format)
+        {
+            return;
+        }
+    }
+    if (mesh->unusedElementCount < (Unsigned32)GEOMETRY_UNUSED_ELEMENT_LIMIT)
+    {
+        mesh->unusedElements[mesh->unusedElementCount] = identifier;
+        mesh->unusedElementFormats[mesh->unusedElementCount] = format;
+        mesh->unusedElementCount++;
+    }
+}
+
 /* What one component contributes to the merged mesh. */
 typedef struct ComponentSpan
 {
     const ElementSpan *position;
     const ElementSpan *normal;
     const ElementSpan *texture;
+    const ElementSpan *boneAssignment;
+    const ElementSpan *boneWeight;
     Unsigned32 vertexCount;
     /* Where this component's vertices start once they are all in one array. A
        primitive's faces are relative to its own component, so this is what
@@ -180,9 +328,14 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     Unsigned32 index;
     Boolean anyNormals = BOOLEAN_FALSE;
     Boolean anyTextures = BOOLEAN_FALSE;
+    Boolean anyBoneAssignments = BOOLEAN_FALSE;
+    Boolean anyBoneWeights = BOOLEAN_FALSE;
+    Unsigned32 weightsStoredPerVertex = 0U;
     Real32 *positions;
     Real32 *normals = NULL_POINTER;
     Real32 *textures = NULL_POINTER;
+    Unsigned8 *boneAssignments = NULL_POINTER;
+    Real32 *boneWeights = NULL_POINTER;
     Unsigned16 *indices;
 
     mesh->name[0] = '\0';
@@ -190,6 +343,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->positions = NULL_POINTER;
     mesh->normals = NULL_POINTER;
     mesh->textureCoordinates = NULL_POINTER;
+    mesh->boneAssignments = NULL_POINTER;
+    mesh->boneWeights = NULL_POINTER;
+    mesh->weightsStoredPerVertex = 0U;
+    mesh->skinnedVertexCount = 0U;
     mesh->vertexCount = 0U;
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;
@@ -316,6 +473,8 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         components[index].position = NULL_POINTER;
         components[index].normal = NULL_POINTER;
         components[index].texture = NULL_POINTER;
+        components[index].boneAssignment = NULL_POINTER;
+        components[index].boneWeight = NULL_POINTER;
         components[index].baseVertex = vertexCount;
 
         elementIndexCount = skipIndexArray(&cursor, blockVersion, &elementIndexStart);
@@ -370,30 +529,33 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
                 components[index].texture = &spans[which];
                 anyTextures = BOOLEAN_TRUE;
             }
+            /* The format of an assignment word is not checked. It carries four
+               byte indices whatever the file calls that layout, and the length
+               of the payload is the check that matters — one word per vertex,
+               which copyBoneAssignments verifies before it reads a byte. */
+            else if (spans[which].identifier == (Unsigned32)GEOMETRY_ELEMENT_BONE_ASSIGNMENT)
+            {
+                components[index].boneAssignment = &spans[which];
+                anyBoneAssignments = BOOLEAN_TRUE;
+            }
+            else if (spans[which].identifier == (Unsigned32)GEOMETRY_ELEMENT_BONE_WEIGHT &&
+                     spans[which].format <= ELEMENT_FORMAT_THREE_FLOATS)
+            {
+                components[index].boneWeight = &spans[which];
+                /* One float at format zero, two at one, three at two. Kept from
+                   the first component that has any: a model whose parts disagree
+                   would need an array per part, and none has been met that
+                   does. */
+                if (!anyBoneWeights)
+                {
+                    weightsStoredPerVertex = (Unsigned32)spans[which].format + 1U;
+                }
+                anyBoneWeights = BOOLEAN_TRUE;
+            }
             else
             {
-                /* Met and not used. Recorded once per kind rather than once per
-                   component, so a model with several components does not report
-                   the same element a dozen times. */
-                Unsigned32 seen;
-                Boolean already = BOOLEAN_FALSE;
-
-                for (seen = 0U; seen < mesh->unusedElementCount; seen++)
-                {
-                    if (mesh->unusedElements[seen] == spans[which].identifier &&
-                        mesh->unusedElementFormats[seen] == (Unsigned32)spans[which].format)
-                    {
-                        already = BOOLEAN_TRUE;
-                        break;
-                    }
-                }
-                if (!already && mesh->unusedElementCount < (Unsigned32)GEOMETRY_UNUSED_ELEMENT_LIMIT)
-                {
-                    mesh->unusedElements[mesh->unusedElementCount] = spans[which].identifier;
-                    mesh->unusedElementFormats[mesh->unusedElementCount] =
-                        (Unsigned32)spans[which].format;
-                    mesh->unusedElementCount++;
-                }
+                rememberUnusedElement(mesh, spans[which].identifier,
+                                      (Unsigned32)spans[which].format);
             }
         }
     }
@@ -512,6 +674,36 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
             return GEOMETRY_READ_OUT_OF_ARENA;
         }
     }
+    /* Both arrays or neither. Weights without assignments name no bone and
+       assignments without weights weigh nothing, so a mesh carrying one of them
+       is treated as carrying no skinning rather than half of it. */
+    if (anyBoneAssignments != anyBoneWeights)
+    {
+        /* One half of the pair and not the other. Nothing is kept, and what was
+           there is reported as met and not used — because it was. Letting it go
+           by unmentioned would leave a mesh that plainly carries bone data
+           looking, in the log, exactly like one that carries none. */
+        for (index = 0U; index < elementCount; index++)
+        {
+            if (spans[index].identifier == (Unsigned32)GEOMETRY_ELEMENT_BONE_ASSIGNMENT ||
+                spans[index].identifier == (Unsigned32)GEOMETRY_ELEMENT_BONE_WEIGHT)
+            {
+                rememberUnusedElement(mesh, spans[index].identifier,
+                                      (Unsigned32)spans[index].format);
+            }
+        }
+    }
+    if (anyBoneAssignments && anyBoneWeights)
+    {
+        boneAssignments =
+            (Unsigned8 *)memoryArenaAllocate(arena, (MemorySize)vertexCount * 4UL, 4UL);
+        boneWeights = (Real32 *)memoryArenaAllocate(
+            arena, (MemorySize)vertexCount * 4UL * sizeof(Real32), sizeof(Real32));
+        if (boneAssignments == NULL_POINTER || boneWeights == NULL_POINTER)
+        {
+            return GEOMETRY_READ_OUT_OF_ARENA;
+        }
+    }
 
     for (index = 0U; index < componentCount; index++)
     {
@@ -564,6 +756,26 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
                 textures[(MemorySize)component->baseVertex * 2UL + inner] = 0.0f;
             }
         }
+
+        if (boneAssignments != NULL_POINTER)
+        {
+            MemorySize slot = (MemorySize)component->baseVertex * 4UL;
+
+            /* A component of a skinned model that carries no bones of its own is
+               left unassigned rather than pinned to bone zero, which would drag
+               that part along with whatever joint happened to be first. */
+            if (!copyBoneAssignments(&boneAssignments[slot], &cursor, component->boneAssignment,
+                                     component->vertexCount) ||
+                !copyBoneWeights(&boneWeights[slot], &cursor, component->boneWeight,
+                                 weightsStoredPerVertex, component->vertexCount))
+            {
+                for (inner = 0U; inner < component->vertexCount * 4U; inner++)
+                {
+                    boneAssignments[slot + inner] = (Unsigned8)GEOMETRY_BONE_NONE;
+                    boneWeights[slot + inner] = 0.0f;
+                }
+            }
+        }
     }
 
     indices = (Unsigned16 *)memoryArenaAllocate(arena, (MemorySize)indexTotal * sizeof(Unsigned16),
@@ -608,6 +820,23 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->positions = positions;
     mesh->normals = normals;
     mesh->textureCoordinates = textures;
+    mesh->boneAssignments = boneAssignments;
+    mesh->boneWeights = boneWeights;
+    mesh->weightsStoredPerVertex = (boneAssignments != NULL_POINTER) ? weightsStoredPerVertex : 0U;
+    if (boneAssignments != NULL_POINTER)
+    {
+        /* Counted rather than assumed from the arrays existing. A component
+           whose bones would not read is filled with the unassigned value, and
+           a mesh where that happened to every component has the arrays and no
+           skinning — which reads identically until this number is looked at. */
+        for (index = 0U; index < vertexCount; index++)
+        {
+            if (boneAssignments[index * 4U] != (Unsigned8)GEOMETRY_BONE_NONE)
+            {
+                mesh->skinnedVertexCount++;
+            }
+        }
+    }
     mesh->vertexCount = vertexCount;
     mesh->indices = indices;
     mesh->indexCount = indexTotal;

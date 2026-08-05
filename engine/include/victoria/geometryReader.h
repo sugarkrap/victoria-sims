@@ -34,6 +34,19 @@
 #define GEOMETRY_ELEMENT_BONE_ASSIGNMENT 0xFBD70111UL
 #define GEOMETRY_ELEMENT_BONE_WEIGHT 0x3BD70105UL
 
+/* The slot value meaning "no bone here". The file's own sentinel, not one
+ * chosen here: an assignment word packs four byte indices and spells an empty
+ * slot 255. */
+#define GEOMETRY_BONE_NONE 255U
+
+/* What an element identifier is called, for a log. Every identifier the format
+ * uses is known and written down — the table in
+ * legacy/scripts/openTS2/Files/Formats/DBPF/Scenegraph/Block/GeometryData/GeometryElement.cs
+ * lists all nineteen with both their wiki and in-game names — so an element
+ * this reader passes over can say what it was rather than only what number it
+ * had. Returns null for an identifier that is in no table. */
+const char *geometryElementGetName(Unsigned32 identifier);
+
 /* Longest primitive name kept. Retail names are short — "teapot", "body",
  * "hair" — and one that overruns is truncated rather than rejected: a name is
  * for a human reading a log, and losing the mesh over it would be absurd. */
@@ -126,13 +139,28 @@ typedef struct GeometryMesh
      * one piece model from an assembled one. */
     Unsigned32 componentCount;
 
-    /* Element kinds met and not used, with the format each was in.
+    /* Four bone indices per vertex, GEOMETRY_BONE_NONE where a slot is unused,
+     * or null when the mesh carries no skinning at all. A face is rigid — it
+     * hangs off one joint as a whole — and has none of this; a body does.
      *
-     * Bone assignments and weights are in here, and this reader has never
-     * looked at them — the identifiers are not written down anywhere it can
-     * check, and guessing one is how a reader ends up confidently reading
-     * weights out of a tangent. So it reports what it met instead, and the
-     * disc says which numbers are real. */
+     * Unpacked from the word the file stores rather than kept as one, because
+     * every reader of it wants a slot and not a bit shift. */
+    Unsigned8 *boneAssignments;
+    /* Four weights per vertex, in the same slot order. The file stores one, two
+     * or three of them and leaves the last implied so they sum to one;
+     * weightsStoredPerVertex says which, and the implied one is computed here
+     * so callers do not each have to remember the rule. */
+    Real32 *boneWeights;
+    Unsigned32 weightsStoredPerVertex;
+    /* Vertices that ended up with at least one real bone. Zero alongside a
+       non-null array means the elements were there and said nothing, which is
+       a different problem from their not being there. */
+    Unsigned32 skinnedVertexCount;
+
+    /* Element kinds met and not used, with the format each was in. Reported
+     * because what a mesh carries decides what the renderer has to be able to
+     * do, and a mesh that quietly holds morph targets or a second colour set
+     * looks exactly like one that does not. */
     Unsigned32 unusedElements[GEOMETRY_UNUSED_ELEMENT_LIMIT];
     Unsigned32 unusedElementFormats[GEOMETRY_UNUSED_ELEMENT_LIMIT];
     Unsigned32 unusedElementCount;

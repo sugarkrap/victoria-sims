@@ -1996,10 +1996,33 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
         }
 
-        /* Element kinds the reader met and did not use. Bone assignments and
-           weights are among them, and their identifiers are not written down
-           anywhere this can check — so the disc is asked rather than guessed
-           at, which is the only way the next step starts from a real number. */
+        /* What the mesh is weighted to, or that it is weighted to nothing.
+           A face is rigid — it hangs off one joint whole — and prints the
+           second, which is not a failure to read and should not look like
+           one. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        if (discSearch.mesh.boneAssignments != NULL_POINTER)
+        {
+            appendCount(message, sizeof(message), discSearch.mesh.skinnedVertexCount);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+            stringAppend(message, sizeof(message), " vertices are weighted to bones, ");
+            appendCount(message, sizeof(message), discSearch.mesh.weightsStoredPerVertex);
+            stringAppend(message, sizeof(message), " weight(s) stored per vertex and one implied");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message),
+                         "the mesh carries no bone assignments — it is rigid, and hangs where its "
+                         "node puts it");
+        }
+        platformLogMessage(message);
+
+        /* Element kinds the reader met and did not use, by name where the
+           format's own table has one. A number alone sends the next reader
+           looking it up; the name says at once whether what was passed over
+           was a morph target or a second colour set. */
         if (discSearch.mesh.unusedElementCount > 0U)
         {
             Unsigned32 unused;
@@ -2008,8 +2031,24 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             stringAppend(message, sizeof(message), "engine: vertex elements met and not used —");
             for (unused = 0U; unused < discSearch.mesh.unusedElementCount; unused++)
             {
+                const char *elementName =
+                    geometryElementGetName(discSearch.mesh.unusedElements[unused]);
+
                 stringAppend(message, sizeof(message), " ");
-                appendHexadecimal(message, sizeof(message), discSearch.mesh.unusedElements[unused]);
+                if (elementName != NULL_POINTER)
+                {
+                    stringAppend(message, sizeof(message), elementName);
+                    stringAppend(message, sizeof(message), " (");
+                    appendHexadecimal(message, sizeof(message),
+                                      discSearch.mesh.unusedElements[unused]);
+                    stringAppend(message, sizeof(message), ")");
+                }
+                else
+                {
+                    stringAppend(message, sizeof(message), "unnamed ");
+                    appendHexadecimal(message, sizeof(message),
+                                      discSearch.mesh.unusedElements[unused]);
+                }
                 stringAppend(message, sizeof(message), " as format ");
                 appendCount(message, sizeof(message), discSearch.mesh.unusedElementFormats[unused]);
                 stringAppend(message, sizeof(message), ";");

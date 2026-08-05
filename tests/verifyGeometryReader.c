@@ -329,6 +329,92 @@ static void buildContainer(Builder *builder, Unsigned32 blockVersion, Unsigned32
     }
 }
 
+/* A skinned container: positions, bone assignments and bone weights.
+ *
+ * Written from the format's own table rather than from the reader, because a
+ * fixture that encodes the same understanding as the code it checks agrees with
+ * it whether or not either is right — which is exactly how the section offsets
+ * in the program reader stayed wrong through a passing test.
+ *
+ * The assignment word packs four byte indices, low byte first, and spells an
+ * unused slot 255. Two weights are stored and the third implied, so the reader
+ * has to work the missing one back out rather than leave the vertex weighing
+ * three quarters of itself. */
+static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boolean withWeights)
+{
+    static const Real32 positions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    /* Bones 2 and 5; bone 0 alone; bones 7, 1 and 3. */
+    static const Unsigned32 assignments[3] = { 0xFFFF0502UL, 0xFFFFFF00UL, 0xFF030107UL };
+    static const Real32 weights[6] = { 0.25f, 0.5f, 1.0f, 0.0f, 0.5f, 0.25f };
+    static const Unsigned32 elementIndices[3] = { 0U, 1U, 2U };
+    static const Unsigned32 faces[3] = { 0U, 1U, 2U };
+    Unsigned32 index;
+
+    builder->length = 0UL;
+
+    putUnsigned32(builder, 0xFFFF0001UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 1U);
+    putUnsigned32(builder, 0xAC4F8687UL);
+
+    putTypeInformation(builder, "cGeometryDataContainer", 0xAC4F8687UL, blockVersion);
+    putTypeInformation(builder, "cSGResource", 0xACE46235UL, 2U);
+    putString(builder, "abodynude_gmdc");
+
+    putUnsigned32(builder, withWeights ? 3U : 2U);
+    putFloatElement(builder, 0x5B830781UL, positions, 3U, 3U, blockVersion);
+
+    /* Bone assignments: one word per vertex. The format code is deliberately
+       not two — the reader must take this element on its identifier and the
+       length of its payload, not on a layout number it was told to expect. */
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0xFBD70111UL);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 4U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 12U);
+    for (index = 0U; index < 3U; index++)
+    {
+        putUnsigned32(builder, assignments[index]);
+    }
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+
+    if (withWeights)
+    {
+        /* Format one: two floats per vertex, the third worked back out. */
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 0x3BD70105UL);
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 1U);
+        putUnsigned32(builder, 0U);
+        putUnsigned32(builder, 24U);
+        for (index = 0U; index < 6U; index++)
+        {
+            putReal32(builder, weights[index]);
+        }
+        putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    }
+
+    putUnsigned32(builder, 1U);
+    putIndexArray(builder, elementIndices, withWeights ? 3U : 2U, blockVersion);
+    putUnsigned32(builder, 3U);
+    putUnsigned32(builder, 0U);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+
+    putUnsigned32(builder, 1U);
+    putUnsigned32(builder, 0U);
+    putUnsigned32(builder, 0U);
+    putString(builder, "body");
+    putIndexArray(builder, faces, 3U, blockVersion);
+    putUnsigned32(builder, 0U);
+    if (blockVersion > 1U)
+    {
+        putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+    }
+}
+
 int main(void)
 {
     MemoryArena arena;
@@ -585,6 +671,83 @@ int main(void)
             checkThat(&failureCount, "the box spans both parts",
                       nearly(minimum[0], 0.0f) && nearly(maximum[0], 11.0f));
         }
+    }
+
+    printf("\n-- a skinned model --\n");
+    {
+        static Builder builder;
+        GeometryMesh skinned;
+
+        buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+        result = geometryReaderOpen(&skinned, builder.bytes, builder.length, &arena);
+        checkThat(&failureCount, "reads a container carrying bone data", result == GEOMETRY_READ_OK);
+        if (result != GEOMETRY_READ_OK)
+        {
+            printf("  result: %s\n", geometryReadResultGetName(result));
+            return checkSummarize(failureCount, "geometry reader");
+        }
+
+        checkThat(&failureCount, "keeps the bone assignments",
+                  skinned.boneAssignments != NULL_POINTER);
+        checkThat(&failureCount, "and the weights", skinned.boneWeights != NULL_POINTER);
+        checkThat(&failureCount, "reporting how many were stored per vertex",
+                  skinned.weightsStoredPerVertex == 2U);
+        checkThat(&failureCount, "and that every vertex is weighted",
+                  skinned.skinnedVertexCount == 3U);
+
+        printf("\n-- is the assignment word unpacked low byte first --\n");
+        /* Packed 0xFFFF0502: bone 2 in the first slot, bone 5 in the second and
+           nothing after. Read the other way round this is bone 255 twice, which
+           would silently unweight the vertex rather than fail. */
+        checkThat(&failureCount, "the first slot is the low byte",
+                  skinned.boneAssignments[0] == 2U);
+        checkThat(&failureCount, "the second is the one above it",
+                  skinned.boneAssignments[1] == 5U);
+        checkThat(&failureCount, "and the unused slots say so",
+                  skinned.boneAssignments[2] == 255U && skinned.boneAssignments[3] == 255U);
+        checkThat(&failureCount, "a vertex on three bones keeps all three",
+                  skinned.boneAssignments[8] == 7U && skinned.boneAssignments[9] == 1U &&
+                      skinned.boneAssignments[10] == 3U);
+
+        printf("\n-- is the weight the file left out worked back out --\n");
+        /* Stored 0.25 and 0.5, so the third bone carries the remaining quarter.
+           A reader that copies only what is written leaves this vertex at three
+           quarters of its own weight and shrinks the mesh towards the origin. */
+        checkThat(&failureCount, "the stored weights arrive",
+                  nearly(skinned.boneWeights[0], 0.25f) && nearly(skinned.boneWeights[1], 0.5f));
+        checkThat(&failureCount, "the implied one is the remainder",
+                  nearly(skinned.boneWeights[2], 0.25f));
+        checkThat(&failureCount, "and the fourth slot is empty",
+                  nearly(skinned.boneWeights[3], 0.0f));
+        checkThat(&failureCount, "a vertex whose stored weights already sum to one implies nothing",
+                  nearly(skinned.boneWeights[4], 1.0f) && nearly(skinned.boneWeights[6], 0.0f));
+
+        printf("\n-- half of a skeleton is not a skeleton --\n");
+        {
+            GeometryMesh lopsided;
+
+            /* Assignments with no weights name bones in no proportion. Taking
+               them anyway and weighting each vertex fully to its first bone
+               would draw a body rigidly welded to its own joints, which looks
+               like a skinning bug rather than a missing element. */
+            buildSkinnedContainer(&builder, 4U, BOOLEAN_FALSE);
+            result = geometryReaderOpen(&lopsided, builder.bytes, builder.length, &arena);
+            checkThat(&failureCount, "still reads the mesh", result == GEOMETRY_READ_OK);
+            checkThat(&failureCount, "but keeps no bone data from it",
+                      lopsided.boneAssignments == NULL_POINTER &&
+                          lopsided.boneWeights == NULL_POINTER);
+            checkThat(&failureCount, "and reports the assignments it passed over",
+                      lopsided.unusedElementCount == 1U &&
+                          lopsided.unusedElements[0] == 0xFBD70111UL);
+        }
+
+        printf("\n-- are the element names the ones the format uses --\n");
+        checkThat(&failureCount, "names the tangent element",
+                  stringEquals(geometryElementGetName(0x89D92BA0UL), "tangents"));
+        checkThat(&failureCount, "names bone assignments",
+                  stringEquals(geometryElementGetName(0xFBD70111UL), "bone assignments"));
+        checkThat(&failureCount, "and admits when it has no name for one",
+                  geometryElementGetName(0x00000001UL) == NULL_POINTER);
     }
 
     printf("\n-- a container with more elements than a fixed array would hold --\n");
