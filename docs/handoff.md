@@ -9,7 +9,7 @@ Written to be read by someone who has none of the conversation that produced it.
 ```sh
 make            # the Linux build, into build/linux/victoriaSims
 make web        # the WebAssembly build, into build/web/
-make verify     # 17 C suites; all should say "checks passed"
+make verify     # 18 C suites; all should say "checks passed"
 make verifyWeb  # the wasm module and the browser runtime, under node
 make check      # proves no allocator symbol is linked in
 ```
@@ -19,6 +19,11 @@ a `node` to run it under, and a machine with neither should still get the rest.
 Run both. The two defects the web checks catch — an odd index count, and a pose
 that stripped a Sim of its skins — each reached a browser because for a while
 nothing ran them at all.
+
+`make armv5`, `make oabi` and `make armv7` need an `arm-linux-gnueabi-gcc`
+cross compiler. Without one they fail at the first object file with
+`commande introuvable`, which is a missing toolchain and not a broken build —
+they are compile-only targets that prove the portable core stays portable.
 
 `make web` needs `wasm-ld`, which is the `lld` package on Arch and
 `lld-<version>` on Debian. Without it the compile succeeds and the link fails
@@ -37,6 +42,14 @@ The Linux binary takes:
 | `--check` | Headless self-check; no window. It does **not** load a disc. |
 | `--quiet` | Silences the periodic profiler line. |
 | `--graphics-memory-mebibytes=N` | Pretends the driver has that much, so a small device can be simulated on a large machine. |
+| `--still-camera[=DEGREES]` | Stops the camera orbiting and holds it at an angle. Half a turn by default, because **nought is a Sim's back**. |
+| `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
+
+Use both together whenever anything is being judged by eye across frames. An
+orbiting camera makes two captures two different views, and the difference gets
+attributed to whatever changed in the code — that has cost a round of work here
+once already. The orbit stays the default because a still model hides its own
+silhouette, and three of this engine's bugs were visible only in motion.
 
 Shell note, since it has cost time twice: `--disc=~/path` does not work. Neither
 zsh nor bash expands a tilde after `=` in an ordinary argument, so the engine
@@ -99,19 +112,145 @@ index, which is how the game's own content manager resolves them.
 node references the container. Looking for a container by the shape's mesh name
 finds nothing at all.
 
-**A material binds to a primitive by name, not by position** — and a shape lists
-more materials than the part has parts. A face shape carries the face, the
-brows, the eyes and the lips, so taking the first binding paints the face with a
-bushy brown eyebrow. Both names must be non-empty, too: an unnamed primitive and
-an unnamed binding compare equal, which is two blanks agreeing rather than a
-match. `discContent.c` already carried this warning before any of it was
-written, and it got made anyway.
+**A material binds to a primitive by name, not by position.** Both names must be
+non-empty, too: an unnamed primitive and an unnamed binding compare equal, which
+is two blanks agreeing rather than a match. `discContent.c` already carried this
+warning before any of it was written, and it got made anyway.
 
 **The base face resource really does bind its face to a brow material**, because
 it cannot know which face a Sim has. The game overrides it per subset. The
 override here takes the tone from whatever the body ended up wearing — `s1` out
 of `ambodynaked-nude-s1` — and asks for `amface-s1`, so a disc toned differently
 follows its own naming. It stands in for real skin-tone resolution.
+
+An earlier version of this document said a face shape lists several materials —
+face, brows, eyes, lips — and that taking the first was how the face ended up
+wearing an eyebrow. **That was wrong**, and it is worth leaving the correction
+here because it was a comfortable story. Each of a Sim's three shapes names
+exactly one geometry node and exactly one material binding:
+
+```
+engine:   amFace_cres names 1 geometry node(s) and 1 material binding(s)
+engine:     node amFace_tslocator_gmnd at detail 0 — on this disc
+engine:     binds face to uuface_browbushy_brown
+```
+
+There was never a list to choose badly from. The brows, eyes and lips are not in
+that shape at all — they are catalogue entries, and the section on the catalogue
+below is where they actually live.
+
+## Deformation
+
+A container declares its deformation channels and carries per-vertex data to
+move by them. Both are read; a Sim's face deforms and its body does not.
+
+```
+amFace      27 channels, 4 delta sets, a map read for all 521 vertices,
+            reaching 352 of them; 26 channels reached, 14 by enough to see
+amBodyNaked  3 channels, 2 delta sets, a map read for all 1173 vertices
+             and every word of it nought
+amHairBald   none
+```
+
+**The body's `botmorphs/fatbot` and `botmorphs/pregbot` are declared and empty.**
+Not a failure to read them: the counter says the map was *read* for all 1173
+vertices and is genuinely all noughts, which is what distinguishes the disc's
+problem from this reader's. The fat and pregnancy shapes are not in that
+container. Where they are is still open.
+
+**The channel list keeps a blank first entry, and compacting it would be
+catastrophic.** A slot's byte of nought means "this slot moves nothing", so
+channel nought can never be referred to. A reader that closed the gap would
+shift every real channel down one and rename all of them.
+
+**The map packs slot nought in the word's MOST significant byte.** The bone
+assignment word a few elements away packs slot nought in its LEAST significant.
+Two packed words in one container read in opposite directions, and nothing in
+the file says so. `verifyGeometryReader.c` writes a map that yields nothing at
+all when read backwards; five checks fail on the reversal.
+
+**Channels are renumbered across a join.** Every part calls its first real
+channel 1, so concatenating the lists without shifting the slots would let a
+body's weight deform a face. Nought stays nought. The channel is widened from
+the file's byte to a halfword on the way in, so a join cannot overflow it.
+
+**A morph runs BEFORE the skin, between the bind-pose restore and the palette.**
+A morph changes the shape the model was *authored* in — a fatter body is a
+different bind pose, not a differently posed one — so its deltas are in rest
+space. Applied after the skin they land further out the further a limb has
+swung. There is no accumulation path: `restoreBindPose` copies the kept resting
+positions back every frame before either runs.
+
+Normals are not deformed. The file carries deltas for them and they are not read
+yet, so a morphed vertex keeps its resting normal.
+
+The engine sweeps one named channel at a time, four seconds each, and says which
+in the log. That was every channel at once to begin with, which proved the data
+reaches the mesh and nothing else — nine channels drive the mouth, so at full
+strength they fight and the result says nothing about whether any one of them is
+right. A caricature is not an instrument.
+
+## The catalogue
+
+Where the rest of a Sim is. The four names a whole Sim is built from above are
+hardcoded, and everything else — clothing, hair, brows, eyes, lips, face
+archetypes — is described here. It is the first resource in this engine that is
+not part of the scenegraph: a scenegraph resource points at another scenegraph
+resource, while a property set names things and leaves the resolving to whoever
+reads it.
+
+An entry carries eighteen properties:
+
+```
+age; category; creator; family; fitness; flags; gender; genetic; hairtone;
+name; numoverrides; outfit; resourcekeyidx; shapekeyidx; shoe; skintone;
+species; type=skin
+```
+
+`type=skin` covers everything selectable — outfits, hair, brows, eyes — and
+**`category` is the body slot** that tells them apart. The chain to a mesh is:
+
+```
+skin entry (0xEBCF3E27) → shapekeyidx → key list (0xAC506764) → SHPE → GMND → GMDC
+```
+
+and the last three of those the engine already walks.
+
+```
+CASIE_efbodynightgown_floralpink       key 1 of 3 — a shape on this disc
+afhairpagepunk_brown                   key 1 of 5 — a shape on this disc
+embodypajamas_grey                     key 1 of 3 — a shape on this disc
+
+followed 334 of 600 to a shape — 115 indexed past the end of a list,
+151 named no mesh at all (an overlay or a tone)
+```
+
+**The property set has two format traps.** Its strings are prefixed by a flat
+four-byte length, where the scenegraph's carry one to five bytes with a
+continuation bit — either rule applied to the other's stream yields a plausible
+length. And a boolean is one byte in a stream where every other scalar is four,
+so reading it wide swallows the next property's type word.
+
+**The key list has a version trap.** Version 1 keys are three words, version 2
+four, the extra being the instance's high half. A version 1 list read as version
+2 takes the next key's type as an instance half and is wrong about every key
+after the first while still producing plausible numbers. A sentinel at the front
+says which; a list without one is version 1, its count first.
+
+**A sidecar is matched on group AND instance, and that was measured.** On
+instance alone, 334 of 600 entries found a list and every key at the wanted
+index was a shape — which looks like a clean result. On both, 485 found one: the
+same 334 shapes plus 151 keys of another type. The stricter match finds more,
+and the extra ones are not errors — an entry of kind skin covers overlays and
+tones, which have no mesh to name. Counting those apart from a shape that could
+not be found is the difference between a diagnosis and a tally.
+
+**886 of the entries met are the XML spelling** of the same resource type, which
+this does not read. Counted and reported rather than passed over, because a
+reader silently ignoring a third of the catalogue looks exactly like one that
+had read it all. The kinds the reference names but the binary sample never
+showed — `facearchetype`, `facemodifier`, `meshoverlay` — are the obvious place
+to look for the body's missing fat data.
 
 ## The skeleton, the bind pose, and posing
 
@@ -246,6 +385,17 @@ the browser to test it.
   directory natively, so the catalogue side is done; `webDiscStore` is what would
   change. `<input webkitdirectory>` gives a `FileList` and works everywhere;
   `showDirectoryPicker()` gives a persistent handle in Chromium.
+- **The body's fat and pregnancy shapes are not found.** `botmorphs/fatbot` and
+  `botmorphs/pregbot` are declared by `amBodyNaked` and carry an empty map. The
+  886 XML catalogue entries are the place to look, and reading those needs an
+  XML property set reader this does not have.
+- **115 catalogue entries index past the end of their key list.** Unexplained,
+  and worth a measurement rather than a rationalisation: it may be a second
+  sidecar, a different index property, or entries whose shape index means
+  nothing. It is the first thing to look at in the catalogue.
+- **Nothing wears anything yet.** The chain from a catalogue entry to a shape
+  resolves; choosing an entry by `category` and swapping a Sim's part for it is
+  the step not taken.
 - **Inverse kinematics are counted and skipped.** Every run says how many; the
   animation currently played carries two.
 - **The find-and-redirect path and the Sim assembly have no fixture.** The test
@@ -262,15 +412,16 @@ the browser to test it.
 The disc has now contradicted a reasonable inference more than a dozen times,
 and the fix has always been the same: stop reasoning about what it should
 contain and make the engine report what it saw. Beyond that, these sessions
-added six failure modes worth knowing before repeating them.
+added nine failure modes worth knowing before repeating them.
 
 **A test that cannot fail is not evidence.** The Hermite curve was added, the
 rest-pose check was recorded *at the time* as unable to discriminate it, and it
 shipped on that check anyway. If a check would pass either way, it is not
 testing the thing.
 
-**Two screenshots are not a diagnosis.** The camera orbits at
-`elapsedSeconds * 0.6f`, so captures at different moments show different angles.
+**Two screenshots are not a diagnosis.** The camera orbits, so captures at
+different moments show different angles — `--still-camera` and `--still-pose`
+exist because of this and should be on whenever anything is judged by eye.
 A correctly posed head seen from the side — a face mesh has no modelled skull
 behind it — looks exactly like a torn one. That cost a full round of misdirected
 work. Worse, three separate bugs this session were visible **only in motion**: a
@@ -309,5 +460,35 @@ that is a promise about the signature, not about the behaviour. When two
 backends disagree, read the one that is wrong rather than the interface both
 claim to satisfy — and when a fix is made on one backend, check whether the
 defect it fixed exists on the others.
+
+**A silent truncation reads as an absence.** The resource index clamped a
+request for nine types down to eight and said nothing, so the sidecars a
+catalogue entry needs were never indexed — and the log reported the disc held
+none of them. Every symptom pointed at the disc; the cause was one `?:` in the
+index. Anything that bounds what a caller asked for must say so. `log()` the
+drop, count it, put it in the report — a limit that cannot announce itself is a
+lie told once per run.
+
+**A caricature is not an instrument.** The deformation sweep drove all
+twenty-six face channels at once, which proved the data reaches the mesh and
+proved nothing else: nine of them drive the mouth, so at full strength they
+fight over the same vertices and the mangled result cannot say whether any
+single channel is right. Driving one named channel at a time makes a frame
+checkable against a claim — `l_growl` had better pull the left side.
+
+**A test that crashes instead of failing reports nothing.** A check dereferenced
+a lookup without guarding it. When the property genuinely went missing — which
+is precisely when the check was supposed to speak — it segfaulted, printed no
+FAIL line, and the deliberate regression that should have proved the test worked
+came back looking clean. It took a sanitiser to find that the crash was in the
+test rather than in the code under it. Guard every pointer a check follows.
+
+There is a fourth worth folding in here rather than giving its own heading: the
+arena is never zeroed, so **a struct field added to an existing record must be
+initialised where its neighbours are**. Three fields were added to
+`ComponentSpan` and none was cleared; a garbage count then sized an allocation
+and asked for 3.9 GB against a mesh of a few hundred vertices. The refusal said
+only "not enough arena space", which costs a run of the disc per guess — it now
+reports the bytes it wanted, and that number named the array immediately.
 
 The logs are verbose on purpose. That is the method, not clutter.
