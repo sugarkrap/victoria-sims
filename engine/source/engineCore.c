@@ -1095,6 +1095,53 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName, const c
         return BOOLEAN_TRUE;
     }
 
+    /* The top level, when the texture kept it somewhere else.
+     *
+     * A TXTR carries the smaller levels and names a LIFO holding the largest,
+     * so a part painted from the TXTR alone is the right image at a quarter of
+     * the width — the body came out 256 across where 512 exists. The checks are
+     * the ones the single-texture path already makes: refuse a level that is no
+     * bigger, and refuse one whose length is not what those dimensions cost in
+     * that format, because a level carries no format of its own and a mismatched
+     * one decodes into noise. */
+    if (texture.largestIsElsewhere && texture.lifoName[0] != '\0')
+    {
+        const ResourceIndexEntry *top =
+            resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO, texture.lifoName);
+
+        if (top == NULL_POINTER)
+        {
+            materialBuildResourceName(wanted, sizeof(wanted), texture.lifoName, "_lifo");
+            top = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
+        }
+        if (top != NULL_POINTER)
+        {
+            Unsigned8 *topBytes;
+            MemorySize topSize;
+
+            if (!readIndexedResource(top, &topBytes, &topSize))
+            {
+                return BOOLEAN_FALSE;
+            }
+            if (topBytes != NULL_POINTER)
+            {
+                TextureLevel largest;
+
+                if (textureReaderOpenLevel(&largest, topBytes, topSize) == TEXTURE_READ_OK &&
+                    largest.bytes != NULL_POINTER && largest.width > texture.levelWidth &&
+                    largest.byteCount == textureFormatGetLevelBytes(texture.format, largest.width,
+                                                                    largest.height))
+                {
+                    texture.bytes = largest.bytes;
+                    texture.byteCount = largest.byteCount;
+                    texture.levelWidth = largest.width;
+                    texture.levelHeight = largest.height;
+                    texture.largestIsElsewhere = BOOLEAN_FALSE;
+                }
+            }
+        }
+    }
+
     marker = memoryArenaGetMarker(globalArena);
     {
         MemorySize wantedBytes =
@@ -1147,6 +1194,11 @@ static Boolean paintPart(Unsigned32 partIndex, const char *materialName, const c
             if (texture.largestIsElsewhere)
             {
                 stringAppend(message, sizeof(message), ", its top level left in ");
+                stringAppend(message, sizeof(message), texture.lifoName);
+            }
+            else if (texture.lifoName[0] != '\0')
+            {
+                stringAppend(message, sizeof(message), ", its top level followed out of ");
                 stringAppend(message, sizeof(message), texture.lifoName);
             }
         }
@@ -1997,6 +2049,38 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                          " inverse kinematics chain(s) this does not follow");
         }
         platformLogMessage(message);
+
+        /* An animation authored against an object cannot be placed without it.
+         *
+         * The mark is "2o", as in to-object, and the letter before it is who: a2o
+         * is adult, t2o teen, c2o child. Matching only "a2o" caught a bench
+         * press and then settled on a teen applying zit cream to a mirror that
+         * is equally not there — the convention is a family, not a prefix.
+         *
+         * A bench press start is authored in the exercise machine's space —
+         * played with no machine in the scene it
+         * drives the Sim's root to where it would be relative to a bench that
+         * is not there, and the Sim tumbles through empty air with every limb
+         * perfectly sensible. That is not a pose gone wrong; it is a pose
+         * missing its other half.
+         *
+         * This is the naming convention and not the format talking, so it is a
+         * rule about which animation to choose rather than a claim about what
+         * one contains — and it is skipped out loud. */
+        if (stringContainsIgnoringCase(posedAnimation.resourceName, "2o-") ||
+            stringContainsIgnoringCase(posedAnimation.resourceName, "2o_"))
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            stringAppend(message, sizeof(message), posedAnimation.resourceName);
+            stringAppend(message, sizeof(message),
+                         " is authored against an object this scene has not got, so it would "
+                         "place the Sim relative to nothing — looking for one that stands on "
+                         "its own");
+            platformLogMessage(message);
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
 
         if (discContentPoseFromAnimation(&discSearch, &posedAnimation, ANIMATION_POSE_TICK,
                                          globalArena))
