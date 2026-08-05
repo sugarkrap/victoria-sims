@@ -40,6 +40,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/textureReader.c engine/source/textureDecode.c \
                   engine/source/material.c \
                   engine/source/propertySet.c \
+                  engine/source/resourceKeyList.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \

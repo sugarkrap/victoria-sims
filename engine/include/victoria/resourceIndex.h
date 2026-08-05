@@ -28,7 +28,14 @@
  * Built a step at a time, because on the web every read has to go back to the
  * browser's event loop before it can answer. */
 
-#define RESOURCE_INDEX_TYPE_LIMIT 8U
+/* How many resource types one index may be asked for.
+ *
+ * Was eight, which was exactly the number a Sim needed until a ninth was added
+ * for the catalogue's sidecar — and the ninth was clamped away in silence, so
+ * the hop that needed it resolved nothing while the log said the disc simply
+ * had none. Twice what is needed now, and asking for more than this is
+ * reported rather than trimmed. */
+#define RESOURCE_INDEX_TYPE_LIMIT 16U
 
 /* Distinct resource types the census remembers.
 
@@ -48,6 +55,11 @@
 typedef struct ResourceIndexEntry
 {
     Unsigned32 typeIdentifier;
+    /* Which collection the resource was filed under. Not part of a lookup by
+       name — a name hashes to the instance words and says nothing about the
+       group — but it is what tells two resources apart when they share an
+       instance, which sidecar resources routinely do. */
+    Unsigned32 groupIdentifier;
     Unsigned32 instanceIdentifier;
     Unsigned32 instanceIdentifierHigh;
     /* Which file in the catalogue, and where inside it. */
@@ -81,6 +93,11 @@ typedef struct ResourceIndex
 
     Unsigned32 wantedTypes[RESOURCE_INDEX_TYPE_LIMIT];
     Unsigned32 wantedTypeCount;
+    /* Types asked for and not taken, because there were more than the limit. A
+       lookup for one of those finds nothing, which is indistinguishable from a
+       disc that holds none of it — so the number is kept and reported rather
+       than the request being quietly trimmed. */
+    Unsigned32 wantedTypesRefused;
     /* Kept per type, and a total of every entry met whether wanted or not.
        A search that finds nothing needs to distinguish "the disc holds few of
        these" from "the disc holds none and I am looking for the wrong thing",
@@ -125,6 +142,20 @@ ResourceIndexStatus resourceIndexStep(ResourceIndex *index);
 const ResourceIndexEntry *resourceIndexFind(const ResourceIndex *index, Unsigned32 typeIdentifier,
                                             Unsigned32 instanceIdentifier,
                                             Unsigned32 instanceIdentifierHigh);
+
+/* The same, with the group as well.
+ *
+ * For a sidecar: a resource that shares the group AND instance of the one it
+ * belongs to. Matching on instance alone finds a key list, but not reliably the
+ * right one — 266 of 600 catalogue entries resolved against a list belonging to
+ * some other resource that happened to share their instance, and every one of
+ * those looked like an entry indexing past the end of its own list rather than
+ * like a wrong list. */
+const ResourceIndexEntry *resourceIndexFindInGroup(const ResourceIndex *index,
+                                                   Unsigned32 typeIdentifier,
+                                                   Unsigned32 groupIdentifier,
+                                                   Unsigned32 instanceIdentifier,
+                                                   Unsigned32 instanceIdentifierHigh);
 
 /* The same, given a name rather than a key. */
 const ResourceIndexEntry *resourceIndexFindNamed(const ResourceIndex *index,

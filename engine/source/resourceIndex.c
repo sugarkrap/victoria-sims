@@ -109,6 +109,7 @@ Boolean resourceIndexBegin(ResourceIndex *index, VirtualFileSystem *fileSystem, 
     index->censusOverflow = 0U;
     index->wantedTypeCount =
         (wantedTypeCount > RESOURCE_INDEX_TYPE_LIMIT) ? RESOURCE_INDEX_TYPE_LIMIT : wantedTypeCount;
+    index->wantedTypesRefused = wantedTypeCount - index->wantedTypeCount;
     for (which = 0U; which < index->wantedTypeCount; which++)
     {
         index->wantedTypes[which] = wantedTypes[which];
@@ -245,6 +246,7 @@ ResourceIndexStatus resourceIndexStep(ResourceIndex *index)
             }
             stored = &index->entries[index->count];
             stored->typeIdentifier = typeIdentifier;
+            stored->groupIdentifier = readUnsigned32(indexBytes, at + 4UL);
             stored->instanceIdentifier = readUnsigned32(indexBytes, at + 8UL);
             if (entrySize == ENTRY_SIZE_WITH_INSTANCE_HIGH)
             {
@@ -324,6 +326,29 @@ Boolean resourceIndexGetCensusRank(const ResourceIndex *index, Unsigned32 rank,
         }
     }
     return BOOLEAN_FALSE;
+}
+
+const ResourceIndexEntry *resourceIndexFindInGroup(const ResourceIndex *index,
+                                                   Unsigned32 typeIdentifier,
+                                                   Unsigned32 groupIdentifier,
+                                                   Unsigned32 instanceIdentifier,
+                                                   Unsigned32 instanceIdentifierHigh)
+{
+    Unsigned32 which;
+
+    for (which = 0U; which < index->count; which++)
+    {
+        const ResourceIndexEntry *entry = &index->entries[which];
+
+        if (entry->typeIdentifier == typeIdentifier &&
+            entry->groupIdentifier == groupIdentifier &&
+            entry->instanceIdentifier == instanceIdentifier &&
+            entry->instanceIdentifierHigh == instanceIdentifierHigh)
+        {
+            return entry;
+        }
+    }
+    return NULL_POINTER;
 }
 
 const ResourceIndexEntry *resourceIndexFindNamed(const ResourceIndex *index,

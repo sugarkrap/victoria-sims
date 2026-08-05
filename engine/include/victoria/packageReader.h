@@ -26,6 +26,8 @@
    a face archetype. Not a scenegraph resource; it is a property set naming
    one. */
 #define PACKAGE_TYPE_SKIN_ENTRY 0xEBCF3E27UL
+/* cTSPersistResKeyList — the sidecar a catalogue entry indexes into. */
+#define PACKAGE_TYPE_RESOURCE_KEY_LIST 0xAC506764UL
 /* cTSSimOutfitData — what one Sim has on. */
 #define PACKAGE_TYPE_SIM_APPEARANCE 0xAC598EACUL
 #define PACKAGE_TYPE_DIRECTORY 0xE86B1EEFUL

@@ -8,6 +8,7 @@
 #include "victoria/platformInterface.h"
 #include "victoria/profiler.h"
 #include "victoria/propertySet.h"
+#include "victoria/resourceKeyList.h"
 #include "victoria/renderInterface.h"
 #include "victoria/compression.h"
 #include "victoria/resourceIndex.h"
@@ -1407,6 +1408,24 @@ static char catalogueExamples[CATALOGUE_KIND_LIMIT][PROPERTY_NAME_LIMIT];
 static Unsigned32 catalogueKindTotals[CATALOGUE_KIND_LIMIT];
 static Unsigned32 catalogueWithShape = 0U;
 static Unsigned32 catalogueNotBinary = 0U;
+/* The second half of the hop: an entry names its shape by an index into a
+   sidecar, so resolving one takes a read of its own. Held between steps because
+   a browser's store answers exactly one read per step. */
+static Boolean catalogueWantsKeyList = BOOLEAN_FALSE;
+static Unsigned32 catalogueShapeIndex = 0U;
+static Unsigned32 catalogueEntryGroup = 0U;
+static Unsigned32 catalogueEntryInstance = 0U;
+static Unsigned32 catalogueEntryInstanceHigh = 0U;
+static char catalogueEntryName[PROPERTY_NAME_LIMIT];
+static Unsigned32 catalogueResolved = 0U;
+static Unsigned32 catalogueNoSidecar = 0U;
+static Unsigned32 catalogueIndexPastEnd = 0U;
+static Unsigned32 catalogueShapeMissing = 0U;
+static Unsigned32 catalogueShown = 0U;
+/* Entries whose key at the wanted index is not a shape at all. Not a failure —
+   an overlay or a skin tone has no mesh — so it is counted apart from the ones
+   that named a shape and could not find it. */
+static Unsigned32 catalogueNotAShape = 0U;
 
 static void rememberCatalogueKind(const char *kind, const char *name)
 {
@@ -1454,6 +1473,53 @@ static void reportCatalogue(void)
     stringAppend(message, sizeof(message), " spelled as XML rather than the binary form");
     platformLogMessage(message);
 
+    {
+        /* How many of each are in the index at all. A hop that resolves nothing
+           has two very different causes — the sidecars are not there, or they
+           are there and are not being matched — and only a count separates
+           them. */
+        Unsigned32 sidecars = 0U;
+        Unsigned32 entries = 0U;
+        Unsigned32 at;
+
+        for (at = 0U; at < simIndex.count; at++)
+        {
+            if (simIndex.entries[at].typeIdentifier == (Unsigned32)PACKAGE_TYPE_RESOURCE_KEY_LIST)
+            {
+                sidecars++;
+            }
+            else if (simIndex.entries[at].typeIdentifier == (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY)
+            {
+                entries++;
+            }
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the index holds ");
+        appendCount(message, sizeof(message), entries);
+        stringAppend(message, sizeof(message), " catalogue entr(ies) and ");
+        appendCount(message, sizeof(message), sidecars);
+        stringAppend(message, sizeof(message), " key list(s), of ");
+        appendCount(message, sizeof(message), simIndex.count);
+        stringAppend(message, sizeof(message), " indexed and ");
+        appendCount(message, sizeof(message), simIndex.dropped);
+        stringAppend(message, sizeof(message), " dropped for want of room");
+        platformLogMessage(message);
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: followed ");
+    appendCount(message, sizeof(message), catalogueResolved);
+    stringAppend(message, sizeof(message), " of them to a shape on this disc — ");
+    appendCount(message, sizeof(message), catalogueNoSidecar);
+    stringAppend(message, sizeof(message), " had no key list beside them, ");
+    appendCount(message, sizeof(message), catalogueIndexPastEnd);
+    stringAppend(message, sizeof(message), " indexed past the end of one, ");
+    appendCount(message, sizeof(message), catalogueShapeMissing);
+    stringAppend(message, sizeof(message), " named a shape the index does not hold, and ");
+    appendCount(message, sizeof(message), catalogueNotAShape);
+    stringAppend(message, sizeof(message), " named no mesh at all — an overlay or a tone");
+    platformLogMessage(message);
+
     for (index = 0U; index < catalogueKindCount; index++)
     {
         message[0] = '\0';
@@ -1471,11 +1537,130 @@ static void reportCatalogue(void)
     }
 }
 
+/* The sidecar read: an entry's shape index against the key list beside it.
+ *
+ * A step of its own because it is a second read, and one read per step is the
+ * rule a browser's store enforces. The entry that wanted it is gone by now, so
+ * what it needed — its instance words, its shape index, its name — was kept.
+ *
+ * The sidecar is matched on instance alone, the index not carrying groups. A
+ * catalogue entry and its key list share both, so this is right wherever two
+ * types do not collide on an instance, which is everywhere seen so far. Said
+ * out loud because it is an assumption and not a guarantee. */
+static SimAssembly stepTheSidecar(MemorySize marker)
+{
+    /* Matched on group and instance both, which is what a sidecar shares.
+     *
+     * Measured rather than taken on faith. Matching instance alone found a list
+     * for 334 of 600 entries and every key at the wanted index was a shape;
+     * matching both found one for 485, of which 334 were shapes and 151 were
+     * resources of some other type. More lists found, and the extra ones are
+     * not wrong — a catalogue entry of kind skin covers overlays and tones as
+     * well as clothing, and those have no mesh to name. So the count below
+     * reports what a non-shape key actually was rather than calling it a
+     * failure to resolve. */
+    const ResourceIndexEntry *sidecar =
+        resourceIndexFindInGroup(&simIndex, (Unsigned32)PACKAGE_TYPE_RESOURCE_KEY_LIST,
+                                 catalogueEntryGroup, catalogueEntryInstance,
+                                 catalogueEntryInstanceHigh);
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    catalogueWantsKeyList = BOOLEAN_FALSE;
+    if (sidecar == NULL_POINTER)
+    {
+        catalogueNoSidecar++;
+        return SIM_ASSEMBLY_PENDING;
+    }
+    if (!readIndexedResource(sidecar, &bytes, &size))
+    {
+        /* Not consumed: the read pended, so this must be asked for again. */
+        catalogueWantsKeyList = BOOLEAN_TRUE;
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+    if (bytes != NULL_POINTER)
+    {
+        ResourceKeyList list;
+
+        if (resourceKeyListRead(&list, bytes, size) == RESOURCE_KEY_LIST_OK)
+        {
+            const ResourceKeyEntry *key = resourceKeyListGet(&list, catalogueShapeIndex);
+
+            if (key != NULL_POINTER && key->typeIdentifier != (Unsigned32)PACKAGE_TYPE_SHPE)
+            {
+                catalogueNotAShape++;
+            }
+
+            if (key == NULL_POINTER)
+            {
+                catalogueIndexPastEnd++;
+            }
+            else
+            {
+                const ResourceIndexEntry *shape =
+                    resourceIndexFind(&simIndex, key->typeIdentifier, key->instanceIdentifier,
+                                      key->instanceIdentifierHigh);
+
+                if (key->typeIdentifier != (Unsigned32)PACKAGE_TYPE_SHPE)
+                {
+                    /* Already counted above. Nothing more to say about it: the
+                       entry names no mesh, which is what an overlay looks
+                       like. */
+                }
+                else if (shape == NULL_POINTER)
+                {
+                    catalogueShapeMissing++;
+                }
+                else
+                {
+                    catalogueResolved++;
+                }
+                /* A few in full, because a count of successes says the chain
+                   closes and nothing about what it closes onto. */
+                if (catalogueShown < 6U)
+                {
+                    char message[384];
+
+                    catalogueShown++;
+                    message[0] = '\0';
+                    stringAppend(message, sizeof(message), "engine:   ");
+                    stringAppend(message, sizeof(message), (catalogueEntryName[0] != '\0')
+                                                               ? catalogueEntryName
+                                                               : "(unnamed)");
+                    stringAppend(message, sizeof(message), " — key ");
+                    appendCount(message, sizeof(message), catalogueShapeIndex);
+                    stringAppend(message, sizeof(message), " of ");
+                    appendCount(message, sizeof(message), list.storedKeyCount);
+                    stringAppend(message, sizeof(message), " in a version ");
+                    appendCount(message, sizeof(message), list.version);
+                    stringAppend(message, sizeof(message), " list is a ");
+                    stringAppend(message, sizeof(message),
+                                 (key->typeIdentifier == (Unsigned32)PACKAGE_TYPE_SHPE)
+                                     ? "shape"
+                                     : "resource of another type");
+                    stringAppend(message, sizeof(message),
+                                 (shape != NULL_POINTER) ? ", which is on this disc"
+                                                         : ", which the index does not hold");
+                    platformLogMessage(message);
+                }
+            }
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+    return SIM_ASSEMBLY_PENDING;
+}
+
 static SimAssembly stepTheCatalogue(MemorySize marker)
 {
     const ResourceIndexEntry *entry = NULL_POINTER;
     Unsigned8 *bytes;
     MemorySize size;
+
+    if (catalogueWantsKeyList == BOOLEAN_TRUE)
+    {
+        return stepTheSidecar(marker);
+    }
 
     while (catalogueCursor < simIndex.count &&
            simIndex.entries[catalogueCursor].typeIdentifier !=
@@ -1540,6 +1725,25 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
             }
             rememberCatalogueKind(propertySetGetString(&set, "type", ""),
                                   propertySetGetString(&set, "name", ""));
+
+            /* What the sidecar step will need once this entry's bytes are
+               given back. An index of its own is not enough — the list it
+               indexes is found by this entry's instance words. */
+            {
+                const Property *shapeIndex = propertySetFind(&set, "shapekeyidx");
+
+                if (shapeIndex != NULL_POINTER && shapeIndex->kind == PROPERTY_VALUE_INTEGER)
+                {
+                    catalogueShapeIndex = shapeIndex->integerValue;
+                    catalogueEntryGroup = entry->groupIdentifier;
+                    catalogueEntryInstance = entry->instanceIdentifier;
+                    catalogueEntryInstanceHigh = entry->instanceIdentifierHigh;
+                    catalogueEntryName[0] = '\0';
+                    stringAppend(catalogueEntryName, PROPERTY_NAME_LIMIT,
+                                 propertySetGetString(&set, "name", ""));
+                    catalogueWantsKeyList = BOOLEAN_TRUE;
+                }
+            }
         }
         else
         {
@@ -2062,7 +2266,7 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
            found three trees and not one shape. */
         /* Every hop a part needs, so a Sim is one index and not a dependency
            on whichever earlier phase happened to have built one. */
-        static const Unsigned32 wantedTypes[8] = { (Unsigned32)PACKAGE_TYPE_CRES,
+        static const Unsigned32 wantedTypes[9] = { (Unsigned32)PACKAGE_TYPE_CRES,
                                                    (Unsigned32)PACKAGE_TYPE_SHPE,
                                                    (Unsigned32)PACKAGE_TYPE_GMND,
                                                    (Unsigned32)PACKAGE_TYPE_GMDC,
@@ -2072,12 +2276,31 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
                                                    /* The catalogue, which names everything a Sim
                                                       wears and everything it is built from beyond
                                                       the four names hardcoded here. */
-                                                   (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY };
+                                                   (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY,
+                                                   /* The sidecar an entry's shape index points
+                                                      into, without which the index is a number
+                                                      and nothing else. */
+                                                   (Unsigned32)PACKAGE_TYPE_RESOURCE_KEY_LIST };
 
         simIndexBegun = BOOLEAN_TRUE;
         if (resourceIndexBegin(&simIndex, discFileSystem, globalArena, SIM_INDEX_CAPACITY,
-                               wantedTypes, 8U))
+                               wantedTypes, 9U))
         {
+            /* Said out loud, because a type asked for and not taken looks
+               exactly like a disc that holds none of it — which cost a run of
+               the disc to work out once. */
+            if (simIndex.wantedTypesRefused > 0U)
+            {
+                char refusal[128];
+
+                refusal[0] = '\0';
+                stringAppend(refusal, sizeof(refusal), "engine: the index would not take ");
+                appendCount(refusal, sizeof(refusal), simIndex.wantedTypesRefused);
+                stringAppend(refusal, sizeof(refusal),
+                             " of the resource type(s) asked for, so lookups of those find "
+                             "nothing whatever the disc holds");
+                platformLogMessage(refusal);
+            }
             simIndexBuilding = BOOLEAN_TRUE;
             simPartCursor = 0U;
             simPartsFound = 0U;
