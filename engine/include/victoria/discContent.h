@@ -205,6 +205,22 @@ typedef struct DiscContentSearch
     DiscContentBoneReport boneReports[DISC_CONTENT_BONE_SAMPLE];
     Unsigned32 boneReportCount;
 
+    /* The mesh's vertices as the container gave them, kept aside the first time
+     * a pose is applied.
+     *
+     * geometryMeshApplySkin rewrites the mesh in place, so posing a mesh that
+     * has already been posed skins an already-skinned model and compounds the
+     * two. Restoring from this first makes a pose idempotent, which is what
+     * lets one be rebuilt every frame from the same starting point rather than
+     * drifting further from the bind pose with each one.
+     *
+     * Normals as well as positions: skinning rotates them too, and a mesh whose
+     * positions were restored while its normals were not would light itself
+     * from a pose it is no longer in. */
+    Real32 *bindPositions;
+    Real32 *bindNormals;
+    Unsigned32 bindVertexCount;
+
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];
     GeometryMesh mesh;
@@ -355,5 +371,24 @@ DiscContentStatus discContentRunToCompletion(DiscContentSearch *search);
  * mesh that never moved a success. */
 Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation *animation,
                                      Real32 tick, MemoryArena *arena);
+
+/* Copies the mesh's vertices aside as the pose to skin from.
+ *
+ * Must be called before the first pose attempt and while the mesh is still in
+ * the pose the container gave it, because that is what every pose is built
+ * from. Taking it lazily inside the first pose looks equivalent and is not: a
+ * pose attempt is made against an arena marker that a rejected animation
+ * rewinds, so a copy taken there can be handed back while a later pose still
+ * believes in it — and the next pose then skins a mesh that is already posed.
+ *
+ * That is not a hypothetical. It happened: the rest pose was applied, the copy
+ * was dropped when the next animation was rejected, and the animation after
+ * that was posed on top of the rest pose rather than from the bind pose. The
+ * only visible sign was the model's measured span quietly changing from 0.242
+ * to 0.230.
+ *
+ * False when the copy would not fit, which leaves posing unavailable rather
+ * than compounding. */
+Boolean discContentKeepBindPose(DiscContentSearch *search, MemoryArena *arena);
 
 #endif

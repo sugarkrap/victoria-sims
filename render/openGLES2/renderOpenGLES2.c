@@ -95,6 +95,9 @@ static GLint meshMatrixLocation = -1;
 static GLint meshLightLocation = -1;
 static GLsizei meshIndexCount = 0;
 static MemorySize meshChargedBytes = 0UL;
+/* The vertex buffer's size, so an update can refuse a mesh of a different
+   shape rather than writing past the end of what was uploaded. */
+static MemorySize meshVertexBytes = 0UL;
 static MeshCamera meshCamera;
 
 static Real32 viewportAspect = 1.0f;
@@ -337,6 +340,104 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 }
 
 
+/* Position, normal and texture coordinate, eight floats a vertex, into storage
+   the caller owns. Shared by the upload and the per-frame update so the two
+   cannot disagree about the layout the shader was written against. */
+static void interleaveMeshVertices(const GeometryMesh *mesh, GLfloat *interleaved)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < mesh->vertexCount; index++)
+    {
+        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
+        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
+        GLfloat *target = &interleaved[(MemorySize)index * 8UL];
+
+        target[0] = (GLfloat)position[0];
+        target[1] = (GLfloat)position[1];
+        target[2] = (GLfloat)position[2];
+        target[3] = (GLfloat)normal[0];
+        target[4] = (GLfloat)normal[1];
+        target[5] = (GLfloat)normal[2];
+        if (mesh->textureCoordinates != NULL_POINTER)
+        {
+            target[6] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL];
+            target[7] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
+        }
+        else
+        {
+            target[6] = 0.0f;
+            target[7] = 0.0f;
+        }
+    }
+}
+
+/* Hands back the ledger charge and the driver objects the previous mesh took.
+   Safe to call when there was no previous mesh: every handle is zero then, and
+   the ledger release is clamped rather than trusted. */
+static void releaseWhateverTheLastMeshTook(void)
+{
+    if (meshChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+    }
+    if (meshVertexBuffer != 0U)
+    {
+        glDeleteBuffers(1, &meshVertexBuffer);
+        meshVertexBuffer = 0U;
+    }
+    if (meshIndexBuffer != 0U)
+    {
+        glDeleteBuffers(1, &meshIndexBuffer);
+        meshIndexBuffer = 0U;
+    }
+    if (meshProgram != 0U)
+    {
+        glDeleteProgram(meshProgram);
+        meshProgram = 0U;
+    }
+}
+
+/* Re-sends the vertices of a mesh already uploaded, for a model whose vertices
+ * moved but whose shape did not — one skinned on the processor each frame.
+ *
+ * Charges the ledger nothing and compiles nothing, because it reuses the buffer
+ * and the program that are already there. renderSetMesh would rebuild both, and
+ * rebuilding a program every frame cost twenty-two milliseconds on the frame it
+ * happened to land on.
+ *
+ * Does nothing when no mesh is set or the vertex count has changed, which is
+ * not this function's job to handle: that is a different mesh, and the caller
+ * wants renderSetMesh for it. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    MemorySize marker;
+    MemorySize vertexBytes;
+    GLfloat *interleaved;
+
+    if (mesh == NULL_POINTER || meshVertexBuffer == 0U || meshIndexCount == 0 ||
+        mesh->positions == NULL_POINTER || mesh->normals == NULL_POINTER ||
+        (MemorySize)mesh->vertexCount * 8UL * sizeof(GLfloat) != meshVertexBytes)
+    {
+        return;
+    }
+
+    vertexBytes = meshVertexBytes;
+    marker = memoryArenaGetMarker(arena);
+    interleaved = (GLfloat *)memoryArenaAllocate(arena, vertexBytes, sizeof(GLfloat));
+    if (interleaved == NULL_POINTER)
+    {
+        memoryArenaRewindToMarker(arena, marker);
+        return;
+    }
+    interleaveMeshVertices(mesh, interleaved);
+
+    glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)vertexBytes, interleaved);
+    memoryArenaRewindToMarker(arena, marker);
+}
+
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 {
     MemorySize marker;
@@ -346,7 +447,6 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     GLuint vertexShader;
     GLuint fragmentShader;
     GLint linkStatus = GL_FALSE;
-    Unsigned32 index;
 
     if (mesh == NULL_POINTER || mesh->vertexCount == 0U || mesh->indexCount < 3U ||
         mesh->normals == NULL_POINTER)
@@ -354,6 +454,16 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         meshIndexCount = 0;
         return;
     }
+
+    /* Whatever the last mesh charged, given back before this one asks.
+     *
+     * Without this every call charges the ledger afresh and nothing is ever
+     * released, which is invisible while a mesh is set once per load and fatal
+     * the moment one is re-sent every frame: an animated face ran the buffer
+     * category to fifteen megabytes in twelve seconds, and would have reached
+     * the ceiling and been refused shortly after. The GL objects went the same
+     * way — a program and two buffers a frame, none deleted. */
+    releaseWhateverTheLastMeshTook();
 
     /* Position, normal and texture coordinate: eight floats a vertex. Carried
        even when the mesh has no coordinates, because a layout that changes
@@ -431,29 +541,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         meshChargedBytes = 0UL;
         return;
     }
-    for (index = 0U; index < mesh->vertexCount; index++)
-    {
-        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
-        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
-        GLfloat *target = &interleaved[(MemorySize)index * 8UL];
-
-        target[0] = (GLfloat)position[0];
-        target[1] = (GLfloat)position[1];
-        target[2] = (GLfloat)position[2];
-        target[3] = (GLfloat)normal[0];
-        target[4] = (GLfloat)normal[1];
-        target[5] = (GLfloat)normal[2];
-        if (mesh->textureCoordinates != NULL_POINTER)
-        {
-            target[6] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL];
-            target[7] = (GLfloat)mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
-        }
-        else
-        {
-            target[6] = 0.0f;
-            target[7] = 0.0f;
-        }
-    }
+    interleaveMeshVertices(mesh, interleaved);
 
     glGenBuffers(1, &meshVertexBuffer);
     glBindBuffer(GL_ARRAY_BUFFER, meshVertexBuffer);
@@ -465,6 +553,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 
     memoryArenaRewindToMarker(arena, marker);
 
+    meshVertexBytes = vertexBytes;
     meshCameraFrame(&meshCamera, mesh);
     meshIndexCount = (GLsizei)mesh->indexCount;
     platformLogMessage("render: mesh uploaded to the OpenGL ES 2.0 backend");

@@ -66,6 +66,9 @@ static Boolean uniformBufferIsCharged = BOOLEAN_FALSE;
 
 static Boolean meshIsReady = BOOLEAN_FALSE;
 static MemorySize meshChargedBytes = 0UL;
+/* How many vertices the host holds, so an update can refuse a mesh of another
+   shape rather than sending the host a buffer it will not fit. */
+static Unsigned32 meshVertexCountUploaded = 0U;
 static MemorySize textureChargedBytes = 0UL;
 static MeshCamera meshCamera;
 static Real32 viewportAspect = 1.0f;
@@ -182,13 +185,44 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 }
 
 
+/* Position, normal and texture coordinate, eight floats a vertex, into storage
+   the caller owns. Shared by the upload and the per-frame update so the two
+   cannot disagree about the layout the pipeline was built against. */
+static void interleaveMeshVertices(const GeometryMesh *mesh, Real32 *interleaved)
+{
+    Unsigned32 index;
+
+    for (index = 0U; index < mesh->vertexCount; index++)
+    {
+        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
+        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
+        Real32 *target = &interleaved[(MemorySize)index * 8UL];
+
+        target[0] = position[0];
+        target[1] = position[1];
+        target[2] = position[2];
+        target[3] = normal[0];
+        target[4] = normal[1];
+        target[5] = normal[2];
+        if (mesh->textureCoordinates != NULL_POINTER)
+        {
+            target[6] = mesh->textureCoordinates[(MemorySize)index * 2UL];
+            target[7] = mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
+        }
+        else
+        {
+            target[6] = 0.0f;
+            target[7] = 0.0f;
+        }
+    }
+}
+
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
 {
     MemorySize marker;
     Real32 *interleaved;
     MemorySize vertexBytes;
     MemorySize indexBytes;
-    Unsigned32 index;
 
     meshIsReady = BOOLEAN_FALSE;
     if (mesh == NULL_POINTER || mesh->vertexCount == 0U || mesh->indexCount < 3U ||
@@ -202,6 +236,16 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
        layout that changes shape per mesh means a pipeline per mesh. */
     vertexBytes = (MemorySize)mesh->vertexCount * 8UL * sizeof(Real32);
     indexBytes = (MemorySize)mesh->indexCount * sizeof(Unsigned16);
+
+    /* Whatever the last mesh charged, given back before this one asks. Without
+       it every call charges afresh and nothing is released, which is invisible
+       while a mesh is set once per load and fatal once one is re-sent per
+       frame. */
+    if (meshChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_BUFFER, meshChargedBytes);
+        meshChargedBytes = 0UL;
+    }
 
     if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_BUFFER, vertexBytes + indexBytes) ==
         BOOLEAN_FALSE)
@@ -230,29 +274,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
         meshChargedBytes = 0UL;
         return;
     }
-    for (index = 0U; index < mesh->vertexCount; index++)
-    {
-        const Real32 *position = &mesh->positions[(MemorySize)index * 3UL];
-        const Real32 *normal = &mesh->normals[(MemorySize)index * 3UL];
-        Real32 *target = &interleaved[(MemorySize)index * 8UL];
-
-        target[0] = position[0];
-        target[1] = position[1];
-        target[2] = position[2];
-        target[3] = normal[0];
-        target[4] = normal[1];
-        target[5] = normal[2];
-        if (mesh->textureCoordinates != NULL_POINTER)
-        {
-            target[6] = mesh->textureCoordinates[(MemorySize)index * 2UL];
-            target[7] = mesh->textureCoordinates[(MemorySize)index * 2UL + 1UL];
-        }
-        else
-        {
-            target[6] = 0.0f;
-            target[7] = 0.0f;
-        }
-    }
+    interleaveMeshVertices(mesh, interleaved);
 
     /* The host copies during this call, so the scratch can go back straight
        afterwards. */
@@ -266,6 +288,7 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena)
     }
     memoryArenaRewindToMarker(arena, marker);
 
+    meshVertexCountUploaded = mesh->vertexCount;
     meshCameraFrame(&meshCamera, mesh);
     meshIsReady = BOOLEAN_TRUE;
     platformLogMessage("render: mesh uploaded to the WebGPU backend");
@@ -350,4 +373,32 @@ void renderShutdown(void)
     }
     meshIsReady = BOOLEAN_FALSE;
     shaderProgramCount = 0U;
+}
+
+/* Re-sends the vertices of a mesh already uploaded. Charges the ledger nothing
+   and builds no pipeline: both are already there, and the host replaces the
+   buffer contents rather than adding to them. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    MemorySize marker;
+    MemorySize vertexBytes;
+    Real32 *interleaved;
+
+    if (mesh == NULL_POINTER || !meshIsReady || mesh->positions == NULL_POINTER ||
+        mesh->normals == NULL_POINTER || mesh->vertexCount != meshVertexCountUploaded)
+    {
+        return;
+    }
+
+    vertexBytes = (MemorySize)mesh->vertexCount * 8UL * sizeof(Real32);
+    marker = memoryArenaGetMarker(arena);
+    interleaved = (Real32 *)memoryArenaAllocate(arena, vertexBytes, sizeof(Real32));
+    if (interleaved == NULL_POINTER)
+    {
+        memoryArenaRewindToMarker(arena, marker);
+        return;
+    }
+    interleaveMeshVertices(mesh, interleaved);
+    (void)hostUploadMesh(interleaved, mesh->vertexCount, mesh->indices, mesh->indexCount);
+    memoryArenaRewindToMarker(arena, marker);
 }

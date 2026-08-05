@@ -189,6 +189,38 @@ name a node this model actually has, and the movement is measured against the
 model's own size. A shift on the order of the span is a pose; nought is a
 no-op; many times larger is the spike this project drew once already.
 
+## Playing it, rather than holding one frame
+
+The pose advances on the engine's clock. A tick is an eight hundredth of a
+second — the format's own `FramesPerTick / 24` — and the tick is computed from
+the clock each frame rather than accumulated into, so a dropped frame skips
+ahead instead of slowing the animation down and a long run cannot drift.
+
+Skinned on the processor, not blended on the graphics one, which the note on
+`geometryMeshApplySkin` would rather it were. The device ladder decides it: the
+floor has no programmable shading at all and the software rasterizer is the
+expected backend there, so a processor path is needed whatever the top of the
+ladder eventually does.
+
+Three things had to be right for this to work at all, and each was wrong first:
+
+- **A pose has to be idempotent.** `geometryMeshApplySkin` rewrites the mesh in
+  place, so posing an already-posed mesh compounds the two. The bind pose is
+  copied aside and restored before each pose. It is copied *before* the first
+  attempt, not lazily inside it — a pose attempt runs against an arena marker a
+  rejected animation rewinds, so a copy taken there gets handed back while a
+  later pose still believes in it. The only visible sign of that bug was the
+  model's measured span quietly changing from 0.242 to 0.230.
+- **`renderSetMesh` cannot be the per-frame path.** It charges the graphics
+  ledger for a new buffer, compiles the program, and re-frames the camera.
+  Called every frame it leaked the buffer category to fifteen megabytes in
+  twelve seconds and would have hit the ceiling shortly after, and its shader
+  rebuild was a twenty-two millisecond frame. `renderUpdateMeshVertices` exists
+  for this and reuses both; the ledger now sits flat at one mesh's 21 KiB.
+- **The rest pose has no duration.** It is one pose, which is exactly what makes
+  it checkable, so the search keeps its verdict and carries on for an animation
+  with a length to play.
+
 ## Next
 
 - **#24 — paint each primitive range separately.** The data is already recorded:
@@ -197,9 +229,14 @@ no-op; many times larger is the spike this project drew once already.
   fetch that survives the browser's pending reads.
 - **#22 — walk the archive in fewer reads.** 1,529 entries at one round trip
   each.
-- **Sample the pose on a clock.** The tick posed at is nought, hard-coded. What
-  is read supports any tick — the keyframes and their times are all kept — so
-  what is missing is a caller that advances one.
+- **Blend on the graphics processor for the tiers that can.** The processor
+  path is required by the floor of the ladder and is what runs everywhere now,
+  at about 0.64 ms a frame for a 521-vertex face on a desktop. A shader doing
+  the same on the OpenGL ES 2.0 and WebGPU tiers would leave the vertices alone
+  and send a palette instead. Nothing has been measured on real hardware, so
+  whether that is needed is not yet a question anyone here can answer.
+- **Inverse kinematics.** Still counted and skipped; the animation playing
+  carries four chains.
 
 ## Known soft spots
 
@@ -214,10 +251,13 @@ no-op; many times larger is the spike this project drew once already.
   named rest pose is tried first; if it is missing, the fallback opens indexed
   animations until one names this skeleton, so which one poses the Sim then
   depends on index order, and up to 64 are opened looking for it.
-- **Keyframes are sampled on straight lines.** The tangents are in the file and
-  are read past, not followed. Right at every keyframe, close between them, and
-  wrong in a way that will matter as soon as anything samples a tick that is not
-  a keyframe's.
+- **The tangents are followed, but were never checked against the game.** A
+  continuous curve stores one slope and means it both ways; a discontinuous one
+  stores both. A baked curve stores neither and is still sampled as a straight
+  line, because a Hermite with slopes of nought would ease at every keyframe —
+  a shape the file never asked for. The rest pose still lands at 0.011 with
+  these in, which says they did not break anything; it does not say they are
+  right, because that check is exact at keyframes either way.
 - **Inverse kinematics chains are counted and skipped.** Every run says how
   many, which is what stops the omission from being invisible: the animation
   above carries four.

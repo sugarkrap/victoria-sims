@@ -442,3 +442,13 @@ Unsigned32 renderGetShaderProgramCount(void)
 {
     return 0U;
 }
+
+/* Nothing to do: this backend keeps a pointer to the mesh rather than a copy of
+   it, so vertices moved in place are already what the next frame rasterizes.
+   The camera is deliberately not re-framed — that would zoom the model about as
+   an animation moved it. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
+{
+    (void)mesh;
+    (void)arena;
+}

@@ -283,7 +283,38 @@ Real32 animationComponentSample(const AnimationComponent *component, Real32 tick
         {
             return after->value;
         }
-        return before->value + ((after->value - before->value) * ((tick - before->tick) / span));
+        /* A baked curve carries no tangents at all, so there is no curve to
+         * follow and a straight line is what the file actually describes. Run
+         * through the Hermite below with both slopes at nought it would instead
+         * flatten at every keyframe — a smooth step, which is a shape the file
+         * never asked for. */
+        if (component->curveType == ANIMATION_CURVE_BAKED)
+        {
+            return before->value +
+                   ((after->value - before->value) * ((tick - before->tick) / span));
+        }
+        {
+            /* The cubic Hermite through both keyframes, leaving the first along
+             * its out slope and arriving at the second along its in slope.
+             *
+             * The tangents are slopes in value per tick, so each is multiplied
+             * by the span to become the value it accounts for across this
+             * interval.
+             *
+             * Straight lines were what this did first, and they are exact at
+             * every keyframe, which is why the rest pose check passed without
+             * them. Between keyframes they were merely close. */
+            Real32 position = (tick - before->tick) / span;
+            Real32 squared = position * position;
+            Real32 cubed = squared * position;
+            Real32 fromBefore = (2.0f * cubed) - (3.0f * squared) + 1.0f;
+            Real32 fromBeforeSlope = cubed - (2.0f * squared) + position;
+            Real32 fromAfter = (-2.0f * cubed) + (3.0f * squared);
+            Real32 fromAfterSlope = cubed - squared;
+
+            return (fromBefore * before->value) + (fromBeforeSlope * span * before->tangentOut) +
+                   (fromAfter * after->value) + (fromAfterSlope * span * after->tangentIn);
+        }
     }
     return component->keyframes[component->keyframeCount - 1U].value;
 }
@@ -584,10 +615,14 @@ AnimationReadResult animationReaderOpen(Animation *animation, const Unsigned8 *b
                 {
                     Boolean understood = BOOLEAN_TRUE;
 
+                    keyframes[which].tangentIn = 0.0f;
+                    keyframes[which].tangentOut = 0.0f;
                     if (component->curveType == ANIMATION_CURVE_BAKED)
                     {
                         /* No time is stored: the frames are spread evenly over
-                           the channel's duration, so the position is the time. */
+                           the channel's duration, so the position is the time.
+                           No tangents either — a frame per step has nothing to
+                           interpolate along. */
                         keyframes[which].tick =
                             (Real32)channels[index].durationTicks *
                             ((Real32)which / (Real32)component->keyframeCount);
@@ -604,16 +639,26 @@ AnimationReadResult animationReaderOpen(Animation *animation, const Unsigned8 *b
                            taking the time first would keep that bit in it. */
                         keyframes[which].tick = (Real32)time;
                         keyframes[which].value = value;
-                        /* The tangents, which this samples straight lines
-                           between rather than follows. One halfword on a
-                           continuous curve, two on a discontinuous one, both in
-                           a 5.10 layout. Stepped over rather than kept: holding
-                           a number nothing reads would be the kind of storage
-                           the budget is not for. */
-                        (void)resourceCursorReadUnsigned16(&cursor);
+
+                        /* The tangents, always 5.10 whatever layout the values
+                           are in. A continuous curve stores one and means it
+                           for both sides; a discontinuous one stores the
+                           arriving slope and then the leaving one. */
                         if (component->curveType == ANIMATION_CURVE_DISCONTINUOUS)
                         {
-                            (void)resourceCursorReadUnsigned16(&cursor);
+                            keyframes[which].tangentIn = fixedPointToReal(
+                                KEYFRAME_FIXED_5_10,
+                                (Integer32)resourceCursorReadUnsigned16(&cursor));
+                            keyframes[which].tangentOut = fixedPointToReal(
+                                KEYFRAME_FIXED_5_10,
+                                (Integer32)resourceCursorReadUnsigned16(&cursor));
+                        }
+                        else
+                        {
+                            keyframes[which].tangentIn = fixedPointToReal(
+                                KEYFRAME_FIXED_5_10,
+                                (Integer32)resourceCursorReadUnsigned16(&cursor));
+                            keyframes[which].tangentOut = keyframes[which].tangentIn;
                         }
                     }
                     if (!understood)

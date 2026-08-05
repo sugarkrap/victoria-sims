@@ -31,6 +31,12 @@
    duration in ticks is meaningless without it. */
 #define ANIMATION_FRAMES_PER_TICK 0.03f
 
+/* And from a tick to a second: the frames above over the game's twenty four a
+   second, so a tick is an eight hundredth of a second. Spelled as the division
+   rather than as 0.00125 so it stays visibly derived from the two numbers it
+   comes from. */
+#define ANIMATION_TICK_SECONDS (ANIMATION_FRAMES_PER_TICK / 24.0f)
+
 #define ANIMATION_NAME_LIMIT 64UL
 
 /* What a channel's numbers mean. The names are the format's own. */
@@ -78,6 +84,16 @@ typedef struct AnimationKeyframe
        read from the file for the other two. */
     Real32 tick;
     Real32 value;
+    /* The slopes the curve leaves the previous keyframe with and arrives at
+     * this one with, in value per tick, both stored as 5.10 fixed point.
+     *
+     * A continuous curve stores one and means both — that is what makes it
+     * continuous — and a discontinuous one stores them separately so the curve
+     * can break at the keyframe. A baked curve stores neither: its frames are
+     * one per step already, so there is nothing to interpolate along and both
+     * are left at nought. */
+    Real32 tangentIn;
+    Real32 tangentOut;
 } AnimationKeyframe;
 
 typedef struct AnimationComponent

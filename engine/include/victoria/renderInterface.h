@@ -23,6 +23,20 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
    Called after renderInitialize, because a backend may want to upload it. */
 void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena);
 
+/* Re-sends the vertices of a mesh already set, for a model whose vertices moved
+ * but whose shape did not — one skinned on the processor each frame.
+ *
+ * Separate from renderSetMesh because that one rebuilds everything: it charges
+ * the graphics ledger for a new buffer, compiles a program, and re-frames the
+ * camera. Called every frame it leaks the ledger and recompiles a shader per
+ * frame, which is what an animated mesh made it do.
+ *
+ * A backend that reads the mesh's arrays directly rather than copying them has
+ * nothing to do here, and does nothing. Doing nothing is also the right answer
+ * when no mesh is set or the vertex count has changed — that is a different
+ * mesh, and renderSetMesh is what it wants. */
+void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena);
+
 /* Hands the backend the image the mesh is painted with: eight bit RGBA, red
    first, top row first, width * height * 4 bytes.
 

@@ -63,6 +63,10 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->bonesPosed = 0U;
     search->poseShift = 0.0f;
     search->poseSpan = 0.0f;
+    search->boneReportCount = 0U;
+    search->bindPositions = NULL_POINTER;
+    search->bindNormals = NULL_POINTER;
+    search->bindVertexCount = 0U;
     search->packagePath[0] = '\0';
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
@@ -897,6 +901,69 @@ static void describeBoneChain(const ResourceNodeDescription *tree, const Animati
     }
 }
 
+Boolean discContentKeepBindPose(DiscContentSearch *search, MemoryArena *arena)
+{
+    MemorySize count = (MemorySize)search->mesh.vertexCount * 3UL;
+    Unsigned32 index;
+
+    search->bindPositions = NULL_POINTER;
+    search->bindNormals = NULL_POINTER;
+    search->bindVertexCount = 0U;
+    if (search->mesh.positions == NULL_POINTER || count == 0UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    search->bindPositions =
+        (Real32 *)memoryArenaAllocate(arena, count * sizeof(Real32), sizeof(Real32));
+    if (search->bindPositions == NULL_POINTER)
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (search->mesh.normals != NULL_POINTER)
+    {
+        search->bindNormals =
+            (Real32 *)memoryArenaAllocate(arena, count * sizeof(Real32), sizeof(Real32));
+        if (search->bindNormals == NULL_POINTER)
+        {
+            search->bindPositions = NULL_POINTER;
+            return BOOLEAN_FALSE;
+        }
+    }
+    for (index = 0U; index < (Unsigned32)count; index++)
+    {
+        search->bindPositions[index] = search->mesh.positions[index];
+        if (search->bindNormals != NULL_POINTER)
+        {
+            search->bindNormals[index] = search->mesh.normals[index];
+        }
+    }
+    search->bindVertexCount = search->mesh.vertexCount;
+    return BOOLEAN_TRUE;
+}
+
+/* Puts the mesh back in the pose the container gave it, so the pose about to be
+   built starts where the last one did rather than on top of it. */
+static Boolean restoreBindPose(DiscContentSearch *search)
+{
+    Unsigned32 index;
+
+    if (search->bindPositions == NULL_POINTER ||
+        search->bindVertexCount != search->mesh.vertexCount)
+    {
+        return BOOLEAN_FALSE;
+    }
+    for (index = 0U; index < search->bindVertexCount * 3U; index++)
+    {
+        search->mesh.positions[index] = search->bindPositions[index];
+        if (search->bindNormals != NULL_POINTER && search->mesh.normals != NULL_POINTER)
+        {
+            search->mesh.normals[index] = search->bindNormals[index];
+        }
+    }
+    return BOOLEAN_TRUE;
+}
+
 Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation *animation,
                                      Real32 tick, MemoryArena *arena)
 {
@@ -926,6 +993,13 @@ Boolean discContentPoseFromAnimation(DiscContentSearch *search, const Animation 
     }
     search->channelsApplied = countChannelsReachingTree(&search->modelTree, animation);
     if (search->channelsApplied == 0U)
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    /* Back to the pose the container gave, so this starts where the last one
+       did rather than on top of it. */
+    if (!restoreBindPose(search))
     {
         return BOOLEAN_FALSE;
     }

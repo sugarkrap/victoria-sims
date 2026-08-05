@@ -383,6 +383,12 @@ static Unsigned32 animationScanned = 0U;
 static Boolean animationTriedNamed = BOOLEAN_FALSE;
 static Boolean animationUsedRestPose = BOOLEAN_FALSE;
 
+/* Set once an animation has actually posed the mesh, which is what lets the
+   frame loop keep advancing it. The tick is kept only for reporting — it is
+   recomputed from the clock every frame rather than carried forward. */
+static Boolean poseIsAnimated = BOOLEAN_FALSE;
+static Real32 poseTick = 0.0f;
+
 /* Where the arena stood before the texture was read, kept because the texture
    has to survive between steps.
  *
@@ -926,6 +932,16 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
         static const Unsigned32 wantedTypes[1] = { (Unsigned32)PACKAGE_TYPE_ANIM };
 
         animationIndexBegun = BOOLEAN_TRUE;
+        /* The vertices as they are now, before anything has posed them, and
+           before the first per-attempt marker exists to rewind past. */
+        if (!discContentKeepBindPose(&discSearch, globalArena))
+        {
+            platformLogMessage("engine: no room to keep the mesh's bind pose, so it cannot be "
+                               "posed without posing on top of itself — left as it is");
+            discPhase = DISC_PHASE_DONE;
+            discLoadStatus = ENGINE_DISC_READY;
+            return discLoadStatus;
+        }
         if (resourceIndexBegin(&animationIndex, discFileSystem, globalArena,
                                ANIMATION_INDEX_CAPACITY, wantedTypes, 1U))
         {
@@ -1165,6 +1181,26 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                now the old pose. Sent again rather than left: the picture on
                screen is the only place this work is visible. */
             renderSetMesh(&discSearch.mesh, globalArena);
+            /* And from here the frame loop keeps it moving. Only now, because
+               until a pose has succeeded once there is nothing to advance and
+               a frame that tried would pay for a palette every frame to
+               discover it. */
+            if (posedAnimation.durationTicks > 0U)
+            {
+                poseIsAnimated = BOOLEAN_TRUE;
+                platformLogMessage("engine: playing it from here, re-skinned each frame on the "
+                                   "processor from the bind pose kept aside");
+            }
+            else
+            {
+                /* The rest pose has no duration — it is one pose, which is
+                   exactly why it can be checked. Having checked with it, the
+                   search carries on for something with a length to play, or
+                   the clock work would never have anything to move. */
+                platformLogMessage("engine: that one has no duration to play over — keeping its "
+                                   "verdict and looking for an animation with a length");
+                return ENGINE_DISC_WORKING;
+            }
         }
         else
         {
@@ -2781,6 +2817,63 @@ void engineBeginFrame(void)
     profilerBeginFrame();
 }
 
+/* Moves the model to where the animation has it now.
+ *
+ * Skinned on the processor rather than blended on the graphics one, which the
+ * note on geometryMeshApplySkin would rather it were. The device ladder decides
+ * it: the floor has no programmable shading at all, and the software rasterizer
+ * is the expected backend down there, so a processor path is needed whatever
+ * the top of the ladder eventually does.
+ *
+ * Every frame rebuilds the palette and re-skins from the bind pose kept aside,
+ * so nothing here accumulates. It also re-sends the vertices, which is the real
+ * cost of doing it this way and is why this is measured as its own zone rather
+ * than hidden inside the frame.
+ *
+ * Silent when no animation was found, which is every disc that got this far
+ * without a skinned mesh. */
+static void advanceThePose(Real32 elapsedSeconds)
+{
+    Real32 tick;
+
+    if (!poseIsAnimated || posedAnimation.durationTicks == 0U)
+    {
+        return;
+    }
+
+    VICTORIA_PROFILE_ZONE_BEGIN("advanceThePose");
+    /* The clock handed in is time since the run began, not time since the last
+     * frame, so the tick is computed from it rather than accumulated into it.
+     * That also means a dropped frame skips ahead instead of slowing the
+     * animation down, and a long run cannot drift.
+     *
+     * Seconds become ticks through the format's own constant. The wrap is a
+     * truncated division rather than repeated subtraction, which at eight
+     * hundred ticks a second would be thousands of iterations an hour into a
+     * run; there is no floating point modulus to call freestanding. */
+    {
+        Real32 duration = (Real32)posedAnimation.durationTicks;
+        Real32 elapsedTicks = elapsedSeconds / ANIMATION_TICK_SECONDS;
+        Real32 cycles = elapsedTicks / duration;
+
+        tick = elapsedTicks - ((Real32)(Integer32)cycles * duration);
+        if (tick < 0.0f)
+        {
+            tick = 0.0f;
+        }
+        poseTick = tick;
+    }
+
+    if (discContentPoseFromAnimation(&discSearch, &posedAnimation, tick, globalArena))
+    {
+        /* The vertices moved; the mesh is otherwise the one already uploaded.
+           renderSetMesh here would charge the graphics ledger for a second
+           buffer every frame and compile the program again with it. */
+        renderUpdateMeshVertices(&discSearch.mesh, globalArena);
+    }
+    VICTORIA_PROFILE_ZONE_END();
+}
+
 void engineRenderFrame(Real32 elapsedSeconds)
 {
     if (engineIsRunning == BOOLEAN_FALSE)
@@ -2789,6 +2882,7 @@ void engineRenderFrame(Real32 elapsedSeconds)
     }
 
     VICTORIA_PROFILE_ZONE_BEGIN("engineRenderFrame");
+    advanceThePose(elapsedSeconds);
     renderDrawFrame(elapsedSeconds);
     VICTORIA_PROFILE_ZONE_END();
 }
