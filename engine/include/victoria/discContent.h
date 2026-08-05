@@ -49,6 +49,24 @@ typedef enum DiscContentStatus
 
 const char *discContentStatusGetName(DiscContentStatus status);
 
+/* How many parts of a model are remembered. A Sim is a handful; a lot is a
+   number chosen so that meeting the limit is worth reporting rather than
+   normal. */
+#define DISC_CONTENT_PART_LIMIT 32U
+
+/* One drawable piece of a model: a mesh, the material it wears, and which node
+   of the transform tree placed it. The transform itself is not applied yet —
+   that is the skeleton's job — but the node is recorded now because finding it
+   again later would mean walking the tree a second time. */
+typedef struct DiscModelPart
+{
+    char meshName[RESOURCE_NAME_LIMIT];
+    char materialName[RESOURCE_NAME_LIMIT];
+    char shapeName[RESOURCE_NAME_LIMIT];
+    Unsigned32 nodeIndex;
+    Unsigned32 levelOfDetail;
+} DiscModelPart;
+
 typedef struct DiscContentSearch
 {
     VirtualFileSystem *fileSystem;
@@ -69,6 +87,20 @@ typedef struct DiscContentSearch
     ResourceNodeDescription modelTree;
     Boolean modelHasTree;
     Unsigned32 modelNodeIndex;
+
+    /* Every part the model is made of, not only the one being drawn.
+     *
+     * A Sim is not a mesh. Its resource node names several shapes — a head, a
+     * body, hands — and each shape names meshes and the materials they wear.
+     * The chain has always stopped at the first of each, which is why what
+     * arrives on screen is a face rather than a person.
+     *
+     * Collected before anything is drawn, because how many there are and what
+     * they wear decides what the renderer has to be able to do, and that is not
+     * a thing to guess at. */
+    Unsigned32 partCount;
+    Unsigned32 partsBeyondRoom;
+    DiscModelPart parts[DISC_CONTENT_PART_LIMIT];
 
     /* The material the model's first part wears, and the texture that material
        paints with. Both are found by name — nothing in this chain is numbered —

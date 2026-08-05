@@ -1865,6 +1865,37 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
         }
 
+        /* What the model is made of, against what is being drawn. One part of
+           several is a face where a Sim should be, and until this was counted
+           nobody could see the difference in a log. */
+        if (discSearch.partCount > 0U)
+        {
+            Unsigned32 part;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: ");
+            appendCount(message, sizeof(message), discSearch.partCount);
+            stringAppend(message, sizeof(message), " part(s) —");
+            for (part = 0U; part < discSearch.partCount && part < 8U; part++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message), discSearch.parts[part].meshName);
+                if (discSearch.parts[part].materialName[0] != '\0')
+                {
+                    stringAppend(message, sizeof(message), " wearing ");
+                    stringAppend(message, sizeof(message), discSearch.parts[part].materialName);
+                }
+                stringAppend(message, sizeof(message), ";");
+            }
+            if (discSearch.partsBeyondRoom > 0U)
+            {
+                stringAppend(message, sizeof(message), " and ");
+                appendCount(message, sizeof(message), discSearch.partsBeyondRoom);
+                stringAppend(message, sizeof(message), " with no room to remember them");
+            }
+            platformLogMessage(message);
+        }
+
         /* The material and its texture. Nothing samples it yet, so this reports
            what was found rather than what is on screen — but a name that failed
            to match and a file that would not read are different problems, and

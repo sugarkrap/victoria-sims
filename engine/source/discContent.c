@@ -72,15 +72,14 @@ static Boolean endsWithPackage(const char *path)
     return stringEndsWithIgnoringCase(path, ".package");
 }
 
-/* The shape a model's resource node points at, or null.
+/* Reads the model's transform tree, and says whether there is one.
  *
  * This is the top of the chain, and starting here rather than at the first
  * shape in the package is the difference between drawing a model and drawing
- * something that happened to be filed beside one. It also yields the transform
- * that says where the part belongs, which nothing below the resource node
+ * something that happened to be filed beside one. It also yields the transforms
+ * that say where each part belongs, which nothing below the resource node
  * knows. */
-static const PackageResource *findShapeThroughResourceNode(DiscContentSearch *search,
-                                                           const Package *package)
+static Boolean readModelTree(DiscContentSearch *search, const Package *package)
 {
     const PackageResource *nodeResource =
         packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_CRES);
@@ -88,13 +87,11 @@ static const PackageResource *findShapeThroughResourceNode(DiscContentSearch *se
     const Unsigned8 *nodeBytes;
     MemorySize nodeSize;
     Boolean compressed;
-    const PackageResource *shape = NULL_POINTER;
-    Unsigned32 index;
 
     search->modelHasTree = BOOLEAN_FALSE;
     if (nodeResource == NULL_POINTER)
     {
-        return NULL_POINTER;
+        return BOOLEAN_FALSE;
     }
 
     marker = memoryArenaGetMarker(search->arena);
@@ -103,43 +100,69 @@ static const PackageResource *findShapeThroughResourceNode(DiscContentSearch *se
         resourceNodeRead(&search->modelTree, nodeBytes, nodeSize) != RESOURCE_NODE_OK)
     {
         memoryArenaRewindToMarker(search->arena, marker);
-        return NULL_POINTER;
+        return BOOLEAN_FALSE;
     }
     search->packagesWithTrees++;
     search->modelHasTree = BOOLEAN_TRUE;
-
-    for (index = 0U; index < search->modelTree.storedNodeCount && shape == NULL_POINTER; index++)
-    {
-        if (!search->modelTree.nodes[index].hasShape)
-        {
-            continue;
-        }
-        shape = scenegraphFindResource(package, &search->modelTree.nodes[index].shapeKey);
-        if (shape != NULL_POINTER)
-        {
-            search->modelNodeIndex = index;
-        }
-    }
+    /* The tree is a struct of its own, so the bytes it was read from are done
+       with the moment it is filled. */
     memoryArenaRewindToMarker(search->arena, marker);
-    return shape;
+    return BOOLEAN_TRUE;
 }
 
-/* Follows the chain down to a container, and says whether it got there.
+/* Remembers one part of the model, if there is room to.
  *
- * A package with no resource node and no shape is not a failure — plenty hold a
- * container and nothing else, and the caller falls back to taking one directly.
- * What this buys is a mesh that was chosen: part of a named model, rather than
- * whatever the index happened to list first. */
-static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *search,
-                                                            const Package *package)
+ * The material a mesh wears is found by matching the shape's own bindings: a
+ * shape lists meshes and it lists materials, and the two are joined by the
+ * primitive's name rather than by position. Taking the first material for every
+ * mesh would dress a Sim's hands in its face. */
+static void rememberPart(DiscContentSearch *search, const ShapeDescription *shape,
+                         Unsigned32 meshIndex, Unsigned32 nodeIndex)
 {
-    /* Asked for by the model that owns it first; only failing that, whichever
-     * shape the package lists. The fallback is not a lesser answer for a
-     * package that has no resource node — plenty do not — but for one that
-     * does, taking any other shape would be picking a part of the model over
-     * the model. */
-    const PackageResource *shapeResource = findShapeThroughResourceNode(search, package);
-    MemorySize marker;
+    DiscModelPart *part;
+    Unsigned32 which;
+
+    if (search->partCount >= (Unsigned32)DISC_CONTENT_PART_LIMIT)
+    {
+        search->partsBeyondRoom++;
+        return;
+    }
+    part = &search->parts[search->partCount];
+    part->meshName[0] = '\0';
+    part->materialName[0] = '\0';
+    part->shapeName[0] = '\0';
+    part->nodeIndex = nodeIndex;
+    part->levelOfDetail = shape->meshLevelsOfDetail[meshIndex];
+    stringAppend(part->meshName, RESOURCE_NAME_LIMIT, shape->meshNames[meshIndex]);
+    stringAppend(part->shapeName, RESOURCE_NAME_LIMIT, shape->resourceName);
+
+    for (which = 0U; which < shape->storedMaterialCount; which++)
+    {
+        if (stringEquals(shape->materials[which].primitiveName, shape->meshNames[meshIndex]))
+        {
+            stringAppend(part->materialName, RESOURCE_NAME_LIMIT,
+                         shape->materials[which].materialName);
+            break;
+        }
+    }
+    /* No binding names this mesh. Its first material is a guess, but a guess
+       that is right whenever a shape wears one material — which is most of
+       them — and an empty name would find nothing at all. */
+    if (part->materialName[0] == '\0' && shape->storedMaterialCount > 0U)
+    {
+        stringAppend(part->materialName, RESOURCE_NAME_LIMIT, shape->materials[0].materialName);
+    }
+    search->partCount++;
+}
+
+/* Reads one shape and remembers every mesh it names. Returns the first mesh
+   that resolved to a container, which is the one drawn while there is still
+   only one being drawn. */
+static const PackageResource *collectShapeParts(DiscContentSearch *search, const Package *package,
+                                                const PackageResource *shapeResource,
+                                                Unsigned32 nodeIndex)
+{
+    MemorySize marker = memoryArenaGetMarker(search->arena);
     const Unsigned8 *shapeBytes;
     MemorySize shapeSize;
     Boolean compressed;
@@ -147,17 +170,8 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     const PackageResource *geometry = NULL_POINTER;
     Unsigned32 index;
 
-    if (shapeResource == NULL_POINTER)
-    {
-        shapeResource = packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_SHPE);
-    }
-    if (shapeResource == NULL_POINTER)
-    {
-        return NULL_POINTER;
-    }
-
-    marker = memoryArenaGetMarker(search->arena);
-    shapeBytes = scenegraphReadResourceBytes(search->arena, package, shapeResource, &shapeSize, &compressed);
+    shapeBytes = scenegraphReadResourceBytes(search->arena, package, shapeResource, &shapeSize,
+                                             &compressed);
     if (shapeBytes == NULL_POINTER ||
         scenegraphReadShape(&shape, shapeBytes, shapeSize) != SCENEGRAPH_READ_OK)
     {
@@ -166,31 +180,112 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     }
     search->packagesWithShapes++;
 
-    for (index = 0U; index < shape.storedMeshCount && geometry == NULL_POINTER; index++)
+    /* Every mesh the shape names, not the first that resolves. The one that
+       resolves first is still the one drawn today, but the rest are what a Sim
+       is made of and nothing was ever written down about them. */
+    for (index = 0U; index < shape.storedMeshCount; index++)
     {
+        const PackageResource *named;
+
         if (shape.meshNames[index][0] == '\0')
         {
             continue;
         }
-        geometry = scenegraphFindGeometryNamed(search->arena, package, shape.meshNames[index]);
+        named = scenegraphFindGeometryNamed(search->arena, package, shape.meshNames[index]);
+        if (named == NULL_POINTER)
+        {
+            continue;
+        }
+        rememberPart(search, &shape, index, nodeIndex);
+        if (geometry == NULL_POINTER)
+        {
+            geometry = named;
+        }
     }
 
-    if (geometry != NULL_POINTER)
+    if (geometry != NULL_POINTER && search->modelName[0] == '\0')
     {
-        search->modelName[0] = '\0';
         stringAppend(search->modelName, RESOURCE_NAME_LIMIT, shape.resourceName);
         /* Kept before the shape's bytes are given back. The material is looked
            up later, once the geometry has been read and the arena is settled. */
-        search->materialName[0] = '\0';
         if (shape.storedMaterialCount > 0U)
         {
-            stringAppend(search->materialName, RESOURCE_NAME_LIMIT, shape.materials[0].materialName);
+            stringAppend(search->materialName, RESOURCE_NAME_LIMIT,
+                         shape.materials[0].materialName);
         }
     }
     /* The shape's own bytes are done with either way; the container is found by
      * index entry, which outlives them. */
     memoryArenaRewindToMarker(search->arena, marker);
     return geometry;
+}
+
+/* Follows the chain down to a container, and says whether it got there.
+ *
+ * A package with no resource node and no shape is not a failure — plenty hold a
+ * container and nothing else, and the caller falls back to taking one directly.
+ * What this buys is a mesh that was chosen: part of a named model, rather than
+ * whatever the index happened to list first.
+ *
+ * Every node of the tree that names a shape is followed, not the first. A Sim's
+ * head, body and hands are separate shapes hanging off separate nodes, and
+ * stopping at the first is the whole reason what arrives on screen is a face. */
+static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *search,
+                                                            const Package *package)
+{
+    const PackageResource *geometry = NULL_POINTER;
+
+    search->modelName[0] = '\0';
+    search->materialName[0] = '\0';
+    search->partCount = 0U;
+    search->partsBeyondRoom = 0U;
+
+    if (readModelTree(search, package))
+    {
+        Unsigned32 index;
+
+        for (index = 0U; index < search->modelTree.storedNodeCount; index++)
+        {
+            const PackageResource *shapeResource;
+            const PackageResource *fromThisShape;
+
+            if (!search->modelTree.nodes[index].hasShape)
+            {
+                continue;
+            }
+            shapeResource = scenegraphFindResource(package, &search->modelTree.nodes[index].shapeKey);
+            if (shapeResource == NULL_POINTER)
+            {
+                continue;
+            }
+            fromThisShape = collectShapeParts(search, package, shapeResource, index);
+            if (fromThisShape != NULL_POINTER && geometry == NULL_POINTER)
+            {
+                geometry = fromThisShape;
+                search->modelNodeIndex = index;
+            }
+        }
+    }
+
+    if (geometry != NULL_POINTER)
+    {
+        return geometry;
+    }
+
+    /* Whichever shape the package lists, for one that has no resource node.
+     * Not a lesser answer there — plenty do not have one — but for a package
+     * that does, taking any other shape would be picking a part of the model
+     * over the model. */
+    {
+        const PackageResource *shapeResource =
+            packageReaderFindFirstOfType(package, (Unsigned32)PACKAGE_TYPE_SHPE);
+
+        if (shapeResource == NULL_POINTER)
+        {
+            return NULL_POINTER;
+        }
+        return collectShapeParts(search, package, shapeResource, 0U);
+    }
 }
 
 /* The material a part wears, and the texture it paints with.
