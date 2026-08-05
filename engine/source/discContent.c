@@ -232,6 +232,21 @@ static const PackageResource *collectShapeParts(DiscContentSearch *search, const
         }
     }
 
+    if (geometry != NULL_POINTER && search->bindingCount == 0U)
+    {
+        /* Copied out whole. Which primitive wears which material cannot be
+           settled here — the primitives are inside the container, which has not
+           been read yet — and by the time it can be, these bytes are gone. */
+        Unsigned32 binding;
+
+        for (binding = 0U; binding < shape.storedMaterialCount &&
+                           binding < (Unsigned32)SCENEGRAPH_MATERIAL_LIMIT;
+             binding++)
+        {
+            search->bindings[search->bindingCount] = shape.materials[binding];
+            search->bindingCount++;
+        }
+    }
     if (geometry != NULL_POINTER && search->modelName[0] == '\0')
     {
         stringAppend(search->modelName, RESOURCE_NAME_LIMIT, shape.resourceName);
@@ -268,6 +283,7 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     search->materialName[0] = '\0';
     search->partCount = 0U;
     search->partsBeyondRoom = 0U;
+    search->bindingCount = 0U;
     search->shapeReferences = 0U;
     search->shapeReferencesResolved = 0U;
     search->coarserPartsDropped = 0U;
@@ -322,6 +338,84 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
             return NULL_POINTER;
         }
         return collectShapeParts(search, package, shapeResource, 0U);
+    }
+}
+
+/* Which material each primitive wears, and which of them the model is painted
+ * with while it is still painted with one.
+ *
+ * A model's parts are primitives inside one container, not shapes: the torii
+ * gate is a two triangle shadow and two hundred and forty four triangles of
+ * stone, and the shape names a material for each by the primitive's own name.
+ * Taking the first put a sixty-four by thirty-two alpha shadow mask on a stone
+ * gate, which is not a texture bug and not a lookup bug — it is the wrong
+ * question being asked once instead of the right one being asked per part.
+ *
+ * Until the renderer can paint each range separately, the one chosen is the
+ * material of the primitive covering most of the model. That is a compromise
+ * and it is stated as one: the log names every primitive's material, so the
+ * difference between what was chosen and what was wanted is visible. */
+static void chooseMaterialPerPrimitive(DiscContentSearch *search)
+{
+    Unsigned32 primitive;
+    Unsigned32 widest = 0U;
+    Unsigned32 widestIndexCount = 0U;
+
+    search->partCount = 0U;
+    search->partsBeyondRoom = 0U;
+    search->coarserPartsDropped = 0U;
+
+    for (primitive = 0U; primitive < search->mesh.storedPrimitiveCount; primitive++)
+    {
+        const GeometryPrimitive *piece = &search->mesh.primitives[primitive];
+        DiscModelPart *part;
+        Unsigned32 binding;
+
+        if (search->partCount >= (Unsigned32)DISC_CONTENT_PART_LIMIT)
+        {
+            search->partsBeyondRoom++;
+            continue;
+        }
+        part = &search->parts[search->partCount];
+        part->meshName[0] = '\0';
+        part->materialName[0] = '\0';
+        part->shapeName[0] = '\0';
+        part->nodeIndex = search->modelNodeIndex;
+        part->levelOfDetail = 0U;
+        part->firstIndex = piece->firstIndex;
+        part->indexCount = piece->indexCount;
+        stringAppend(part->meshName, RESOURCE_NAME_LIMIT, piece->name);
+
+        for (binding = 0U; binding < search->bindingCount; binding++)
+        {
+            if (stringEquals(search->bindings[binding].primitiveName, piece->name))
+            {
+                stringAppend(part->materialName, RESOURCE_NAME_LIMIT,
+                             search->bindings[binding].materialName);
+                break;
+            }
+        }
+        /* No binding names this primitive. The shape's only material is a
+           guess, but one that is right whenever a model wears a single
+           material, and an empty name would find nothing at all. */
+        if (part->materialName[0] == '\0' && search->bindingCount > 0U)
+        {
+            stringAppend(part->materialName, RESOURCE_NAME_LIMIT,
+                         search->bindings[0].materialName);
+        }
+
+        if (piece->indexCount > widestIndexCount)
+        {
+            widestIndexCount = piece->indexCount;
+            widest = search->partCount;
+        }
+        search->partCount++;
+    }
+
+    if (search->partCount > 0U && search->parts[widest].materialName[0] != '\0')
+    {
+        search->materialName[0] = '\0';
+        stringAppend(search->materialName, RESOURCE_NAME_LIMIT, search->parts[widest].materialName);
     }
 }
 
@@ -582,6 +676,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         }
     }
 
+    chooseMaterialPerPrimitive(search);
     findTextureForMaterial(search, &package);
 
     search->foundInPreferred = search->walkingPreferred;

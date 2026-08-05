@@ -65,6 +65,10 @@ typedef struct DiscModelPart
     char shapeName[RESOURCE_NAME_LIMIT];
     Unsigned32 nodeIndex;
     Unsigned32 levelOfDetail;
+    /* Its range in the mesh's index array, which is what a renderer that paints
+       parts separately will draw. */
+    Unsigned32 firstIndex;
+    Unsigned32 indexCount;
 } DiscModelPart;
 
 typedef struct DiscContentSearch
@@ -116,6 +120,12 @@ typedef struct DiscContentSearch
        and yields one face, so the difference between these two is the whole
        question of where the rest of the body is: in another package, or not
        named at all. */
+    /* What the shape said each primitive wears, kept because the primitives
+       are not known until the container has been read — long after the shape's
+       own bytes have been given back. */
+    Unsigned32 bindingCount;
+    ShapeMaterialBinding bindings[SCENEGRAPH_MATERIAL_LIMIT];
+
     Unsigned32 shapeReferences;
     Unsigned32 shapeReferencesResolved;
     /* Meshes set aside as a coarser copy of one already kept. */

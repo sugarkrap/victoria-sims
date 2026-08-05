@@ -1880,12 +1880,23 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             {
                 stringAppend(message, sizeof(message), " ");
                 stringAppend(message, sizeof(message), discSearch.parts[part].meshName);
+                stringAppend(message, sizeof(message), " (");
+                appendCount(message, sizeof(message), discSearch.parts[part].indexCount / 3U);
+                stringAppend(message, sizeof(message), " triangles)");
                 if (discSearch.parts[part].materialName[0] != '\0')
                 {
                     stringAppend(message, sizeof(message), " wearing ");
                     stringAppend(message, sizeof(message), discSearch.parts[part].materialName);
                 }
                 stringAppend(message, sizeof(message), ";");
+            }
+            /* Which one the whole model is painted with, while it is still
+               painted with one. Naming it beside the others is what makes the
+               compromise visible rather than mysterious. */
+            if (discSearch.partCount > 1U && discSearch.materialName[0] != '\0')
+            {
+                stringAppend(message, sizeof(message), " all painted with ");
+                stringAppend(message, sizeof(message), discSearch.materialName);
             }
             if (discSearch.coarserPartsDropped > 0U)
             {
