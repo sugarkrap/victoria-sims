@@ -102,6 +102,11 @@ typedef struct DiscContentSearch
     ResourceNodeDescription modelTree;
     Boolean modelHasTree;
     Unsigned32 modelNodeIndex;
+    /* Whether the node the part hangs from actually moved it. False for a model
+       whose one node is its root, which is most objects, and true for anything
+       hanging off a skeleton. Reported because a transform that silently does
+       nothing looks exactly like one that was never applied. */
+    Boolean partWasMoved;
 
     /* Every part the model is made of, not only the one being drawn.
      *

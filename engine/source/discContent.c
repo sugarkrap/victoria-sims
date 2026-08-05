@@ -419,6 +419,51 @@ static void chooseMaterialPerPrimitive(DiscContentSearch *search)
     }
 }
 
+/* Moves the mesh to where its node says it belongs.
+ *
+ * A part's vertices are written relative to whatever it hangs from, and where
+ * it hangs from is the transform tree: a head sits at the neck's transform,
+ * which sits at the spine's, and so on to the root. A mesh drawn without that
+ * is drawn at the origin, which for a single part model is invisibly wrong and
+ * for anything assembled is a pile.
+ *
+ * The composer has existed since the tree reader was written and has never
+ * been used for anything. This is its first caller, so the first thing worth
+ * knowing is whether it moves anything at all — an identity transform is the
+ * right answer for a model whose one node is its root, and the wrong answer for
+ * a Sim's head.
+ *
+ * Positions carry the whole transform; normals carry only its rotation, since
+ * translating a direction turns it into a point somewhere else. */
+static void placePartByItsNode(DiscContentSearch *search)
+{
+    static const Real32 identity[16] = { 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                         0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F };
+    Real32 matrix[16];
+    Unsigned32 index;
+
+    search->partWasMoved = BOOLEAN_FALSE;
+    if (!search->modelHasTree)
+    {
+        return;
+    }
+    resourceNodeGetWorldTransform(&search->modelTree, search->modelNodeIndex, matrix);
+
+    for (index = 0U; index < 16U; index++)
+    {
+        if (matrix[index] != identity[index])
+        {
+            search->partWasMoved = BOOLEAN_TRUE;
+            break;
+        }
+    }
+    if (!search->partWasMoved)
+    {
+        return;
+    }
+    geometryMeshApplyTransform(&search->mesh, matrix);
+}
+
 /* The material a part wears, and the texture it paints with.
  *
  * Every hop here is a string. A part wearing "ufocrash_cabin" wants the
@@ -676,6 +721,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
         }
     }
 
+    placePartByItsNode(search);
     chooseMaterialPerPrimitive(search);
     findTextureForMaterial(search, &package);
 

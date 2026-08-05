@@ -1862,6 +1862,13 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message), ", bone ");
                 appendCount(message, sizeof(message), node->boneIdentifier);
             }
+            /* Whether the node the part hangs from actually moved it. A model
+               whose one node is its root is placed at the origin either way,
+               and a transform that silently does nothing looks exactly like one
+               that was never applied. */
+            stringAppend(message, sizeof(message),
+                         discSearch.partWasMoved ? ", which places the part"
+                                                 : ", which leaves the part where it was");
             platformLogMessage(message);
         }
 

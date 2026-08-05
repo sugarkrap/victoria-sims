@@ -627,3 +627,36 @@ void geometryMeshGetBounds(const GeometryMesh *mesh, Real32 *minimum, Real32 *ma
         }
     }
 }
+
+void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix)
+{
+    Unsigned32 vertex;
+
+    if (mesh->positions == NULL_POINTER)
+    {
+        return;
+    }
+    for (vertex = 0U; vertex < mesh->vertexCount; vertex++)
+    {
+        Real32 *point = &mesh->positions[vertex * 3U];
+        Real32 x = point[0];
+        Real32 y = point[1];
+        Real32 z = point[2];
+
+        point[0] = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+        point[1] = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+        point[2] = matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14];
+
+        if (mesh->normals != NULL_POINTER)
+        {
+            Real32 *direction = &mesh->normals[vertex * 3U];
+
+            x = direction[0];
+            y = direction[1];
+            z = direction[2];
+            direction[0] = matrix[0] * x + matrix[4] * y + matrix[8] * z;
+            direction[1] = matrix[1] * x + matrix[5] * y + matrix[9] * z;
+            direction[2] = matrix[2] * x + matrix[6] * y + matrix[10] * z;
+        }
+    }
+}

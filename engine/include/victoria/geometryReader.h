@@ -94,12 +94,17 @@ typedef struct GeometryMesh
     /* The name the resource carries, which is what a CRES refers to. */
     char resourceName[GEOMETRY_NAME_LIMIT];
 
-    /* Three floats per vertex. Never null when the read succeeded. */
-    const Real32 *positions;
+    /* Three floats per vertex. Never null when the read succeeded.
+     *
+     * Not const: the arrays are the caller's arena, and placing a part by its
+     * node's transform rewrites them in place. Declaring them const and casting
+     * it away at the one place that writes would be the same operation with the
+     * warning turned off. */
+    Real32 *positions;
     /* Three per vertex, or null when the mesh carries none. */
-    const Real32 *normals;
+    Real32 *normals;
     /* Two per vertex, or null. */
-    const Real32 *textureCoordinates;
+    Real32 *textureCoordinates;
     Unsigned32 vertexCount;
 
     const Unsigned16 *indices;
@@ -135,5 +140,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
 /* The axis-aligned bounds, for framing a camera on a model whose scale is not
  * known in advance. Writes three floats to each. */
 void geometryMeshGetBounds(const GeometryMesh *mesh, Real32 *minimum, Real32 *maximum);
+
+/* Moves every vertex by a column major four by four, and every normal by its
+   rotation alone — translating a direction would turn it into a point.
+   Rewrites the mesh's arrays, which are the caller's arena. */
+void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix);
 
 #endif
