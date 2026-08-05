@@ -1887,12 +1887,33 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 }
                 stringAppend(message, sizeof(message), ";");
             }
+            if (discSearch.coarserPartsDropped > 0U)
+            {
+                stringAppend(message, sizeof(message), " ");
+                appendCount(message, sizeof(message), discSearch.coarserPartsDropped);
+                stringAppend(message, sizeof(message), " coarser copy(s) set aside;");
+            }
             if (discSearch.partsBeyondRoom > 0U)
             {
                 stringAppend(message, sizeof(message), " and ");
                 appendCount(message, sizeof(message), discSearch.partsBeyondRoom);
                 stringAppend(message, sizeof(message), " with no room to remember them");
             }
+            platformLogMessage(message);
+        }
+
+        /* Where the rest of the model is. A Sim's tree names its body meshes by
+           key, and those keys are not in the file that describes one Sim — they
+           are in the packages the game ships, which are now mounted and
+           indexed. This says how many of them there are to go after. */
+        if (discSearch.shapeReferences > 0U)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: the tree names ");
+            appendCount(message, sizeof(message), discSearch.shapeReferences);
+            stringAppend(message, sizeof(message), " shape(s), ");
+            appendCount(message, sizeof(message), discSearch.shapeReferencesResolved);
+            stringAppend(message, sizeof(message), " of them in this package");
             platformLogMessage(message);
         }
 

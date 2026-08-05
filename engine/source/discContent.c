@@ -122,6 +122,28 @@ static void rememberPart(DiscContentSearch *search, const ShapeDescription *shap
     DiscModelPart *part;
     Unsigned32 which;
 
+    /* A shape names the same mesh several times over, once per level of
+       detail: a face and the same face coarsened for distance. Keeping both
+       would draw the face twice, the second time through the first. The finest
+       is the one with the lowest level number, and a shape that numbers them
+       all the same leaves the first met standing. */
+    for (which = 0U; which < search->partCount; which++)
+    {
+        if (!stringEquals(search->parts[which].shapeName, shape->resourceName))
+        {
+            continue;
+        }
+        if (shape->meshLevelsOfDetail[meshIndex] < search->parts[which].levelOfDetail)
+        {
+            search->parts[which].levelOfDetail = shape->meshLevelsOfDetail[meshIndex];
+            search->parts[which].meshName[0] = '\0';
+            stringAppend(search->parts[which].meshName, RESOURCE_NAME_LIMIT,
+                         shape->meshNames[meshIndex]);
+        }
+        search->coarserPartsDropped++;
+        return;
+    }
+
     if (search->partCount >= (Unsigned32)DISC_CONTENT_PART_LIMIT)
     {
         search->partsBeyondRoom++;
@@ -239,6 +261,9 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
     search->materialName[0] = '\0';
     search->partCount = 0U;
     search->partsBeyondRoom = 0U;
+    search->shapeReferences = 0U;
+    search->shapeReferencesResolved = 0U;
+    search->coarserPartsDropped = 0U;
 
     if (readModelTree(search, package))
     {
@@ -253,11 +278,16 @@ static const PackageResource *findGeometryThroughScenegraph(DiscContentSearch *s
             {
                 continue;
             }
+            search->shapeReferences++;
             shapeResource = scenegraphFindResource(package, &search->modelTree.nodes[index].shapeKey);
             if (shapeResource == NULL_POINTER)
             {
+                /* Named, but not here. Nothing is wrong with the reference —
+                   a Sim's body meshes live in the packages the game ships,
+                   not in the file that describes one Sim. */
                 continue;
             }
+            search->shapeReferencesResolved++;
             fromThisShape = collectShapeParts(search, package, shapeResource, index);
             if (fromThisShape != NULL_POINTER && geometry == NULL_POINTER)
             {

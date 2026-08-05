@@ -100,6 +100,15 @@ typedef struct DiscContentSearch
      * a thing to guess at. */
     Unsigned32 partCount;
     Unsigned32 partsBeyondRoom;
+    /* How many nodes of the tree name a shape, against how many of those name
+       one this package holds. A Sim's tree has a hundred and twenty six nodes
+       and yields one face, so the difference between these two is the whole
+       question of where the rest of the body is: in another package, or not
+       named at all. */
+    Unsigned32 shapeReferences;
+    Unsigned32 shapeReferencesResolved;
+    /* Meshes set aside as a coarser copy of one already kept. */
+    Unsigned32 coarserPartsDropped;
     DiscModelPart parts[DISC_CONTENT_PART_LIMIT];
 
     /* The material the model's first part wears, and the texture that material
