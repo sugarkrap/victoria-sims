@@ -197,6 +197,7 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
     mesh->primitiveCount = 0U;
     mesh->storedPrimitiveCount = 0U;
     mesh->componentCount = 0U;
+    mesh->unusedElementCount = 0U;
     mesh->versionMark = 0U;
     mesh->containerVersion = 0U;
     mesh->elementCount = 0U;
@@ -368,6 +369,31 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
             {
                 components[index].texture = &spans[which];
                 anyTextures = BOOLEAN_TRUE;
+            }
+            else
+            {
+                /* Met and not used. Recorded once per kind rather than once per
+                   component, so a model with several components does not report
+                   the same element a dozen times. */
+                Unsigned32 seen;
+                Boolean already = BOOLEAN_FALSE;
+
+                for (seen = 0U; seen < mesh->unusedElementCount; seen++)
+                {
+                    if (mesh->unusedElements[seen] == spans[which].identifier &&
+                        mesh->unusedElementFormats[seen] == (Unsigned32)spans[which].format)
+                    {
+                        already = BOOLEAN_TRUE;
+                        break;
+                    }
+                }
+                if (!already && mesh->unusedElementCount < (Unsigned32)GEOMETRY_UNUSED_ELEMENT_LIMIT)
+                {
+                    mesh->unusedElements[mesh->unusedElementCount] = spans[which].identifier;
+                    mesh->unusedElementFormats[mesh->unusedElementCount] =
+                        (Unsigned32)spans[which].format;
+                    mesh->unusedElementCount++;
+                }
             }
         }
     }

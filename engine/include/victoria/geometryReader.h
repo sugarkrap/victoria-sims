@@ -24,6 +24,9 @@
  * buffer. The buffer's floats are not aligned, and reading an unaligned float
  * is a fault on ARMv5 rather than a slow path. */
 
+/* Distinct unused element kinds remembered per mesh. */
+#define GEOMETRY_UNUSED_ELEMENT_LIMIT 12U
+
 #define GEOMETRY_ELEMENT_POSITION 0x5B830781UL
 #define GEOMETRY_ELEMENT_NORMAL 0x3B83078BUL
 #define GEOMETRY_ELEMENT_TEXTURE_COORDINATE 0xBB8307ABUL
@@ -122,6 +125,17 @@ typedef struct GeometryMesh
     /* How many components the vertices were merged from, so a caller can tell a
      * one piece model from an assembled one. */
     Unsigned32 componentCount;
+
+    /* Element kinds met and not used, with the format each was in.
+     *
+     * Bone assignments and weights are in here, and this reader has never
+     * looked at them — the identifiers are not written down anywhere it can
+     * check, and guessing one is how a reader ends up confidently reading
+     * weights out of a tangent. So it reports what it met instead, and the
+     * disc says which numbers are real. */
+    Unsigned32 unusedElements[GEOMETRY_UNUSED_ELEMENT_LIMIT];
+    Unsigned32 unusedElementFormats[GEOMETRY_UNUSED_ELEMENT_LIMIT];
+    Unsigned32 unusedElementCount;
 
     /* What the resource said about itself, filled in as soon as it is known and
        left set when the read then fails. A refusal that cannot say which

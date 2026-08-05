@@ -1996,6 +1996,27 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             platformLogMessage(message);
         }
 
+        /* Element kinds the reader met and did not use. Bone assignments and
+           weights are among them, and their identifiers are not written down
+           anywhere this can check — so the disc is asked rather than guessed
+           at, which is the only way the next step starts from a real number. */
+        if (discSearch.mesh.unusedElementCount > 0U)
+        {
+            Unsigned32 unused;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: vertex elements met and not used —");
+            for (unused = 0U; unused < discSearch.mesh.unusedElementCount; unused++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                appendHexadecimal(message, sizeof(message), discSearch.mesh.unusedElements[unused]);
+                stringAppend(message, sizeof(message), " as format ");
+                appendCount(message, sizeof(message), discSearch.mesh.unusedElementFormats[unused]);
+                stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+        }
+
         /* Each part by name. A model that arrives as one silhouette is hard to
            tell from a model that arrived as one part, and the difference
            matters as soon as materials do. */
