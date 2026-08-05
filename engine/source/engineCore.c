@@ -411,6 +411,44 @@ static Boolean simIndexBuilding = BOOLEAN_FALSE;
 static Unsigned32 simPartCursor = 0U;
 static Unsigned32 simPartsFound = 0U;
 static Unsigned32 simPartFileIndex = 0U;
+static Boolean saidWhatTheDiscHas = BOOLEAN_FALSE;
+
+/* Where the assembly has got to.
+ *
+ * It has to be resumable, one read at a time, because the browser's disc store
+ * holds exactly one delivered range and consuming it clears the hold. An
+ * assembly that re-read its whole chain on every attempt could never converge:
+ * it would read the tree, pend on the shape, come back, find the tree no longer
+ * held, pend on that instead, and alternate forever. That is the lesson the
+ * skin search already had written on it — exactly one read per step — and this
+ * was built doing thirteen.
+ *
+ * So each hop below performs at most one read and records what it learned. The
+ * structures it parses into outlive the bytes they came from, which is what
+ * lets the bytes go back to the arena between hops. */
+typedef enum SimHop
+{
+    SIM_HOP_TREE = 0,
+    SIM_HOP_SHAPE,
+    SIM_HOP_NODE,
+    SIM_HOP_CONTAINER,
+    SIM_HOP_MERGE,
+    SIM_HOP_SKELETON,
+    SIM_HOP_MATERIAL,
+    SIM_HOP_TEXTURE,
+    SIM_HOP_TOP_LEVEL,
+    SIM_HOP_FINISHED
+} SimHop;
+
+static SimHop simHop = SIM_HOP_TREE;
+static Unsigned32 simHopPart = 0U;
+static Unsigned32 simGathered = 0U;
+static ResourceNodeDescription simHopTree;
+static ShapeDescription simHopShape;
+static const ResourceIndexEntry *simHopEntry = NULL_POINTER;
+static TextureDescription simHopTexture;
+static char simHopTextureName[RESOURCE_NAME_LIMIT];
+static Boolean simHopOverrode = BOOLEAN_FALSE;
 
 /* The three that carry geometry. The skeleton names no shape at all — it is
    what the others hang on — so it is probed for and then not drawn. */
@@ -969,250 +1007,6 @@ static Boolean fetchLargestLevel(char *message, MemorySize messageCapacity)
  * answers is whether the three fit together into something person-shaped — and
  * if they do not, everything built on top of them would have been built on a
  * mistake. */
-/* Finds the texture one part's material names, decodes it, and gives it to that
- * part alone.
- *
- * Every hop is a string, exactly as the single-texture path already found: a
- * material named by a shape wants "<name>_txmt", which names a texture, which
- * lives in "<name>_txtr". Nothing is numbered, so a miss here is a name that did
- * not match rather than a file that would not read.
- *
- * Largest levels held in a LIFO are not followed. The level in the TXTR itself
- * is smaller — 128 across where the top is 512 — so a part painted from it is
- * the right image at the wrong resolution, which is a visible shortfall and not
- * a wrong texture. Following the reference is worth doing and is not done here.
- *
- * False while a read is still on its way. */
-static Boolean paintPart(Unsigned32 partIndex, const char *materialName, const char *textureStem)
-{
-    char wanted[RESOURCE_NAME_LIMIT];
-    char chosen[RESOURCE_NAME_LIMIT];
-    const ResourceIndexEntry *entry;
-    Unsigned8 *bytes;
-    MemorySize size;
-    MaterialDescription material;
-    TextureDescription texture;
-    char message[256];
-    MemorySize marker;
-    Boolean overridden = BOOLEAN_FALSE;
-
-    if (materialName == NULL_POINTER || materialName[0] == '\0')
-    {
-        return BOOLEAN_TRUE;
-    }
-
-    materialBuildResourceName(wanted, sizeof(wanted), materialName, "_txmt");
-    entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT, wanted);
-    if (entry == NULL_POINTER)
-    {
-        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT, materialName);
-    }
-    if (entry == NULL_POINTER)
-    {
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), materialName);
-        stringAppend(message, sizeof(message), " — no material of that name on the disc");
-        platformLogMessage(message);
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    if (bytes == NULL_POINTER || materialRead(&material, bytes, size) != MATERIAL_READ_OK ||
-        material.baseTextureName[0] == '\0')
-    {
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), materialName);
-        stringAppend(message, sizeof(message), " — read, but it names no base texture");
-        platformLogMessage(message);
-        return BOOLEAN_TRUE;
-    }
-
-    chosen[0] = '\0';
-    stringAppend(chosen, sizeof(chosen), material.baseTextureName);
-
-    /* The override, when this part has one and the disc actually carries it. */
-    if (textureStem != NULL_POINTER && textureStem[0] != '\0' && simSkinTone[0] != '\0')
-    {
-        char preferred[RESOURCE_NAME_LIMIT];
-
-        preferred[0] = '\0';
-        stringAppend(preferred, sizeof(preferred), textureStem);
-        stringAppend(preferred, sizeof(preferred), "-");
-        stringAppend(preferred, sizeof(preferred), simSkinTone);
-        materialBuildResourceName(wanted, sizeof(wanted), preferred, "_txtr");
-        if (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted) !=
-            NULL_POINTER)
-        {
-            chosen[0] = '\0';
-            stringAppend(chosen, sizeof(chosen), preferred);
-            overridden = BOOLEAN_TRUE;
-        }
-        else
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine:   part ");
-            appendCount(message, sizeof(message), partIndex);
-            stringAppend(message, sizeof(message), " would rather wear ");
-            stringAppend(message, sizeof(message), preferred);
-            stringAppend(message, sizeof(message),
-                         ", which this disc has not got — keeping what its shape bound");
-            platformLogMessage(message);
-        }
-    }
-
-    materialBuildResourceName(wanted, sizeof(wanted), chosen, "_txtr");
-    entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
-    if (entry == NULL_POINTER)
-    {
-        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, chosen);
-    }
-    if (entry == NULL_POINTER)
-    {
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), materialName);
-        stringAppend(message, sizeof(message), " names ");
-        stringAppend(message, sizeof(message), chosen);
-        stringAppend(message, sizeof(message), ", which is nowhere on this disc");
-        platformLogMessage(message);
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    if (bytes == NULL_POINTER || textureReaderOpen(&texture, bytes, size) != TEXTURE_READ_OK)
-    {
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), chosen);
-        stringAppend(message, sizeof(message), " — would not read");
-        platformLogMessage(message);
-        return BOOLEAN_TRUE;
-    }
-
-    /* The top level, when the texture kept it somewhere else.
-     *
-     * A TXTR carries the smaller levels and names a LIFO holding the largest,
-     * so a part painted from the TXTR alone is the right image at a quarter of
-     * the width — the body came out 256 across where 512 exists. The checks are
-     * the ones the single-texture path already makes: refuse a level that is no
-     * bigger, and refuse one whose length is not what those dimensions cost in
-     * that format, because a level carries no format of its own and a mismatched
-     * one decodes into noise. */
-    if (texture.largestIsElsewhere && texture.lifoName[0] != '\0')
-    {
-        const ResourceIndexEntry *top =
-            resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO, texture.lifoName);
-
-        if (top == NULL_POINTER)
-        {
-            materialBuildResourceName(wanted, sizeof(wanted), texture.lifoName, "_lifo");
-            top = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
-        }
-        if (top != NULL_POINTER)
-        {
-            Unsigned8 *topBytes;
-            MemorySize topSize;
-
-            if (!readIndexedResource(top, &topBytes, &topSize))
-            {
-                return BOOLEAN_FALSE;
-            }
-            if (topBytes != NULL_POINTER)
-            {
-                TextureLevel largest;
-
-                if (textureReaderOpenLevel(&largest, topBytes, topSize) == TEXTURE_READ_OK &&
-                    largest.bytes != NULL_POINTER && largest.width > texture.levelWidth &&
-                    largest.byteCount == textureFormatGetLevelBytes(texture.format, largest.width,
-                                                                    largest.height))
-                {
-                    texture.bytes = largest.bytes;
-                    texture.byteCount = largest.byteCount;
-                    texture.levelWidth = largest.width;
-                    texture.levelHeight = largest.height;
-                    texture.largestIsElsewhere = BOOLEAN_FALSE;
-                }
-            }
-        }
-    }
-
-    marker = memoryArenaGetMarker(globalArena);
-    {
-        MemorySize wantedBytes =
-            textureDecodeGetRequiredBytes(texture.levelWidth, texture.levelHeight);
-        Unsigned8 *decoded = (Unsigned8 *)memoryArenaAllocate(globalArena, wantedBytes, 4UL);
-        TextureDecodeResult decodeResult = TEXTURE_DECODE_DESTINATION_TOO_SMALL;
-
-        if (decoded != NULL_POINTER)
-        {
-            decodeResult = textureDecodeLevel(decoded, wantedBytes, texture.bytes,
-                                              texture.byteCount, texture.format,
-                                              texture.levelWidth, texture.levelHeight);
-        }
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   part ");
-        appendCount(message, sizeof(message), partIndex);
-        stringAppend(message, sizeof(message), " painted with ");
-        stringAppend(message, sizeof(message), chosen);
-        if (overridden)
-        {
-            stringAppend(message, sizeof(message), " (overriding the ");
-            stringAppend(message, sizeof(message), material.baseTextureName);
-            stringAppend(message, sizeof(message), " its shape bound)");
-        }
-        if (decodeResult == TEXTURE_DECODE_OK)
-        {
-            renderSetPartTexture(partIndex, decoded, (Unsigned32)texture.levelWidth,
-                                 (Unsigned32)texture.levelHeight);
-            /* The tone is the last hyphenated piece of a texture's name, and it
-               is taken from a part wearing what it was bound rather than from
-               one already overridden — otherwise the override would be deriving
-               its own input. */
-            if (!overridden && simSkinTone[0] == '\0')
-            {
-                MemorySize at = stringLength(chosen);
-
-                while (at > 0UL && chosen[at - 1UL] != '-')
-                {
-                    at -= 1UL;
-                }
-                if (at > 0UL)
-                {
-                    stringAppend(simSkinTone, sizeof(simSkinTone), &chosen[at]);
-                }
-            }
-            stringAppend(message, sizeof(message), " at ");
-            appendCount(message, sizeof(message), (Unsigned32)texture.levelWidth);
-            stringAppend(message, sizeof(message), "x");
-            appendCount(message, sizeof(message), (Unsigned32)texture.levelHeight);
-            if (texture.largestIsElsewhere)
-            {
-                stringAppend(message, sizeof(message), ", its top level left in ");
-                stringAppend(message, sizeof(message), texture.lifoName);
-            }
-            else if (texture.lifoName[0] != '\0')
-            {
-                stringAppend(message, sizeof(message), ", its top level followed out of ");
-                stringAppend(message, sizeof(message), texture.lifoName);
-            }
-        }
-        else
-        {
-            stringAppend(message, sizeof(message), " — which would not decode: ");
-            stringAppend(message, sizeof(message), textureDecodeResultGetName(decodeResult));
-        }
-        platformLogMessage(message);
-    }
-    memoryArenaRewindToMarker(globalArena, marker);
-    return BOOLEAN_TRUE;
-}
-
 typedef enum SimAssembly
 {
     SIM_ASSEMBLY_PENDING = 0,
@@ -1220,416 +1014,496 @@ typedef enum SimAssembly
     SIM_ASSEMBLY_DONE
 } SimAssembly;
 
-/* Reads one part's chain: a name to a tree, the tree's shape reference to a
- * shape, the shape's mesh name to a container.
- *
- * Every hop is looked up across the whole disc rather than inside one package,
- * because that is where the parts actually are. Returns false only for a read
- * the store has not answered; a hop that resolves to nothing is reported
- * through result and is not a reason to retry. */
-static Boolean readSimPart(const char *resourceName, GeometryMesh *mesh, char *materialName,
-                           MemorySize materialCapacity, DiscModelResult *result)
+/* Says why a part did not resolve, in the caller's voice rather than a code. */
+static void reportSimPart(Unsigned32 partIndex, DiscModelResult result)
 {
-    static ResourceNodeDescription tree;
-    const ResourceIndexEntry *entry;
-    Unsigned8 *bytes;
-    MemorySize size;
-    ShapeDescription shape;
-    Unsigned32 index;
-    Boolean anyShapeNode = BOOLEAN_FALSE;
+    char message[256];
 
-    *result = DISC_MODEL_NO_TREE;
-    if (materialName != NULL_POINTER && materialCapacity > 0UL)
-    {
-        materialName[0] = '\0';
-    }
-    entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, resourceName);
-    if (entry == NULL_POINTER)
-    {
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    if (bytes == NULL_POINTER || resourceNodeRead(&tree, bytes, size) != RESOURCE_NODE_OK)
-    {
-        *result = DISC_MODEL_TREE_UNREADABLE;
-        return BOOLEAN_TRUE;
-    }
-
-    /* The first shape reference the tree carries that the disc can answer. */
-    entry = NULL_POINTER;
-    for (index = 0U; index < tree.storedNodeCount && entry == NULL_POINTER; index++)
-    {
-        if (!tree.nodes[index].hasShape)
-        {
-            continue;
-        }
-        anyShapeNode = BOOLEAN_TRUE;
-        /* By instance alone: the key's group says which collection the shape
-           was filed under, and the instance words are its name hashed, which
-           identify it wherever it was filed. */
-        entry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_SHPE,
-                                  tree.nodes[index].shapeKey.instanceIdentifier,
-                                  tree.nodes[index].shapeKey.instanceIdentifierHigh);
-    }
-    if (entry == NULL_POINTER)
-    {
-        *result = anyShapeNode ? DISC_MODEL_SHAPE_NOT_IN_PACKAGE : DISC_MODEL_NO_SHAPE_NODE;
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    if (bytes == NULL_POINTER || scenegraphReadShape(&shape, bytes, size) != SCENEGRAPH_READ_OK)
-    {
-        *result = DISC_MODEL_SHAPE_UNREADABLE;
-        return BOOLEAN_TRUE;
-    }
-
-    /* A shape does not name a container. It names a geometry NODE, and that
-       node references the container — one more hop, and the one this went
-       looking for a container by name without and found nothing. */
-    entry = NULL_POINTER;
-    for (index = 0U; index < shape.storedMeshCount && entry == NULL_POINTER; index++)
-    {
-        if (shape.meshNames[index][0] == '\0')
-        {
-            continue;
-        }
-        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_GMND,
-                                       shape.meshNames[index]);
-    }
-    if (entry == NULL_POINTER)
-    {
-        *result = DISC_MODEL_NO_GEOMETRY_NAMED;
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    {
-        GeometryNodeDescription node;
-
-        if (bytes == NULL_POINTER ||
-            scenegraphReadGeometryNode(&node, bytes, size) != SCENEGRAPH_READ_OK ||
-            !node.hasGeometry)
-        {
-            *result = DISC_MODEL_NO_GEOMETRY_NAMED;
-            return BOOLEAN_TRUE;
-        }
-        entry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_GMDC,
-                                  node.geometryKey.instanceIdentifier,
-                                  node.geometryKey.instanceIdentifierHigh);
-    }
-    if (entry == NULL_POINTER)
-    {
-        *result = DISC_MODEL_GEOMETRY_UNREADABLE;
-        return BOOLEAN_TRUE;
-    }
-    if (!readIndexedResource(entry, &bytes, &size))
-    {
-        return BOOLEAN_FALSE;
-    }
-    if (bytes == NULL_POINTER ||
-        geometryReaderOpen(mesh, bytes, size, globalArena) != GEOMETRY_READ_OK)
-    {
-        *result = DISC_MODEL_GEOMETRY_UNREADABLE;
-        return BOOLEAN_TRUE;
-    }
-
-    /* Which material this part wears, matched by the primitive's own name.
-     *
-     * A shape binds materials to primitives BY NAME, not by position, and it
-     * lists more of them than the part has parts: a face shape carries the
-     * face, the brows, the eyes and the lips. Taking the first binding painted
-     * this Sim's whole face with a bushy brown eyebrow, which is the mistake
-     * rememberPart in discContent.c already had written down and this went and
-     * made anyway. The name is only knowable once the container has been read,
-     * which is why the match happens here and not where the shape was. */
-    if (materialName != NULL_POINTER && mesh->storedPrimitiveCount > 0U)
-    {
-        Unsigned32 binding;
-
-        /* What the two sides actually spell, every time and not only on a
-           miss. Three runs were spent inferring this from which texture came
-           out; one line of it would have answered the first. */
-        {
-            char note[448];
-            Unsigned32 shown;
-
-            note[0] = '\0';
-            stringAppend(note, sizeof(note), "engine:   ");
-            stringAppend(note, sizeof(note), resourceName);
-            stringAppend(note, sizeof(note), " primitive \"");
-            stringAppend(note, sizeof(note), mesh->primitives[0].name);
-            stringAppend(note, sizeof(note), "\" of ");
-            appendCount(note, sizeof(note), mesh->storedPrimitiveCount);
-            stringAppend(note, sizeof(note), "; shape names ");
-            appendCount(note, sizeof(note), shape.storedMeshCount);
-            stringAppend(note, sizeof(note), " mesh(es)");
-            for (shown = 0U; shown < shape.storedMeshCount && shown < 4U; shown++)
-            {
-                stringAppend(note, sizeof(note), " \"");
-                stringAppend(note, sizeof(note), shape.meshNames[shown]);
-                stringAppend(note, sizeof(note), "\"");
-            }
-            stringAppend(note, sizeof(note), ", binds");
-            for (shown = 0U; shown < shape.storedMaterialCount && shown < 4U; shown++)
-            {
-                stringAppend(note, sizeof(note), " \"");
-                stringAppend(note, sizeof(note), shape.materials[shown].primitiveName);
-                stringAppend(note, sizeof(note), "\"->");
-                stringAppend(note, sizeof(note), shape.materials[shown].materialName);
-            }
-            platformLogMessage(note);
-        }
-
-        for (binding = 0U; binding < shape.storedMaterialCount; binding++)
-        {
-            /* Both names must actually be names. An unnamed primitive and an
-               unnamed binding compare equal, which is not a match — it is two
-               blanks agreeing, and it silently hands the part whichever binding
-               happens to be first. */
-            if (mesh->primitives[0].name[0] == '\0' ||
-                shape.materials[binding].primitiveName[0] == '\0')
-            {
-                continue;
-            }
-            if (stringEqualsIgnoringCase(shape.materials[binding].primitiveName,
-                                         mesh->primitives[0].name))
-            {
-                stringAppend(materialName, materialCapacity,
-                             shape.materials[binding].materialName);
-                break;
-            }
-        }
-        if (materialName[0] == '\0')
-        {
-            /* No binding named this primitive. Say so, and say what the two
-               sides actually spell — a fallback that quietly takes the first
-               binding is how this Sim's face came to be painted with an
-               eyebrow, and a silent guess is exactly what hid it. */
-            char note[384];
-            Unsigned32 shown;
-
-            note[0] = '\0';
-            stringAppend(note, sizeof(note), "engine:   no material bound to primitive \"");
-            stringAppend(note, sizeof(note), mesh->primitives[0].name);
-            stringAppend(note, sizeof(note), "\"; the shape binds");
-            for (shown = 0U; shown < shape.storedMaterialCount && shown < 6U; shown++)
-            {
-                stringAppend(note, sizeof(note), " \"");
-                stringAppend(note, sizeof(note), shape.materials[shown].primitiveName);
-                stringAppend(note, sizeof(note), "\"");
-            }
-            platformLogMessage(note);
-            if (shape.storedMaterialCount > 0U)
-            {
-                stringAppend(materialName, materialCapacity, shape.materials[0].materialName);
-            }
-        }
-    }
-    *result = DISC_MODEL_OK;
-    return BOOLEAN_TRUE;
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   ");
+    stringAppend(message, sizeof(message), simDrawnPartNames[partIndex]);
+    stringAppend(message, sizeof(message), " — ");
+    stringAppend(message, sizeof(message), discModelResultGetName(result));
+    platformLogMessage(message);
 }
 
-/* Reads the three parts a Sim is drawn from and joins them into one model.
- *
- * Nothing is skinned here and nothing is painted per part yet. What this
- * answers is whether the three fit together into something person-shaped — and
- * if they do not, everything built on top of them would rest on a mistake. */
-static SimAssembly assembleTheSim(void)
+/* Decodes whatever level is in hand and gives it to the part, then moves on. */
+static SimAssembly finishThePart(MemorySize marker)
 {
-    static GeometryMesh whole;
-    const GeometryMesh *parts[SIM_DRAWN_PART_COUNT];
-    MemorySize marker = memoryArenaGetMarker(globalArena);
-    Unsigned32 gathered = 0U;
-    Unsigned32 which;
-    char message[512];
+    char message[256];
+    MemorySize wantedBytes =
+        textureDecodeGetRequiredBytes(simHopTexture.levelWidth, simHopTexture.levelHeight);
+    MemorySize stage = memoryArenaGetMarker(globalArena);
+    Unsigned8 *decoded = (Unsigned8 *)memoryArenaAllocate(globalArena, wantedBytes, 4UL);
+    TextureDecodeResult decodeResult = TEXTURE_DECODE_DESTINATION_TOO_SMALL;
 
-    for (which = 0U; which < SIM_DRAWN_PART_COUNT; which++)
+    (void)marker;
+    if (decoded != NULL_POINTER)
     {
-        DiscModelResult chain;
-
-        if (!readSimPart(simDrawnPartNames[which], &simParts[which], simPartMaterials[which],
-                         RESOURCE_NAME_LIMIT, &chain))
+        decodeResult = textureDecodeLevel(decoded, wantedBytes, simHopTexture.bytes,
+                                          simHopTexture.byteCount, simHopTexture.format,
+                                          simHopTexture.levelWidth, simHopTexture.levelHeight);
+    }
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   part ");
+    appendCount(message, sizeof(message), simHopPart);
+    stringAppend(message, sizeof(message), " painted with ");
+    stringAppend(message, sizeof(message), simHopTextureName);
+    if (simHopOverrode)
+    {
+        stringAppend(message, sizeof(message), " (overriding what its shape bound)");
+    }
+    if (decodeResult == TEXTURE_DECODE_OK)
+    {
+        renderSetPartTexture(simHopPart, decoded, (Unsigned32)simHopTexture.levelWidth,
+                             (Unsigned32)simHopTexture.levelHeight);
+        stringAppend(message, sizeof(message), " at ");
+        appendCount(message, sizeof(message), (Unsigned32)simHopTexture.levelWidth);
+        stringAppend(message, sizeof(message), "x");
+        appendCount(message, sizeof(message), (Unsigned32)simHopTexture.levelHeight);
+        /* The tone comes from a part wearing what it was bound, never from one
+           already overridden, or the override would derive its own input. */
+        if (!simHopOverrode && simSkinTone[0] == '\0')
         {
-            /* The store has not answered. Everything read so far goes back and
-               the whole chain is walked again, which costs the reads already
-               done and keeps the arena honest. */
+            MemorySize at = stringLength(simHopTextureName);
+
+            while (at > 0UL && simHopTextureName[at - 1UL] != '-')
+            {
+                at -= 1UL;
+            }
+            if (at > 0UL)
+            {
+                stringAppend(simSkinTone, sizeof(simSkinTone), &simHopTextureName[at]);
+            }
+        }
+    }
+    else
+    {
+        stringAppend(message, sizeof(message), " — which would not decode: ");
+        stringAppend(message, sizeof(message), textureDecodeResultGetName(decodeResult));
+    }
+    platformLogMessage(message);
+    memoryArenaRewindToMarker(globalArena, stage);
+    simHopPart++;
+    simHop = SIM_HOP_MATERIAL;
+    return SIM_ASSEMBLY_PENDING;
+}
+
+/* The painting hops: a material, then its texture, then the top level that
+   texture kept somewhere else. One read each, like everything else here. */
+static SimAssembly stepThePaint(MemorySize marker)
+{
+    char wanted[RESOURCE_NAME_LIMIT];
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    if (simHopPart >= simGathered)
+    {
+        simHop = SIM_HOP_FINISHED;
+        return SIM_ASSEMBLY_DONE;
+    }
+
+    if (simHop == SIM_HOP_MATERIAL)
+    {
+        if (simPartMaterials[simHopPart][0] == '\0')
+        {
+            simHopPart++;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        if (simHopEntry == NULL_POINTER)
+        {
+            materialBuildResourceName(wanted, sizeof(wanted), simPartMaterials[simHopPart],
+                                      "_txmt");
+            simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT, wanted);
+            if (simHopEntry == NULL_POINTER)
+            {
+                simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT,
+                                                     simPartMaterials[simHopPart]);
+            }
+            if (simHopEntry == NULL_POINTER)
+            {
+                simHopPart++;
+                return SIM_ASSEMBLY_PENDING;
+            }
+        }
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
             memoryArenaRewindToMarker(globalArena, marker);
             return SIM_ASSEMBLY_PENDING;
         }
+        simHopEntry = NULL_POINTER;
+        simHopTextureName[0] = '\0';
+        simHopOverrode = BOOLEAN_FALSE;
+        {
+            MaterialDescription material;
 
+            if (bytes != NULL_POINTER && materialRead(&material, bytes, size) == MATERIAL_READ_OK &&
+                material.baseTextureName[0] != '\0')
+            {
+                stringAppend(simHopTextureName, sizeof(simHopTextureName),
+                             material.baseTextureName);
+            }
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+        if (simHopTextureName[0] == '\0')
+        {
+            simHopPart++;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        /* The override, when this part has one and the disc carries it. */
+        if (simPartTextureStems[simHopPart][0] != '\0' && simSkinTone[0] != '\0')
+        {
+            char preferred[RESOURCE_NAME_LIMIT];
+
+            preferred[0] = '\0';
+            stringAppend(preferred, sizeof(preferred), simPartTextureStems[simHopPart]);
+            stringAppend(preferred, sizeof(preferred), "-");
+            stringAppend(preferred, sizeof(preferred), simSkinTone);
+            materialBuildResourceName(wanted, sizeof(wanted), preferred, "_txtr");
+            if (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted) !=
+                NULL_POINTER)
+            {
+                simHopTextureName[0] = '\0';
+                stringAppend(simHopTextureName, sizeof(simHopTextureName), preferred);
+                simHopOverrode = BOOLEAN_TRUE;
+            }
+        }
+        materialBuildResourceName(wanted, sizeof(wanted), simHopTextureName, "_txtr");
+        simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
+        if (simHopEntry == NULL_POINTER)
+        {
+            simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXTR,
+                                                 simHopTextureName);
+        }
+        if (simHopEntry == NULL_POINTER)
+        {
+            simHopPart++;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHop = SIM_HOP_TEXTURE;
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    if (simHop == SIM_HOP_TEXTURE)
+    {
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = NULL_POINTER;
+        /* Not rewound: the description points into these bytes until the level
+           is decoded out of them. */
+        if (bytes == NULL_POINTER ||
+            textureReaderOpen(&simHopTexture, bytes, size) != TEXTURE_READ_OK)
+        {
+            simHopPart++;
+            simHop = SIM_HOP_MATERIAL;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        if (simHopTexture.largestIsElsewhere && simHopTexture.lifoName[0] != '\0')
+        {
+            simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
+                                                 simHopTexture.lifoName);
+            if (simHopEntry == NULL_POINTER)
+            {
+                materialBuildResourceName(wanted, sizeof(wanted), simHopTexture.lifoName, "_lifo");
+                simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
+                                                     wanted);
+            }
+            if (simHopEntry != NULL_POINTER)
+            {
+                simHop = SIM_HOP_TOP_LEVEL;
+                return SIM_ASSEMBLY_PENDING;
+            }
+        }
+        return finishThePart(marker);
+    }
+
+    /* SIM_HOP_TOP_LEVEL */
+    if (!readIndexedResource(simHopEntry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+    simHopEntry = NULL_POINTER;
+    if (bytes != NULL_POINTER)
+    {
+        TextureLevel largest;
+
+        /* A level carries no format of its own, so the only check available is
+           whether its length is what those dimensions cost in the format the
+           texture that named it owns. One that fails decodes into noise. */
+        if (textureReaderOpenLevel(&largest, bytes, size) == TEXTURE_READ_OK &&
+            largest.bytes != NULL_POINTER && largest.width > simHopTexture.levelWidth &&
+            largest.byteCount == textureFormatGetLevelBytes(simHopTexture.format, largest.width,
+                                                            largest.height))
+        {
+            simHopTexture.bytes = largest.bytes;
+            simHopTexture.byteCount = largest.byteCount;
+            simHopTexture.levelWidth = largest.width;
+            simHopTexture.levelHeight = largest.height;
+        }
+    }
+    return finishThePart(marker);
+}
+
+/* One hop of the assembly, and at most one read.
+ *
+ * Returns PENDING whenever a read has not been answered, having given the arena
+ * back to where that hop began — so an attempt costs the same whether it is the
+ * first or the fiftieth. Nothing is re-read, because each hop records what it
+ * learned before the next one starts. */
+static SimAssembly stepTheSim(void)
+{
+    static GeometryMesh whole;
+    MemorySize marker = memoryArenaGetMarker(globalArena);
+    Unsigned8 *bytes;
+    MemorySize size;
+    char message[512];
+    Unsigned32 index;
+
+    switch (simHop)
+    {
+    case SIM_HOP_TREE:
+        if (simHopPart >= SIM_DRAWN_PART_COUNT)
+        {
+            simHop = SIM_HOP_MERGE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES,
+                                             simDrawnPartNames[simHopPart]);
+        if (simHopEntry == NULL_POINTER)
+        {
+            simHopPart++;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = NULL_POINTER;
+        if (bytes != NULL_POINTER &&
+            resourceNodeRead(&simHopTree, bytes, size) == RESOURCE_NODE_OK)
+        {
+            for (index = 0U; index < simHopTree.storedNodeCount; index++)
+            {
+                if (!simHopTree.nodes[index].hasShape)
+                {
+                    continue;
+                }
+                /* By instance alone: a key's group says which collection the
+                   shape was filed under, and the instance words are its name
+                   hashed, which identify it wherever it was filed. */
+                simHopEntry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_SHPE,
+                                                simHopTree.nodes[index].shapeKey.instanceIdentifier,
+                                                simHopTree.nodes[index]
+                                                    .shapeKey.instanceIdentifierHigh);
+                if (simHopEntry != NULL_POINTER)
+                {
+                    break;
+                }
+            }
+        }
+        /* The tree is a structure of its own now, so its bytes can go. */
+        memoryArenaRewindToMarker(globalArena, marker);
+        simHop = (simHopEntry != NULL_POINTER) ? SIM_HOP_SHAPE : SIM_HOP_TREE;
+        if (simHopEntry == NULL_POINTER)
+        {
+            reportSimPart(simHopPart, DISC_MODEL_SHAPE_NOT_IN_PACKAGE);
+            simHopPart++;
+        }
+        return SIM_ASSEMBLY_PENDING;
+
+    case SIM_HOP_SHAPE:
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = NULL_POINTER;
+        if (bytes != NULL_POINTER &&
+            scenegraphReadShape(&simHopShape, bytes, size) == SCENEGRAPH_READ_OK)
+        {
+            /* A shape does not name a container. It names a geometry node, and
+               that node references the container. */
+            for (index = 0U; index < simHopShape.storedMeshCount && simHopEntry == NULL_POINTER;
+                 index++)
+            {
+                if (simHopShape.meshNames[index][0] == '\0')
+                {
+                    continue;
+                }
+                simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_GMND,
+                                                     simHopShape.meshNames[index]);
+            }
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+        if (simHopEntry == NULL_POINTER)
+        {
+            reportSimPart(simHopPart, DISC_MODEL_NO_GEOMETRY_NAMED);
+            simHopPart++;
+            simHop = SIM_HOP_TREE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHop = SIM_HOP_NODE;
+        return SIM_ASSEMBLY_PENDING;
+
+    case SIM_HOP_NODE:
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = NULL_POINTER;
+        {
+            GeometryNodeDescription node;
+
+            if (bytes != NULL_POINTER &&
+                scenegraphReadGeometryNode(&node, bytes, size) == SCENEGRAPH_READ_OK &&
+                node.hasGeometry)
+            {
+                simHopEntry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_GMDC,
+                                                node.geometryKey.instanceIdentifier,
+                                                node.geometryKey.instanceIdentifierHigh);
+            }
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+        if (simHopEntry == NULL_POINTER)
+        {
+            reportSimPart(simHopPart, DISC_MODEL_GEOMETRY_UNREADABLE);
+            simHopPart++;
+            simHop = SIM_HOP_TREE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHop = SIM_HOP_CONTAINER;
+        return SIM_ASSEMBLY_PENDING;
+
+    case SIM_HOP_CONTAINER:
+        if (!readIndexedResource(simHopEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simHopEntry = NULL_POINTER;
+        /* Not rewound: the mesh this builds lives in the arena above these
+           bytes, so giving them back would take it too. */
+        if (bytes == NULL_POINTER ||
+            geometryReaderOpen(&simParts[simGathered], bytes, size, globalArena) !=
+                GEOMETRY_READ_OK)
+        {
+            reportSimPart(simHopPart, DISC_MODEL_GEOMETRY_UNREADABLE);
+            simHopPart++;
+            simHop = SIM_HOP_TREE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        /* Which material this part wears, matched by the primitive's own name.
+           A shape binds by name and lists more materials than the part has
+           parts — a face shape carries the face, the brows, the eyes and the
+           lips — so taking the first painted a Sim's face with an eyebrow. Both
+           names must be real: two blanks compare equal and that is not a
+           match. */
+        simPartMaterials[simGathered][0] = '\0';
+        if (simParts[simGathered].storedPrimitiveCount > 0U)
+        {
+            for (index = 0U; index < simHopShape.storedMaterialCount; index++)
+            {
+                if (simParts[simGathered].primitives[0].name[0] == '\0' ||
+                    simHopShape.materials[index].primitiveName[0] == '\0')
+                {
+                    continue;
+                }
+                if (stringEqualsIgnoringCase(simHopShape.materials[index].primitiveName,
+                                             simParts[simGathered].primitives[0].name))
+                {
+                    stringAppend(simPartMaterials[simGathered], RESOURCE_NAME_LIMIT,
+                                 simHopShape.materials[index].materialName);
+                    break;
+                }
+            }
+        }
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), simDrawnPartNames[which]);
+        stringAppend(message, sizeof(message), simDrawnPartNames[simHopPart]);
         stringAppend(message, sizeof(message), " — ");
-        if (chain == DISC_MODEL_OK)
-        {
-            parts[gathered] = &simParts[which];
-            gathered++;
-            appendCount(message, sizeof(message), simParts[which].vertexCount);
-            stringAppend(message, sizeof(message), " vertices, ");
-            appendCount(message, sizeof(message), simParts[which].indexCount / 3U);
-            stringAppend(message, sizeof(message), " triangles, ");
-            appendCount(message, sizeof(message), simParts[which].skinnedVertexCount);
-            stringAppend(message, sizeof(message), " of them weighted, spanning ");
-            {
-                /* Where each part actually sits. Three parts of one body should
-                   occupy overlapping space at a comparable scale; anything else
-                   and joining them is not the same as assembling them. */
-                Real32 minimum[3];
-                Real32 maximum[3];
-                Unsigned32 axis;
-
-                geometryMeshGetBounds(&simParts[which], minimum, maximum);
-                for (axis = 0U; axis < 3U; axis++)
-                {
-                    if (axis > 0U)
-                    {
-                        stringAppend(message, sizeof(message), " by ");
-                    }
-                    appendThousandths(message, sizeof(message), minimum[axis]);
-                    stringAppend(message, sizeof(message), "..");
-                    appendThousandths(message, sizeof(message), maximum[axis]);
-                }
-            }
-        }
-        else
-        {
-            stringAppend(message, sizeof(message), discModelResultGetName(chain));
-        }
+        appendCount(message, sizeof(message), simParts[simGathered].vertexCount);
+        stringAppend(message, sizeof(message), " vertices, ");
+        appendCount(message, sizeof(message), simParts[simGathered].indexCount / 3U);
+        stringAppend(message, sizeof(message), " triangles, ");
+        appendCount(message, sizeof(message), simParts[simGathered].skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of them weighted, wearing ");
+        stringAppend(message, sizeof(message), (simPartMaterials[simGathered][0] != '\0')
+                                                   ? simPartMaterials[simGathered]
+                                                   : "no material it names");
         platformLogMessage(message);
-    }
+        simGathered++;
+        simHopPart++;
+        simHop = SIM_HOP_TREE;
+        return SIM_ASSEMBLY_PENDING;
 
-    if (gathered == 0U)
+    case SIM_HOP_MERGE:
     {
-        return SIM_ASSEMBLY_FAILED;
-    }
-    if (geometryMeshMerge(&whole, parts, gathered, globalArena) != GEOMETRY_READ_OK)
-    {
-        platformLogMessage("engine: a Sim's parts would not join into one model");
-        return SIM_ASSEMBLY_FAILED;
-    }
+        const GeometryMesh *parts[SIM_DRAWN_PART_COUNT];
 
-    message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine: a whole Sim — ");
-    appendCount(message, sizeof(message), gathered);
-    stringAppend(message, sizeof(message), " part(s) joined into ");
-    appendCount(message, sizeof(message), whole.vertexCount);
-    stringAppend(message, sizeof(message), " vertices and ");
-    appendCount(message, sizeof(message), whole.indexCount / 3U);
-    stringAppend(message, sizeof(message), " triangles across ");
-    appendCount(message, sizeof(message), whole.storedPrimitiveCount);
-    stringAppend(message, sizeof(message), " range(s), ");
-    appendCount(message, sizeof(message), whole.skinnedVertexCount);
-    stringAppend(message, sizeof(message), " of them weighted");
-    platformLogMessage(message);
-
-    /* The joined model replaces whatever the search drew. It is painted with
-       the one texture already fetched, which belongs to none of these parts —
-       a whole Sim wearing a face's skin is what a single texture can do, and
-       painting the ranges properly is the next piece of work. */
-    /* Do the parts agree about the pose they were authored in?
-     *
-     * The merge takes the bind pose from whichever part carries the most, which
-     * is only sound while the parts share a skeleton. They are supposed to —
-     * all three carry the same sixty-three bones — but "supposed to" is what
-     * this project keeps being wrong about, so it is measured. A part that
-     * disagrees would be skinned by another part's idea of where its bones
-     * rest, and would come apart on the first pose. */
-    {
-        Real32 worst = 0.0f;
-        Unsigned32 compared = 0U;
-
-        for (which = 0U; which < gathered; which++)
+        if (simGathered == 0U)
         {
-            Unsigned32 bone;
-
-            if (parts[which]->bindPoses == NULL_POINTER)
-            {
-                continue;
-            }
-            for (bone = 0U; bone < parts[which]->bindPoseCount && bone < whole.bindPoseCount;
-                 bone++)
-            {
-                Unsigned32 axis;
-
-                for (axis = 0U; axis < 4U; axis++)
-                {
-                    Real32 apart = parts[which]->bindPoses[bone].rotation[axis] -
-                                   whole.bindPoses[bone].rotation[axis];
-
-                    if (apart < 0.0f)
-                    {
-                        apart = -apart;
-                    }
-                    if (apart > worst)
-                    {
-                        worst = apart;
-                    }
-                }
-                for (axis = 0U; axis < 3U; axis++)
-                {
-                    Real32 apart = parts[which]->bindPoses[bone].translation[axis] -
-                                   whole.bindPoses[bone].translation[axis];
-
-                    if (apart < 0.0f)
-                    {
-                        apart = -apart;
-                    }
-                    if (apart > worst)
-                    {
-                        worst = apart;
-                    }
-                }
-                compared++;
-            }
+            return SIM_ASSEMBLY_FAILED;
+        }
+        for (index = 0U; index < simGathered; index++)
+        {
+            parts[index] = &simParts[index];
+        }
+        if (geometryMeshMerge(&whole, parts, simGathered, globalArena) != GEOMETRY_READ_OK)
+        {
+            platformLogMessage("engine: a Sim's parts would not join into one model");
+            return SIM_ASSEMBLY_FAILED;
         }
         message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: the parts' bind poses agree to ");
-        appendThousandths(message, sizeof(message), worst);
-        stringAppend(message, sizeof(message), " over ");
-        appendCount(message, sizeof(message), compared);
-        stringAppend(message, sizeof(message),
-                     " bone(s) compared — anything but nought and one part is posed by "
-                     "another's skeleton");
+        stringAppend(message, sizeof(message), "engine: a whole Sim — ");
+        appendCount(message, sizeof(message), simGathered);
+        stringAppend(message, sizeof(message), " part(s) joined into ");
+        appendCount(message, sizeof(message), whole.vertexCount);
+        stringAppend(message, sizeof(message), " vertices and ");
+        appendCount(message, sizeof(message), whole.indexCount / 3U);
+        stringAppend(message, sizeof(message), " triangles across ");
+        appendCount(message, sizeof(message), whole.storedPrimitiveCount);
+        stringAppend(message, sizeof(message), " range(s), ");
+        appendCount(message, sizeof(message), whole.skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of them weighted");
         platformLogMessage(message);
+
+        discSearch.mesh = whole;
+        renderSetMesh(&discSearch.mesh, globalArena);
+        poseIsAnimated = BOOLEAN_FALSE;
+        simIsAssembled = BOOLEAN_TRUE;
+        simHopPart = 0U;
+        simHop = SIM_HOP_SKELETON;
+        return SIM_ASSEMBLY_PENDING;
     }
 
-    /* The skeleton these parts actually hang on.
-     *
-     * Until now discSearch.modelTree belonged to the model the search happened
-     * to find, and posing a Sim by another model's skeleton resolves its bones
-     * to the wrong joints — the body came apart differently on every frame.
-     * auskel is what every one of these parts is weighted to, and what every
-     * animation worth playing on them is authored against. */
-    {
-        const ResourceIndexEntry *skeleton =
-            resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, simPartNames[0]);
-        Unsigned8 *skeletonBytes;
-        MemorySize skeletonSize;
-
-        discSearch.modelHasTree = BOOLEAN_FALSE;
-        if (skeleton != NULL_POINTER)
+    case SIM_HOP_SKELETON:
+        if (simHopEntry == NULL_POINTER)
         {
-            if (!readIndexedResource(skeleton, &skeletonBytes, &skeletonSize))
+            simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES,
+                                                 simPartNames[0]);
+        }
+        discSearch.modelHasTree = BOOLEAN_FALSE;
+        if (simHopEntry != NULL_POINTER)
+        {
+            if (!readIndexedResource(simHopEntry, &bytes, &size))
             {
                 memoryArenaRewindToMarker(globalArena, marker);
                 return SIM_ASSEMBLY_PENDING;
             }
-            if (skeletonBytes != NULL_POINTER &&
-                resourceNodeRead(&discSearch.modelTree, skeletonBytes, skeletonSize) ==
-                    RESOURCE_NODE_OK)
+            if (bytes != NULL_POINTER &&
+                resourceNodeRead(&discSearch.modelTree, bytes, size) == RESOURCE_NODE_OK)
             {
                 discSearch.modelHasTree = BOOLEAN_TRUE;
             }
+            memoryArenaRewindToMarker(globalArena, marker);
         }
+        simHopEntry = NULL_POINTER;
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine: ");
         if (discSearch.modelHasTree)
@@ -1638,8 +1512,10 @@ static SimAssembly assembleTheSim(void)
             stringAppend(message, sizeof(message), simPartNames[0]);
             stringAppend(message, sizeof(message), " — ");
             appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
-            stringAppend(message, sizeof(message), " node(s), which is the skeleton every part is "
-                                                   "weighted to and every animation targets");
+            stringAppend(message, sizeof(message),
+                         " node(s), which is the skeleton every part is weighted to and every "
+                         "animation targets");
+            discContentKeepBindPose(&discSearch, globalArena);
         }
         else
         {
@@ -1648,42 +1524,17 @@ static SimAssembly assembleTheSim(void)
                          "bind pose rather than being posed by somebody else's bones");
         }
         platformLogMessage(message);
-    }
+        simHopPart = 0U;
+        simHop = SIM_HOP_MATERIAL;
+        return SIM_ASSEMBLY_PENDING;
 
-    discSearch.mesh = whole;
-    renderSetMesh(&discSearch.mesh, globalArena);
+    case SIM_HOP_MATERIAL:
+    case SIM_HOP_TEXTURE:
+    case SIM_HOP_TOP_LEVEL:
+        return stepThePaint(marker);
 
-    /* Each part its own skin. The parts were gathered in order and their
-       primitives merged in that order, so part N of the merge is primitive N —
-       which is what the backend indexes its textures by. That holds only while
-       each part contributes exactly one primitive, which these three do and
-       which the merge reports, so a part that ever contributed two would show
-       up as a count that no longer matches. */
-    if (whole.storedPrimitiveCount == gathered)
-    {
-        for (which = 0U; which < gathered; which++)
-        {
-            if (!paintPart(which, simPartMaterials[which], simPartTextureStems[which]))
-            {
-                return SIM_ASSEMBLY_PENDING;
-            }
-        }
-    }
-    else
-    {
-        platformLogMessage("engine: the joined parts and their ranges no longer correspond, so "
-                           "none is painted separately — a part wearing another's skin is worse "
-                           "than the whole model wearing one");
-    }
-    /* The vertices moved out from under the copy the pose was working from, and
-       nothing may pose them again until they have a skeleton of their own. */
-    poseIsAnimated = BOOLEAN_FALSE;
-    simIsAssembled = BOOLEAN_TRUE;
-    /* The vertices are new, so the pose has to start from these rather than
-       from whatever the previous model left behind. */
-    if (discSearch.modelHasTree)
-    {
-        discContentKeepBindPose(&discSearch, globalArena);
+    default:
+        break;
     }
     return SIM_ASSEMBLY_DONE;
 }
@@ -1843,12 +1694,20 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             appendCount(message, sizeof(message), (Unsigned32)SIM_PART_COUNT);
             stringAppend(message, sizeof(message),
                          " of a whole Sim's parts are on this disc by name");
-            platformLogMessage(message);
+            /* Once, not once per attempt. Assembling a Sim takes many steps
+               against a store that answers one read at a time, and a line
+               logged on each of them buried the console under fifteen thousand
+               copies of itself. */
+            if (!saidWhatTheDiscHas)
+            {
+                saidWhatTheDiscHas = BOOLEAN_TRUE;
+                platformLogMessage(message);
+            }
             /* Every part named a package, and on this disc it was the same one
                each time, so the whole Sim is one file read. */
             if (simPartsFound == SIM_PART_COUNT)
             {
-                SimAssembly assembly = assembleTheSim();
+                SimAssembly assembly = stepTheSim();
 
                 if (assembly == SIM_ASSEMBLY_PENDING)
                 {
