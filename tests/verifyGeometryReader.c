@@ -865,6 +865,16 @@ int main(void)
                           whole.boneAssignments[0] == 0U && whole.boneAssignments[1] == 1U);
                 checkThat(&failureCount, "and the bind pose comes from whichever part had one",
                           whole.bindPoseCount == skinned.bindPoseCount);
+
+                /* A component index means something only inside its own
+                   container, so every source's first primitive draws from
+                   component nought. Two joined parts sharing an index look to
+                   the skin like two primitives over one component, and it skips
+                   the second to avoid transforming shared vertices twice — so
+                   an unshifted index silently leaves a part unposed. */
+                checkThat(&failureCount, "no two joined parts claim the same component",
+                          whole.primitives[0].componentIndex !=
+                              whole.primitives[skinned.storedPrimitiveCount].componentIndex);
             }
         }
 

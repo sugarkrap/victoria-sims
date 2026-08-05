@@ -378,10 +378,10 @@ int main(void)
                   nearly(animationComponentSample(baked, 10000.0f), -2.0f));
     }
 
-    printf("\n-- are the tangents read and followed --\n");
+    printf("\n-- are the tangents read, and deliberately not followed --\n");
     {
         const AnimationComponent *curved = &animation.channels[1].components[0];
-        Real32 midpoint;
+        Real32 quarter;
         Real32 straightLine;
 
         /* The fixture writes 0 for every tangent, which is a real value and not
@@ -389,31 +389,34 @@ int main(void)
         checkThat(&failureCount, "a continuous curve stores one tangent and means it both ways",
                   nearly(curved->keyframes[0].tangentIn, curved->keyframes[0].tangentOut));
 
-        /* With both slopes flat the Hermite eases out of one keyframe and into
-           the next, so half way along is still half way in value but the shape
-           either side of it is not a straight line. Sampling at a quarter is
-           what tells them apart: the line says a quarter, the curve says
-           less. */
+        /* Sampling is a straight line, on every curve type. Following the
+           tangents as a Hermite put a real Sim in a different wild position on
+           every frame between keyframes — right at each one and enormous
+           between — which is a scale error in the tangents' units rather than a
+           wrong shape. They are kept for whoever settles the units; nothing
+           reads them until then.
+
+           This check is what a rest pose cannot do: that animation is a single
+           keyframe with nothing to interpolate, so it passes whichever way this
+           goes, which is exactly how the curve shipped wrong. */
         straightLine = curved->keyframes[0].value +
                        ((curved->keyframes[1].value - curved->keyframes[0].value) * 0.25f);
-        midpoint = animationComponentSample(curved, curved->keyframes[0].tick +
-                                                        ((curved->keyframes[1].tick -
-                                                          curved->keyframes[0].tick) *
-                                                         0.25f));
-        checkThat(&failureCount, "a quarter along a flat-tangented curve is not a quarter of the way",
-                  !nearly(midpoint, straightLine));
-        checkThat(&failureCount, "but every keyframe is still hit exactly",
+        quarter = animationComponentSample(curved, curved->keyframes[0].tick +
+                                                       ((curved->keyframes[1].tick -
+                                                         curved->keyframes[0].tick) *
+                                                        0.25f));
+        checkThat(&failureCount, "a quarter along is a quarter of the way, not along a curve",
+                  nearly(quarter, straightLine));
+        checkThat(&failureCount, "and every keyframe is hit exactly",
                   nearly(animationComponentSample(curved, curved->keyframes[0].tick),
                          curved->keyframes[0].value) &&
                       nearly(animationComponentSample(curved, curved->keyframes[1].tick),
                              curved->keyframes[1].value));
 
-        /* A baked component has no tangents in the file, so it must stay a
-           straight line rather than being eased by slopes of nought. */
         {
             const AnimationComponent *baked = &animation.channels[0].components[0];
 
-            checkThat(&failureCount, "a baked curve is still sampled as a straight line",
+            checkThat(&failureCount, "a baked curve is a straight line too",
                       nearly(animationComponentSample(baked, 37.5f), 0.25f));
         }
     }

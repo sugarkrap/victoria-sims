@@ -988,6 +988,7 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
     Unsigned32 vertexBase = 0U;
     Unsigned32 indexBase = 0U;
     Unsigned32 primitiveBase = 0U;
+    Unsigned32 componentBase = 0U;
     Unsigned32 which;
     Real32 *positions;
     Real32 *normals = NULL_POINTER;
@@ -1148,11 +1149,21 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
             primitives[primitiveBase + index] = source->primitives[index];
             primitives[primitiveBase + index].firstIndex += indexBase;
             primitives[primitiveBase + index].firstVertex += vertexBase;
+            /* Shifted like everything else, and for a sharper reason than
+               tidiness. A component index means something only inside its own
+               container, so every source's first primitive draws from component
+               nought. Left alone, two parts that share nothing look to
+               geometryMeshApplySkin like two primitives over one component —
+               and it skips the second, because transforming shared vertices
+               twice would fold a part in on itself. That is what left a Sim's
+               head behind while its body lay down. */
+            primitives[primitiveBase + index].componentIndex += componentBase;
         }
 
         vertexBase += source->vertexCount;
         indexBase += source->indexCount;
         primitiveBase += source->storedPrimitiveCount;
+        componentBase += (source->componentCount > 0U) ? source->componentCount : 1U;
     }
 
     stringAppend(merged->name, GEOMETRY_NAME_LIMIT, primitives[0].name);
@@ -1165,7 +1176,7 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
     merged->primitives = primitives;
     merged->primitiveCount = primitiveBase;
     merged->storedPrimitiveCount = primitiveBase;
-    merged->componentCount = sourceCount;
+    merged->componentCount = componentBase;
     merged->boneAssignments = boneAssignments;
     merged->boneWeights = boneWeights;
     merged->weightsStoredPerVertex = weightsStored;

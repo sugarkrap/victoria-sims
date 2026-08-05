@@ -1483,6 +1483,121 @@ static SimAssembly assembleTheSim(void)
        the one texture already fetched, which belongs to none of these parts —
        a whole Sim wearing a face's skin is what a single texture can do, and
        painting the ranges properly is the next piece of work. */
+    /* Do the parts agree about the pose they were authored in?
+     *
+     * The merge takes the bind pose from whichever part carries the most, which
+     * is only sound while the parts share a skeleton. They are supposed to —
+     * all three carry the same sixty-three bones — but "supposed to" is what
+     * this project keeps being wrong about, so it is measured. A part that
+     * disagrees would be skinned by another part's idea of where its bones
+     * rest, and would come apart on the first pose. */
+    {
+        Real32 worst = 0.0f;
+        Unsigned32 compared = 0U;
+
+        for (which = 0U; which < gathered; which++)
+        {
+            Unsigned32 bone;
+
+            if (parts[which]->bindPoses == NULL_POINTER)
+            {
+                continue;
+            }
+            for (bone = 0U; bone < parts[which]->bindPoseCount && bone < whole.bindPoseCount;
+                 bone++)
+            {
+                Unsigned32 axis;
+
+                for (axis = 0U; axis < 4U; axis++)
+                {
+                    Real32 apart = parts[which]->bindPoses[bone].rotation[axis] -
+                                   whole.bindPoses[bone].rotation[axis];
+
+                    if (apart < 0.0f)
+                    {
+                        apart = -apart;
+                    }
+                    if (apart > worst)
+                    {
+                        worst = apart;
+                    }
+                }
+                for (axis = 0U; axis < 3U; axis++)
+                {
+                    Real32 apart = parts[which]->bindPoses[bone].translation[axis] -
+                                   whole.bindPoses[bone].translation[axis];
+
+                    if (apart < 0.0f)
+                    {
+                        apart = -apart;
+                    }
+                    if (apart > worst)
+                    {
+                        worst = apart;
+                    }
+                }
+                compared++;
+            }
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the parts' bind poses agree to ");
+        appendThousandths(message, sizeof(message), worst);
+        stringAppend(message, sizeof(message), " over ");
+        appendCount(message, sizeof(message), compared);
+        stringAppend(message, sizeof(message),
+                     " bone(s) compared — anything but nought and one part is posed by "
+                     "another's skeleton");
+        platformLogMessage(message);
+    }
+
+    /* The skeleton these parts actually hang on.
+     *
+     * Until now discSearch.modelTree belonged to the model the search happened
+     * to find, and posing a Sim by another model's skeleton resolves its bones
+     * to the wrong joints — the body came apart differently on every frame.
+     * auskel is what every one of these parts is weighted to, and what every
+     * animation worth playing on them is authored against. */
+    {
+        const ResourceIndexEntry *skeleton =
+            resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, simPartNames[0]);
+        Unsigned8 *skeletonBytes;
+        MemorySize skeletonSize;
+
+        discSearch.modelHasTree = BOOLEAN_FALSE;
+        if (skeleton != NULL_POINTER)
+        {
+            if (!readIndexedResource(skeleton, &skeletonBytes, &skeletonSize))
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                return SIM_ASSEMBLY_PENDING;
+            }
+            if (skeletonBytes != NULL_POINTER &&
+                resourceNodeRead(&discSearch.modelTree, skeletonBytes, skeletonSize) ==
+                    RESOURCE_NODE_OK)
+            {
+                discSearch.modelHasTree = BOOLEAN_TRUE;
+            }
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        if (discSearch.modelHasTree)
+        {
+            stringAppend(message, sizeof(message), "hung on ");
+            stringAppend(message, sizeof(message), simPartNames[0]);
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
+            stringAppend(message, sizeof(message), " node(s), which is the skeleton every part is "
+                                                   "weighted to and every animation targets");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message),
+                         "the skeleton these parts hang on would not read, so they stay in their "
+                         "bind pose rather than being posed by somebody else's bones");
+        }
+        platformLogMessage(message);
+    }
+
     discSearch.mesh = whole;
     renderSetMesh(&discSearch.mesh, globalArena);
 
@@ -1512,6 +1627,12 @@ static SimAssembly assembleTheSim(void)
        nothing may pose them again until they have a skeleton of their own. */
     poseIsAnimated = BOOLEAN_FALSE;
     simIsAssembled = BOOLEAN_TRUE;
+    /* The vertices are new, so the pose has to start from these rather than
+       from whatever the previous model left behind. */
+    if (discSearch.modelHasTree)
+    {
+        discContentKeepBindPose(&discSearch, globalArena);
+    }
     return SIM_ASSEMBLY_DONE;
 }
 
@@ -1581,13 +1702,15 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
     /* A skinned mesh is on screen, so there is finally something an animation
        can be applied to. Until now every mesh drawn was rigid and a pose would
        have had nothing to move. */
-    if (simIsAssembled && !animationIndexBegun)
+    /* An assembled Sim with no skeleton of its own must not be posed by the one
+       the search found — that is what took the body apart. Without a tree it
+       stays in its bind pose and says so; with one it goes on to the animation
+       search like anything else. */
+    if (simIsAssembled && !discSearch.modelHasTree && !animationIndexBegun)
     {
         animationIndexBegun = BOOLEAN_TRUE;
-        platformLogMessage("engine: the assembled Sim is left in its bind pose — the palette would "
-                           "be built against the skeleton of the model the search found, which is "
-                           "not these parts', and posing by another model's bones takes a body "
-                           "apart rather than moving it");
+        platformLogMessage("engine: the assembled Sim has no skeleton of its own, so it is left in "
+                           "its bind pose rather than posed by another model's bones");
     }
 
     if (discSearch.mesh.boneAssignments != NULL_POINTER && !animationIndexBegun)

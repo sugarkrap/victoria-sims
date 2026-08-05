@@ -283,38 +283,25 @@ Real32 animationComponentSample(const AnimationComponent *component, Real32 tick
         {
             return after->value;
         }
-        /* A baked curve carries no tangents at all, so there is no curve to
-         * follow and a straight line is what the file actually describes. Run
-         * through the Hermite below with both slopes at nought it would instead
-         * flatten at every keyframe — a smooth step, which is a shape the file
-         * never asked for. */
-        if (component->curveType == ANIMATION_CURVE_BAKED)
-        {
-            return before->value +
-                   ((after->value - before->value) * ((tick - before->tick) / span));
-        }
-        {
-            /* The cubic Hermite through both keyframes, leaving the first along
-             * its out slope and arriving at the second along its in slope.
-             *
-             * The tangents are slopes in value per tick, so each is multiplied
-             * by the span to become the value it accounts for across this
-             * interval.
-             *
-             * Straight lines were what this did first, and they are exact at
-             * every keyframe, which is why the rest pose check passed without
-             * them. Between keyframes they were merely close. */
-            Real32 position = (tick - before->tick) / span;
-            Real32 squared = position * position;
-            Real32 cubed = squared * position;
-            Real32 fromBefore = (2.0f * cubed) - (3.0f * squared) + 1.0f;
-            Real32 fromBeforeSlope = cubed - (2.0f * squared) + position;
-            Real32 fromAfter = (-2.0f * cubed) + (3.0f * squared);
-            Real32 fromAfterSlope = cubed - squared;
-
-            return (fromBefore * before->value) + (fromBeforeSlope * span * before->tangentOut) +
-                   (fromAfter * after->value) + (fromAfterSlope * span * after->tangentIn);
-        }
+        /* Straight lines, on every curve type, until the tangents' units are
+         * established.
+         *
+         * They were followed as a Hermite, with each slope taken as value per
+         * tick and multiplied by a span in ticks. On a real animation that put
+         * the Sim in a different wild position on every frame between
+         * keyframes: it was right at each keyframe and enormous in between,
+         * which is the signature of a scale error rather than a shape error.
+         * openTS2 converts keyframe times to seconds and leaves its tangents
+         * unscaled, so per-second is the likely reading — and 800 ticks to the
+         * second is about the size of the overshoot.
+         *
+         * Not guessed at a second time. The rest pose cannot settle it either:
+         * it is one keyframe with nothing to interpolate, so it passes whatever
+         * happens here, which is exactly why this shipped wrong. A line is
+         * exact at every keyframe and close between them; a curve of unknown
+         * scale is wrong everywhere between. The tangents are still read and
+         * kept, waiting for something that can tell which unit they are in. */
+        return before->value + ((after->value - before->value) * ((tick - before->tick) / span));
     }
     return component->keyframes[component->keyframeCount - 1U].value;
 }
