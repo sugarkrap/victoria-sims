@@ -2215,34 +2215,32 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         }
         platformLogMessage(message);
 
-        /* What the skeleton actually did. A pose that moved nothing and a mesh
-           with no pose to apply look identical on screen, so the numbers say
-           which happened — and, when nothing moved, what the bone lists held,
-           since that is the one thing that decides where to look next. */
+        /* What the mesh is weighted to, and that nothing was moved by it.
+           Skinning a mesh at rest is the identity — the mesh is already in the
+           pose its bones were measured in — so this says what is ready rather
+           than claiming a pose was applied. */
         if (discSearch.mesh.boneAssignments != NULL_POINTER)
         {
             message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: posed ");
-            appendCount(message, sizeof(message), discSearch.verticesPosed);
-            stringAppend(message, sizeof(message), " vertex(es) against ");
+            stringAppend(message, sizeof(message), "engine: weighted to ");
             appendCount(message, sizeof(message), discSearch.bonesInPalette);
-            stringAppend(message, sizeof(message), " bone(s) of the tree");
-            if (discSearch.verticesPosed == 0U && discSearch.firstBoneNameCount > 0U)
+            stringAppend(message, sizeof(message),
+                         " bone(s) of the tree, left in its bind pose because skinning it there "
+                         "would move nothing");
+            if (discSearch.firstBoneNameCount > 0U)
             {
                 Unsigned32 which;
 
-                stringAppend(message, sizeof(message),
-                             " — none, and the bones the primitives named were");
+                /* The bones a primitive named, which is the number an animation
+                   will have to index by. Small ones are positions in the tree;
+                   large ones are the identifiers its nodes carry, and which of
+                   those it is decides how a pose gets built. */
+                stringAppend(message, sizeof(message), "; its primitives named bones");
                 for (which = 0U; which < discSearch.firstBoneNameCount; which++)
                 {
                     stringAppend(message, sizeof(message), " ");
                     appendCount(message, sizeof(message), discSearch.firstBoneNames[which]);
                 }
-                /* Stated as what they were, not as what that proves. Small
-                   numbers here mean the indices were fine and something else
-                   is wrong; large ones mean they are identifiers and want
-                   matching against the nodes rather than counting through
-                   them. */
             }
             platformLogMessage(message);
         }

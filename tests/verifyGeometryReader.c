@@ -790,6 +790,33 @@ int main(void)
             checkThat(&failureCount, "blending the translations by their weights",
                       nearly(skinned.positions[0], 2.5f) && nearly(skinned.positions[1], 50.0f));
 
+            printf("\n-- a bone that undoes itself moves nothing --\n");
+            {
+                GeometryMesh resting;
+                static Real32 bindPalette[10 * 16];
+
+                /* Pose times inverse bind, which at rest is the identity for
+                   every bone however far from the origin that bone sits. Any
+                   movement here is the caller having passed world transforms
+                   instead — the mistake that drew a face with a limb stretched
+                   out of it, and the reason this check exists rather than a
+                   comment saying be careful. */
+                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+                (void)geometryReaderOpen(&resting, builder.bytes, builder.length, &arena);
+                for (bone = 0U; bone < 10U; bone++)
+                {
+                    for (cell = 0U; cell < 16U; cell++)
+                    {
+                        bindPalette[bone * 16U + cell] = (cell % 5U == 0U) ? 1.0f : 0.0f;
+                    }
+                }
+                checkThat(&failureCount, "every vertex is still moved",
+                          geometryMeshApplySkin(&resting, bindPalette, 10U) == 3U);
+                checkThat(&failureCount, "and every one of them lands where it started",
+                          nearly(resting.positions[0], 0.0f) && nearly(resting.positions[3], 1.0f) &&
+                              nearly(resting.positions[7], 1.0f));
+            }
+
             printf("\n-- refusing to pose what it cannot --\n");
             {
                 GeometryMesh again;

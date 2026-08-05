@@ -216,10 +216,20 @@ void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix);
  * primitive's list; that names a bone; that names a matrix here. Each vertex is
  * the weighted sum of up to four of them.
  *
- * Positions and normals are rewritten in place, so this happens once, before
- * the mesh is uploaded. It is not a substitute for a skinned pipeline — an
- * animated model needs the blend on the graphics processor — but a Sim standing
- * still is a Sim in its rest pose, and this puts it there.
+ * EACH MATRIX MUST ALREADY BE THE POSE TIMES THE INVERSE BIND — the bone's
+ * transform in the pose wanted, times the inverse of its transform in the pose
+ * the mesh was authored in. Not the bone's world transform on its own.
+ *
+ * That is not a detail. The mesh on the disc is stored in its bind pose, so
+ * every bone's pair multiplies out to the identity there and skinning a resting
+ * model correctly moves nothing at all. Passing world transforms instead
+ * transforms vertices that are already in world space a second time, and what
+ * arrives is a Sim's face with a limb stretched out of it — which is what this
+ * did on the first try, and what the rule above is written down to prevent.
+ *
+ * Positions and normals are rewritten in place, so this is for building one
+ * pose of a model, not for animating: an animated model wants the blend on the
+ * graphics processor with the mesh left alone.
  *
  * Returns how many vertices it actually moved: a mesh whose bone lists point
  * outside the matrices it was given moves nothing, and a caller that cannot

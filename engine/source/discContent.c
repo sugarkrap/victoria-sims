@@ -502,23 +502,28 @@ static void placePartByItsNode(DiscContentSearch *search)
     geometryMeshApplyTransform(&search->mesh, matrix);
 }
 
-/* Puts the mesh where its skeleton says, when it has one.
+/* Notes what the mesh is weighted to, and deliberately does not move it.
  *
- * The tree's node that holds the shape carries no bone — a Sim's face reported
- * bone 0x7FFFFFFF, which is the sentinel for none — so the bone a vertex hangs
- * on cannot come from there. It comes from the primitive's own bone list, which
- * a vertex's assignment slots index, and that list names bones in the tree.
+ * Applying the skeleton to a mesh at rest is a mistake, and it took drawing a
+ * Sim's face stretched into a spike to see it. Skinning is
  *
- * What a name in that list actually is has not been established: it may be an
- * index into the tree's nodes, or it may be the identifier a node carries. This
- * builds the palette by node index, which is the reading that costs nothing to
- * try, and reports how many vertices it managed to move. Nought moved with
- * weights present is the other reading, and the numbers logged beside it are
- * what says so. */
+ *     v' = sum over bones of weight * bone's world transform * inverse bind * v
+ *
+ * and the inverse bind is the bone's world transform at the pose the mesh was
+ * authored in. The mesh on the disc IS in that pose, so at rest every bone's
+ * pair multiplies out to the identity and correct skinning moves nothing at
+ * all. Applying only the world transform — which is what this did — transforms
+ * vertices that are already in world space a second time.
+ *
+ * The proof was already on screen: the face drew correctly for several runs
+ * with no skinning applied whatsoever.
+ *
+ * So nothing is applied here. The weights, the assignments and the bone lists
+ * are all read and kept, and geometryMeshApplySkin stands ready — they become
+ * useful the moment an animation supplies bone transforms that are not the
+ * bind pose, which is the only time skinning has anything to say. */
 static void poseByTheSkeleton(DiscContentSearch *search)
 {
-    MemorySize marker;
-    Real32 *palette;
     Unsigned32 nodeCount;
     Unsigned32 index;
 
@@ -533,6 +538,7 @@ static void poseByTheSkeleton(DiscContentSearch *search)
     {
         return;
     }
+    search->bonesInPalette = nodeCount;
 
     /* The first bones a primitive names, kept for the log. Whether these are
        small enough to be node indices is the whole question, and one line of
@@ -552,23 +558,6 @@ static void poseByTheSkeleton(DiscContentSearch *search)
             search->firstBoneNameCount++;
         }
     }
-
-    marker = memoryArenaGetMarker(search->arena);
-    palette = (Real32 *)memoryArenaAllocate(search->arena,
-                                            (MemorySize)nodeCount * 16UL * sizeof(Real32),
-                                            sizeof(Real32));
-    if (palette == NULL_POINTER)
-    {
-        return;
-    }
-    for (index = 0U; index < nodeCount; index++)
-    {
-        resourceNodeGetWorldTransform(&search->modelTree, index, &palette[index * 16U]);
-    }
-    search->bonesInPalette = nodeCount;
-    search->verticesPosed = geometryMeshApplySkin(&search->mesh, palette, nodeCount);
-    /* The palette is read once and done with; the mesh keeps the result. */
-    memoryArenaRewindToMarker(search->arena, marker);
 }
 
 /* The material a part wears, and the texture it paints with.
