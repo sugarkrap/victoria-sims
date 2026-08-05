@@ -402,3 +402,30 @@ void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
     (void)hostUploadMesh(interleaved, mesh->vertexCount, mesh->indices, mesh->indexCount);
     memoryArenaRewindToMarker(arena, marker);
 }
+
+/* The host holds one texture for the model, so this cannot give each part its
+ * own yet — doing that means a bind group per part on the host side, which is
+ * JavaScript and WGSL work rather than anything decidable here.
+ *
+ * The first part's texture becomes the model's, and every other part is drawn
+ * with it. That is wrong in a visible, diagnosable way: a Sim comes out with
+ * its body wearing its face. It is not silent — the log says so the first time
+ * a second part asks — because a backend quietly disagreeing with another about
+ * what a model looks like is the harder bug to find. */
+static Boolean saidPartTexturesAreShared = BOOLEAN_FALSE;
+
+void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                          Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+{
+    if (partIndex == 0U)
+    {
+        renderSetTexture(rgbaPixels, widthInPixels, heightInPixels);
+        return;
+    }
+    if (!saidPartTexturesAreShared)
+    {
+        saidPartTexturesAreShared = BOOLEAN_TRUE;
+        platformLogMessage("render: the WebGPU backend holds one texture for the whole model, so "
+                           "every part is painted with the first part's");
+    }
+}

@@ -37,6 +37,27 @@ void renderSetMesh(const GeometryMesh *mesh, MemoryArena *arena);
  * mesh, and renderSetMesh is what it wants. */
 void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena);
 
+/* How many of a model's parts a backend will paint separately.
+ *
+ * A Sim is three; a piece of furniture is a handful. The cap exists because
+ * each part costs a texture name held for the life of the mesh, and a model
+ * that exceeds it draws its remaining parts with the last texture rather than
+ * not at all — a part painted wrongly is visible and diagnosable, a part
+ * missing looks like a hole in the model. */
+#define RENDER_PART_LIMIT 8U
+
+/* Gives one of the mesh's parts its own texture.
+ *
+ * partIndex is a position in the mesh's primitives array, which is what says
+ * which range of indices the part owns. Called after renderSetMesh, once per
+ * part that has a texture of its own; a part never given one is drawn with
+ * whatever renderSetTexture last supplied, so a model with one texture behaves
+ * exactly as it did before any of this existed.
+ *
+ * Passing null pixels releases that part's texture. */
+void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                          Unsigned32 widthInPixels, Unsigned32 heightInPixels);
+
 /* Hands the backend the image the mesh is painted with: eight bit RGBA, red
    first, top row first, width * height * 4 bytes.
 

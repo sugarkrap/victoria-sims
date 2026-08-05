@@ -452,3 +452,16 @@ void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena)
     (void)mesh;
     (void)arena;
 }
+
+void renderSetPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
+                          Unsigned32 widthInPixels, Unsigned32 heightInPixels)
+{
+    /* Accepted and ignored, for the same reason renderSetTexture is: this
+       backend shades flat because the hardware at the bottom of the ladder
+       cannot afford to sample per pixel. A part's own texture changes nothing
+       when no texture is sampled at all. */
+    (void)partIndex;
+    (void)rgbaPixels;
+    (void)widthInPixels;
+    (void)heightInPixels;
+}
