@@ -440,6 +440,29 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
         putReal32(builder, 0.0f);
         putReal32(builder, 0.0f);
     }
+
+    /* The deformation channels, which follow the bind pose immediately and with
+     * no header of their own — so a reader that misplaces the section above
+     * reads these from the wrong offset and reports whatever it lands on as a
+     * name. That is the property this section is here to hold.
+     *
+     * The first entry is blank on purpose. A retail body's array begins with an
+     * empty group and an empty channel, and it is not padding: the per-vertex
+     * morph map spells "this vertex is not morphed" as a zero byte, so slot
+     * nought can never be referred to and is left empty for that reason. A
+     * reader that skipped blanks, or that subtracted one to close the apparent
+     * gap, would misname every channel a Sim actually has.
+     *
+     * The two after it are named the way the disc names them, so a change that
+     * silently reorders or drops one is visible here rather than three hundred
+     * lines into a run. */
+    putUnsigned32(builder, 3U);
+    putString(builder, "");
+    putString(builder, "");
+    putString(builder, "botmorphs");
+    putString(builder, "fatbot");
+    putString(builder, "botmorphs");
+    putString(builder, "pregbot");
 }
 
 int main(void)
@@ -796,6 +819,31 @@ int main(void)
         checkThat(&failureCount, "reading the quaternion in the order the file writes it",
                   nearly(skinned.bindPoses[0].rotation[3], 1.0f) &&
                       nearly(skinned.bindPoses[0].rotation[0], 0.0f));
+
+        printf("\n-- and the deformation channels straight after it --\n");
+        /* Names only for now; nothing applies them. What this holds is that the
+           section is found at all, which depends entirely on the bind pose above
+           having been consumed to the byte — there is no header here to seek to
+           and no marker to recognise. */
+        checkThat(&failureCount, "the morph targets are read",
+                  skinned.morphTargets != NULL_POINTER && skinned.morphTargetCount == 3U);
+        if (skinned.morphTargets != NULL_POINTER && skinned.morphTargetCount == 3U)
+        {
+            /* Slot nought stays blank and stays present. The per-vertex morph
+               map spells "not morphed" as a zero byte, so nothing can ever refer
+               to slot nought — but a reader that compacted the array to close
+               the gap would shift every real channel down one and rename them
+               all. */
+            checkThat(&failureCount, "the blank first channel is kept, not compacted away",
+                      skinned.morphTargets[0].groupName[0] == '\0' &&
+                          skinned.morphTargets[0].channelName[0] == '\0');
+            checkThat(&failureCount, "so the channels keep the numbers the vertex map uses",
+                      stringEqualsIgnoringCase(skinned.morphTargets[1].channelName, "fatbot") &&
+                          stringEqualsIgnoringCase(skinned.morphTargets[2].channelName, "pregbot"));
+            checkThat(&failureCount, "and both of a channel's two names are kept",
+                      stringEqualsIgnoringCase(skinned.morphTargets[1].groupName, "botmorphs") &&
+                          stringEqualsIgnoringCase(skinned.morphTargets[2].groupName, "botmorphs"));
+        }
 
         printf("\n-- joining several containers into one model --\n");
         /* A Sim is a body, a face and hair: three containers that have to end up

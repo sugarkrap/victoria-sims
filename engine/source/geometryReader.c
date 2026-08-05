@@ -689,6 +689,48 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
             {
                 mesh->bindPoses = poses;
                 mesh->bindPoseCount = poseCount;
+
+                /* The deformation channels, which begin the moment the bind
+                 * pose ends. Only attempted when that read came back clean: the
+                 * array has no header to seek to and no marker to recognise, so
+                 * a cursor that has lost its place would read whatever happened
+                 * to be there and report it as a name.
+                 *
+                 * Names only. What actually moves a vertex is the morph
+                 * elements, which are still passed over and reported as unused
+                 * — a Sim's body carries two of them. Reading what the channels
+                 * are called is the half that says which sliders the disc has,
+                 * and it costs a walk of a few dozen short strings. */
+                {
+                    Unsigned32 targetCount = resourceCursorReadUnsigned32(&cursor);
+
+                    /* Two length-prefixed strings each, so two bytes at the very
+                       least even when both are empty. The same shape of guard as
+                       the counts above, for the same reason. */
+                    if (!cursor.overran && targetCount > 0U &&
+                        (MemorySize)targetCount <= sizeInBytes / 2UL)
+                    {
+                        GeometryMorphTarget *targets = (GeometryMorphTarget *)memoryArenaAllocate(
+                            arena, (MemorySize)targetCount * sizeof(GeometryMorphTarget), 1UL);
+
+                        if (targets == NULL_POINTER)
+                        {
+                            return GEOMETRY_READ_OUT_OF_ARENA;
+                        }
+                        for (index = 0U; index < targetCount; index++)
+                        {
+                            resourceCursorReadString(&cursor, targets[index].groupName,
+                                                     GEOMETRY_NAME_LIMIT);
+                            resourceCursorReadString(&cursor, targets[index].channelName,
+                                                     GEOMETRY_NAME_LIMIT);
+                        }
+                        if (!cursor.overran)
+                        {
+                            mesh->morphTargets = targets;
+                            mesh->morphTargetCount = targetCount;
+                        }
+                    }
+                }
             }
         }
         /* The passes below seek before they read, but each clears this for
@@ -962,6 +1004,8 @@ static void clearMesh(GeometryMesh *mesh)
     mesh->skinnedVertexCount = 0U;
     mesh->bindPoses = NULL_POINTER;
     mesh->bindPoseCount = 0U;
+    mesh->morphTargets = NULL_POINTER;
+    mesh->morphTargetCount = 0U;
     mesh->vertexCount = 0U;
     mesh->indices = NULL_POINTER;
     mesh->indexCount = 0U;
@@ -1031,6 +1075,16 @@ GeometryReadResult geometryMeshMerge(GeometryMesh *merged, const GeometryMesh *c
             merged->bindPoses = source->bindPoses;
             merged->bindPoseCount = source->bindPoseCount;
         }
+        /* Morph targets are deliberately not carried across. A bind pose is one
+         * thing every part shares — they are all weighted to the same skeleton,
+         * so the longest one covers the rest. A deformation channel is not:
+         * each part declares its own, numbered from its own array, and the
+         * morph elements that reference those numbers are per container too.
+         * Taking one part's list for the whole would be the component-index
+         * mistake again, where an index that meant something inside one
+         * container was read as though it meant the same after the join.
+         *
+         * A caller wanting them asks the parts, which still hold theirs. */
     }
 
     if (vertexTotal == 0U || indexTotal == 0U || primitiveTotal == 0U)

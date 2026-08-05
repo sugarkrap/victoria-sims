@@ -149,6 +149,19 @@ typedef struct GeometryBindPose
     Real32 translation[3];
 } GeometryBindPose;
 
+/* One deformation channel the container declares, named the way the file names
+ * it: a group and a channel within that group. A Sim's body carries the sliders
+ * here — the fat, fit and pregnant shapes — and a face carries its archetypes.
+ *
+ * Both names are kept because neither identifies a channel on its own: the file
+ * has several groups using the same channel name, and reporting one without the
+ * other turns distinct channels into apparent duplicates. */
+typedef struct GeometryMorphTarget
+{
+    char groupName[GEOMETRY_NAME_LIMIT];
+    char channelName[GEOMETRY_NAME_LIMIT];
+} GeometryMorphTarget;
+
 typedef struct GeometryMesh
 {
     char name[GEOMETRY_NAME_LIMIT];
@@ -212,6 +225,17 @@ typedef struct GeometryMesh
      * refusing the model over it would be the wrong trade. */
     const GeometryBindPose *bindPoses;
     Unsigned32 bindPoseCount;
+
+    /* The deformation channels the container declares — body sliders, face
+     * shapes, pregnancy — named but not yet applied. What moves a vertex is the
+     * morph elements, which are still passed over; these say what those
+     * elements are for, which is the half worth knowing first.
+     *
+     * Read only when the bind pose above read cleanly, because the array sits
+     * immediately after it and a cursor that has already lost its place cannot
+     * find this one. */
+    const GeometryMorphTarget *morphTargets;
+    Unsigned32 morphTargetCount;
 
     /* Element kinds met and not used, with the format each was in. Reported
      * because what a mesh carries decides what the renderer has to be able to

@@ -1027,6 +1027,48 @@ static void reportSimPart(Unsigned32 partIndex, DiscModelResult result)
     platformLogMessage(message);
 }
 
+/* What a part can be deformed into, as the container itself names it.
+ *
+ * A probe, not a feature: nothing applies these yet. It is here because the
+ * question "what does a Sim's body carry besides its bind pose" is one the disc
+ * can answer directly, and every previous guess at that class of question has
+ * been wrong in a way only the disc could settle.
+ *
+ * Both names are printed. Several groups reuse the same channel name, so a
+ * channel column alone would read as a list of duplicates. */
+static void reportMorphTargets(const GeometryMesh *part)
+{
+    char message[512];
+    Unsigned32 index;
+
+    if (part->morphTargetCount == 0U)
+    {
+        return;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:     ");
+    appendCount(message, sizeof(message), part->morphTargetCount);
+    stringAppend(message, sizeof(message), " deformation channel(s) declared — ");
+    for (index = 0U; index < part->morphTargetCount; index++)
+    {
+        /* Bounded because a face carries dozens and the line is for reading.
+           What is left out is counted rather than dropped silently. */
+        if (index == 8U)
+        {
+            stringAppend(message, sizeof(message), "and ");
+            appendCount(message, sizeof(message), part->morphTargetCount - index);
+            stringAppend(message, sizeof(message), " more");
+            break;
+        }
+        stringAppend(message, sizeof(message), part->morphTargets[index].groupName);
+        stringAppend(message, sizeof(message), "/");
+        stringAppend(message, sizeof(message), part->morphTargets[index].channelName);
+        stringAppend(message, sizeof(message), "; ");
+    }
+    platformLogMessage(message);
+}
+
 /* Decodes whatever level is in hand and gives it to the part, then moves on. */
 static SimAssembly finishThePart(MemorySize marker)
 {
@@ -1437,6 +1479,7 @@ static SimAssembly stepTheSim(void)
                                                    ? simPartMaterials[simGathered]
                                                    : "no material it names");
         platformLogMessage(message);
+        reportMorphTargets(&simParts[simGathered]);
         simGathered++;
         simHopPart++;
         simHop = SIM_HOP_TREE;
