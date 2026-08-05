@@ -676,5 +676,46 @@ int main(void)
         }
     }
 
+    printf("\n-- moving a mesh by a transform --\n");
+    {
+        /* A quarter turn about z, then two along x, written column major the
+           way the node reader hands it over. A reader that treated it as row
+           major would answer (2, -1, 0) for the first vertex rather than
+           (2, 1, 0), which is a mistake that looks like a model facing the
+           wrong way rather than one being read wrong. */
+        static const Real32 quarterTurnThenShift[16] = {
+            0.0F, 1.0F, 0.0F, 0.0F,
+            -1.0F, 0.0F, 0.0F, 0.0F,
+            0.0F, 0.0F, 1.0F, 0.0F,
+            2.0F, 0.0F, 0.0F, 1.0F
+        };
+        static Real32 positions[6] = { 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F };
+        static Real32 normals[6] = { 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F };
+        GeometryMesh moved;
+
+        moved.positions = positions;
+        moved.normals = normals;
+        moved.textureCoordinates = NULL_POINTER;
+        moved.vertexCount = 2U;
+
+        geometryMeshApplyTransform(&moved, quarterTurnThenShift);
+
+        checkThat(&failureCount, "a point on x turns onto y and shifts",
+                  nearly(positions[0], 2.0F) && nearly(positions[1], 1.0F) &&
+                      nearly(positions[2], 0.0F));
+        checkThat(&failureCount, "and a point on z only shifts",
+                  nearly(positions[3], 2.0F) && nearly(positions[4], 0.0F) &&
+                      nearly(positions[5], 1.0F));
+        /* Normals take the rotation and not the translation. A direction that
+           picked up the shift would stop being a direction — and would light
+           the model as though every face pointed away from the origin. */
+        checkThat(&failureCount, "a normal turns without moving",
+                  nearly(normals[0], 0.0F) && nearly(normals[1], 1.0F) &&
+                      nearly(normals[2], 0.0F));
+        checkThat(&failureCount, "and one along the axis of the turn is unchanged",
+                  nearly(normals[3], 0.0F) && nearly(normals[4], 0.0F) &&
+                      nearly(normals[5], 1.0F));
+    }
+
     return checkSummarize(failureCount, "geometry reader");
 }
