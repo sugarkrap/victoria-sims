@@ -343,8 +343,9 @@ static void buildContainer(Builder *builder, Unsigned32 blockVersion, Unsigned32
 static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boolean withWeights)
 {
     static const Real32 positions[9] = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
-    /* Bones 2 and 5; bone 0 alone; bones 7, 1 and 3. */
-    static const Unsigned32 assignments[3] = { 0xFFFF0502UL, 0xFFFFFF00UL, 0xFF030107UL };
+    /* Slots into the primitive's bone list below, not bones: the first three
+       slots then the first alone then all three in another order. */
+    static const Unsigned32 assignments[3] = { 0xFF020100UL, 0xFFFFFF00UL, 0xFF010002UL };
     static const Real32 weights[6] = { 0.25f, 0.5f, 1.0f, 0.0f, 0.5f, 0.25f };
     static const Unsigned32 elementIndices[3] = { 0U, 1U, 2U };
     static const Unsigned32 faces[3] = { 0U, 1U, 2U };
@@ -411,7 +412,13 @@ static void buildSkinnedContainer(Builder *builder, Unsigned32 blockVersion, Boo
     putUnsigned32(builder, 0U);
     if (blockVersion > 1U)
     {
-        putIndexArray(builder, NULL_POINTER, 0U, blockVersion);
+        /* The bones this primitive's slots stand for. Deliberately not 0, 1, 2:
+           a reader that ignored this list and used the slot directly would pass
+           every check against an identity mapping and fail on every real
+           mesh. */
+        static const Unsigned32 bones[3] = { 4U, 9U, 2U };
+
+        putIndexArray(builder, bones, 3U, blockVersion);
     }
 }
 
@@ -700,14 +707,15 @@ int main(void)
            nothing after. Read the other way round this is bone 255 twice, which
            would silently unweight the vertex rather than fail. */
         checkThat(&failureCount, "the first slot is the low byte",
-                  skinned.boneAssignments[0] == 2U);
+                  skinned.boneAssignments[0] == 0U);
         checkThat(&failureCount, "the second is the one above it",
-                  skinned.boneAssignments[1] == 5U);
-        checkThat(&failureCount, "and the unused slots say so",
-                  skinned.boneAssignments[2] == 255U && skinned.boneAssignments[3] == 255U);
-        checkThat(&failureCount, "a vertex on three bones keeps all three",
-                  skinned.boneAssignments[8] == 7U && skinned.boneAssignments[9] == 1U &&
-                      skinned.boneAssignments[10] == 3U);
+                  skinned.boneAssignments[1] == 1U);
+        checkThat(&failureCount, "and the third above that",
+                  skinned.boneAssignments[2] == 2U);
+        checkThat(&failureCount, "with the unused slot saying so",
+                  skinned.boneAssignments[3] == 255U);
+        checkThat(&failureCount, "a vertex on one bone leaves the rest unassigned",
+                  skinned.boneAssignments[4] == 0U && skinned.boneAssignments[5] == 255U);
 
         printf("\n-- is the weight the file left out worked back out --\n");
         /* Stored 0.25 and 0.5, so the third bone carries the remaining quarter.
@@ -739,6 +747,67 @@ int main(void)
             checkThat(&failureCount, "and reports the assignments it passed over",
                       lopsided.unusedElementCount == 1U &&
                           lopsided.unusedElements[0] == 0xFBD70111UL);
+        }
+
+        printf("\n-- does the primitive keep the bones it names --\n");
+        /* Without this the assignment slots mean nothing: slot 1 is a different
+           bone on the head than on the hands, and a mesh skinned as though it
+           were the same folds itself inside out. */
+        checkThat(&failureCount, "keeps the bone list", skinned.primitives[0].boneRemap != NULL_POINTER);
+        checkThat(&failureCount, "with the count the file gave",
+                  skinned.primitives[0].boneRemapCount == 3U);
+        checkThat(&failureCount, "and the bones in it",
+                  skinned.primitives[0].boneRemap[0] == 4U &&
+                      skinned.primitives[0].boneRemap[1] == 9U &&
+                      skinned.primitives[0].boneRemap[2] == 2U);
+
+        printf("\n-- posing by the skeleton --\n");
+        {
+            /* Two bones that only translate, so where a vertex lands is
+               arithmetic anyone can check by hand rather than a rotation to be
+               taken on trust. Bone 4 moves ten along x, bone 9 moves a hundred
+               along y, and the rest are identity. */
+            static Real32 palette[10 * 16];
+            Unsigned32 bone;
+            Unsigned32 cell;
+
+            for (bone = 0U; bone < 10U; bone++)
+            {
+                for (cell = 0U; cell < 16U; cell++)
+                {
+                    palette[bone * 16U + cell] = (cell % 5U == 0U) ? 1.0f : 0.0f;
+                }
+            }
+            palette[4U * 16U + 12U] = 10.0f;
+            palette[9U * 16U + 13U] = 100.0f;
+
+            /* Vertex 0 sits at the origin on slots 0, 1 and 2 — bones 4, 9 and
+               2 — weighted a quarter, a half, and the quarter the file left
+               implied. Bone 2 is identity, so x moves a quarter of ten and y
+               half of a hundred, and both are arithmetic rather than trust. */
+            checkThat(&failureCount, "moves every weighted vertex",
+                      geometryMeshApplySkin(&skinned, palette, 10U) == 3U);
+            checkThat(&failureCount, "blending the translations by their weights",
+                      nearly(skinned.positions[0], 2.5f) && nearly(skinned.positions[1], 50.0f));
+
+            printf("\n-- refusing to pose what it cannot --\n");
+            {
+                GeometryMesh again;
+
+                buildSkinnedContainer(&builder, 4U, BOOLEAN_TRUE);
+                (void)geometryReaderOpen(&again, builder.bytes, builder.length, &arena);
+                /* A palette too short for the bones named. Moving nothing is
+                   the right answer: a vertex blended from bones that are not
+                   there would collapse onto the origin, and a model in a heap
+                   at the origin reads as broken maths rather than as a palette
+                   that was never built. */
+                checkThat(&failureCount, "moves nothing when the bones are out of range",
+                          geometryMeshApplySkin(&again, palette, 2U) == 0U);
+                checkThat(&failureCount, "leaving the vertices where they were",
+                          nearly(again.positions[3], 1.0f) && nearly(again.positions[4], 0.0f));
+                checkThat(&failureCount, "and nothing at all without a palette",
+                          geometryMeshApplySkin(&again, NULL_POINTER, 10U) == 0U);
+            }
         }
 
         printf("\n-- are the element names the ones the format uses --\n");

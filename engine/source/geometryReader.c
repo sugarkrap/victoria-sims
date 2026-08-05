@@ -287,6 +287,9 @@ typedef struct PrimitiveSpan
     MemorySize faceStart;
     Unsigned32 faceCount;
     Unsigned32 componentIndex;
+    /* Where the primitive's bone list is, and how long. */
+    MemorySize boneStart;
+    Unsigned32 boneCount;
 } PrimitiveSpan;
 
 /* The collection result, said in the geometry reader's own words. Callers count
@@ -614,9 +617,15 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         primitiveSpans[storedPrimitives].faceCount =
             skipIndexArray(&cursor, blockVersion, &primitiveSpans[storedPrimitives].faceStart);
         (void)resourceCursorReadUnsigned32(&cursor);
+        primitiveSpans[storedPrimitives].boneCount = 0U;
+        primitiveSpans[storedPrimitives].boneStart = 0UL;
         if (blockVersion > 1UL)
         {
-            (void)skipIndexArray(&cursor, blockVersion, NULL_POINTER);
+            /* The bones this primitive's vertex slots stand for. Noted rather
+               than skipped now: the slots in a vertex assignment are indices
+               into this, so without it they name nothing. */
+            primitiveSpans[storedPrimitives].boneCount =
+                skipIndexArray(&cursor, blockVersion, &primitiveSpans[storedPrimitives].boneStart);
         }
         if (cursor.overran)
         {
@@ -636,6 +645,10 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         primitives[storedPrimitives].componentIndex = componentIndex;
         primitives[storedPrimitives].firstIndex = indexTotal;
         primitives[storedPrimitives].indexCount = primitiveSpans[storedPrimitives].faceCount;
+        primitives[storedPrimitives].boneRemap = NULL_POINTER;
+        primitives[storedPrimitives].boneRemapCount = 0U;
+        primitives[storedPrimitives].firstVertex = components[componentIndex].baseVertex;
+        primitives[storedPrimitives].vertexCount = components[componentIndex].vertexCount;
         primitives[storedPrimitives].name[0] = '\0';
         stringAppend(primitives[storedPrimitives].name, GEOMETRY_NAME_LIMIT, name);
         indexTotal += primitiveSpans[storedPrimitives].faceCount;
@@ -785,6 +798,59 @@ GeometryReadResult geometryReaderOpen(GeometryMesh *mesh, const Unsigned8 *bytes
         return GEOMETRY_READ_OUT_OF_ARENA;
     }
 
+    /* The bone lists, one array shared out between the primitives that have
+       one. Only when the mesh is skinned: on a rigid model these name bones
+       nothing is weighted to, and copying them would cost a walk of the whole
+       disc's static objects to hold numbers no one reads. */
+    if (boneAssignments != NULL_POINTER)
+    {
+        Unsigned32 boneTotal = 0U;
+
+        for (index = 0U; index < storedPrimitives; index++)
+        {
+            boneTotal += primitiveSpans[index].boneCount;
+        }
+        if (boneTotal > 0U)
+        {
+            Unsigned32 *bones = (Unsigned32 *)memoryArenaAllocate(
+                arena, (MemorySize)boneTotal * sizeof(Unsigned32), sizeof(Unsigned32));
+            Unsigned32 written = 0U;
+
+            if (bones == NULL_POINTER)
+            {
+                return GEOMETRY_READ_OUT_OF_ARENA;
+            }
+            for (index = 0U; index < storedPrimitives; index++)
+            {
+                Unsigned32 inner;
+
+                if (primitiveSpans[index].boneCount == 0U)
+                {
+                    continue;
+                }
+                cursor.position = primitiveSpans[index].boneStart;
+                cursor.overran = BOOLEAN_FALSE;
+                primitives[index].boneRemap = &bones[written];
+                for (inner = 0U; inner < primitiveSpans[index].boneCount; inner++)
+                {
+                    bones[written + inner] = (blockVersion < 3UL)
+                                                 ? resourceCursorReadUnsigned32(&cursor)
+                                                 : (Unsigned32)resourceCursorReadUnsigned16(&cursor);
+                }
+                if (cursor.overran)
+                {
+                    /* Kept readable rather than refused: a mesh whose bone list
+                       ran off the end still draws, it just cannot be skinned,
+                       and losing the model over it would be the wrong trade. */
+                    primitives[index].boneRemap = NULL_POINTER;
+                    continue;
+                }
+                primitives[index].boneRemapCount = primitiveSpans[index].boneCount;
+                written += primitiveSpans[index].boneCount;
+            }
+        }
+    }
+
     /* Second pass: the faces, shifted by where their component's vertices ended
      * up. After this the indices are absolute, so drawing all of them draws
      * every part of the model in one call. */
@@ -881,6 +947,133 @@ void geometryMeshGetBounds(const GeometryMesh *mesh, Real32 *minimum, Real32 *ma
             }
         }
     }
+}
+
+Unsigned32 geometryMeshApplySkin(GeometryMesh *mesh, const Real32 *boneMatrices,
+                                 Unsigned32 boneCount)
+{
+    Unsigned32 which;
+    Unsigned32 moved = 0U;
+
+    if (mesh->positions == NULL_POINTER || mesh->boneAssignments == NULL_POINTER ||
+        mesh->boneWeights == NULL_POINTER || boneMatrices == NULL_POINTER || boneCount == 0U)
+    {
+        return 0U;
+    }
+
+    for (which = 0U; which < mesh->storedPrimitiveCount; which++)
+    {
+        const GeometryPrimitive *primitive = &mesh->primitives[which];
+        Boolean alreadyDone = BOOLEAN_FALSE;
+        Unsigned32 earlier;
+        Unsigned32 vertex;
+
+        if (primitive->boneRemap == NULL_POINTER || primitive->boneRemapCount == 0U)
+        {
+            continue;
+        }
+        /* Two primitives can draw from one component, and their vertices are
+           the same vertices. Transforming them once per primitive would apply
+           the pose twice and fold the part in on itself. */
+        for (earlier = 0U; earlier < which; earlier++)
+        {
+            if (mesh->primitives[earlier].componentIndex == primitive->componentIndex &&
+                mesh->primitives[earlier].boneRemap != NULL_POINTER)
+            {
+                alreadyDone = BOOLEAN_TRUE;
+                break;
+            }
+        }
+        if (alreadyDone)
+        {
+            continue;
+        }
+
+        for (vertex = primitive->firstVertex;
+             vertex < primitive->firstVertex + primitive->vertexCount &&
+             vertex < mesh->vertexCount;
+             vertex++)
+        {
+            const Unsigned8 *slots = &mesh->boneAssignments[vertex * 4U];
+            const Real32 *weights = &mesh->boneWeights[vertex * 4U];
+            Real32 blended[12];
+            Real32 weightTotal = 0.0f;
+            Unsigned32 slot;
+            Unsigned32 cell;
+            Real32 x;
+            Real32 y;
+            Real32 z;
+            Real32 *point;
+
+            for (cell = 0U; cell < 12U; cell++)
+            {
+                blended[cell] = 0.0f;
+            }
+
+            /* Only the rotation and the translation: the fourth column of an
+               affine matrix is the same for all of them, so blending it would
+               be adding up ones. */
+            for (slot = 0U; slot < 4U; slot++)
+            {
+                const Real32 *matrix;
+                Unsigned32 bone;
+
+                if (slots[slot] == (Unsigned8)GEOMETRY_BONE_NONE || weights[slot] == 0.0f)
+                {
+                    continue;
+                }
+                if (slots[slot] >= primitive->boneRemapCount)
+                {
+                    continue;
+                }
+                bone = primitive->boneRemap[slots[slot]];
+                if (bone >= boneCount)
+                {
+                    continue;
+                }
+                matrix = &boneMatrices[bone * 16U];
+                for (cell = 0U; cell < 3U; cell++)
+                {
+                    blended[cell] += matrix[cell] * weights[slot];
+                    blended[3U + cell] += matrix[4U + cell] * weights[slot];
+                    blended[6U + cell] += matrix[8U + cell] * weights[slot];
+                    blended[9U + cell] += matrix[12U + cell] * weights[slot];
+                }
+                weightTotal += weights[slot];
+            }
+
+            /* A vertex whose bones were all out of range keeps the position it
+               was read with. Left where it is rather than collapsed to the
+               origin, which is what multiplying by an all-zero blend would do
+               and what makes a half-skinned mesh look like a black hole. */
+            if (weightTotal <= 0.0f)
+            {
+                continue;
+            }
+
+            point = &mesh->positions[vertex * 3U];
+            x = point[0];
+            y = point[1];
+            z = point[2];
+            point[0] = blended[0] * x + blended[3] * y + blended[6] * z + blended[9];
+            point[1] = blended[1] * x + blended[4] * y + blended[7] * z + blended[10];
+            point[2] = blended[2] * x + blended[5] * y + blended[8] * z + blended[11];
+
+            if (mesh->normals != NULL_POINTER)
+            {
+                Real32 *direction = &mesh->normals[vertex * 3U];
+
+                x = direction[0];
+                y = direction[1];
+                z = direction[2];
+                direction[0] = blended[0] * x + blended[3] * y + blended[6] * z;
+                direction[1] = blended[1] * x + blended[4] * y + blended[7] * z;
+                direction[2] = blended[2] * x + blended[5] * y + blended[8] * z;
+            }
+            moved++;
+        }
+    }
+    return moved;
 }
 
 void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix)

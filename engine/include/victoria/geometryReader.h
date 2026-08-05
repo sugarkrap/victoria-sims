@@ -102,6 +102,27 @@ typedef struct GeometryPrimitive
     /* Its range in the mesh's index array. */
     Unsigned32 firstIndex;
     Unsigned32 indexCount;
+
+    /* What this primitive's bone slots mean.
+     *
+     * A vertex's assignment slots hold small numbers — nought to three on a
+     * face — and those are not bones. They are indices into this array, which
+     * is per primitive, and this array holds the bones. Without it the slots
+     * are meaningless: slot 1 means one thing on the head and another on the
+     * hands, and a mesh skinned as though it meant the same would fold itself
+     * inside out in a way that looks like broken maths rather than a missing
+     * table.
+     *
+     * Null with a zero count when the primitive named no bones, which is what a
+     * rigid part looks like. */
+    const Unsigned32 *boneRemap;
+    Unsigned32 boneRemapCount;
+    /* Which vertices of the merged arrays are this primitive's component's.
+       Its faces only reach these, and skinning walks them directly rather than
+       through the indices — a vertex reached twice through two faces must not
+       be transformed twice. */
+    Unsigned32 firstVertex;
+    Unsigned32 vertexCount;
 } GeometryPrimitive;
 
 typedef struct GeometryMesh
@@ -187,5 +208,23 @@ void geometryMeshGetBounds(const GeometryMesh *mesh, Real32 *minimum, Real32 *ma
    rotation alone — translating a direction would turn it into a point.
    Rewrites the mesh's arrays, which are the caller's arena. */
 void geometryMeshApplyTransform(GeometryMesh *mesh, const Real32 *matrix);
+
+/* Moves every weighted vertex to where its bones put it.
+ *
+ * boneMatrices is boneCount matrices of sixteen floats, in the same order the
+ * primitives' bone lists index. A vertex's assignment slot names a place in its
+ * primitive's list; that names a bone; that names a matrix here. Each vertex is
+ * the weighted sum of up to four of them.
+ *
+ * Positions and normals are rewritten in place, so this happens once, before
+ * the mesh is uploaded. It is not a substitute for a skinned pipeline — an
+ * animated model needs the blend on the graphics processor — but a Sim standing
+ * still is a Sim in its rest pose, and this puts it there.
+ *
+ * Returns how many vertices it actually moved: a mesh whose bone lists point
+ * outside the matrices it was given moves nothing, and a caller that cannot
+ * tell that from a mesh with no weights would report a pose it never applied. */
+Unsigned32 geometryMeshApplySkin(GeometryMesh *mesh, const Real32 *boneMatrices,
+                                 Unsigned32 boneCount);
 
 #endif

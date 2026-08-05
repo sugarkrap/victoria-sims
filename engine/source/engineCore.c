@@ -2215,6 +2215,38 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
         }
         platformLogMessage(message);
 
+        /* What the skeleton actually did. A pose that moved nothing and a mesh
+           with no pose to apply look identical on screen, so the numbers say
+           which happened — and, when nothing moved, what the bone lists held,
+           since that is the one thing that decides where to look next. */
+        if (discSearch.mesh.boneAssignments != NULL_POINTER)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: posed ");
+            appendCount(message, sizeof(message), discSearch.verticesPosed);
+            stringAppend(message, sizeof(message), " vertex(es) against ");
+            appendCount(message, sizeof(message), discSearch.bonesInPalette);
+            stringAppend(message, sizeof(message), " bone(s) of the tree");
+            if (discSearch.verticesPosed == 0U && discSearch.firstBoneNameCount > 0U)
+            {
+                Unsigned32 which;
+
+                stringAppend(message, sizeof(message),
+                             " — none, and the bones the primitives named were");
+                for (which = 0U; which < discSearch.firstBoneNameCount; which++)
+                {
+                    stringAppend(message, sizeof(message), " ");
+                    appendCount(message, sizeof(message), discSearch.firstBoneNames[which]);
+                }
+                /* Stated as what they were, not as what that proves. Small
+                   numbers here mean the indices were fine and something else
+                   is wrong; large ones mean they are identifiers and want
+                   matching against the nodes rather than counting through
+                   them. */
+            }
+            platformLogMessage(message);
+        }
+
         /* Element kinds the reader met and did not use, by name where the
            format's own table has one. A number alone sends the next reader
            looking it up; the name says at once whether what was passed over

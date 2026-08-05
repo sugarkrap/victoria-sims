@@ -43,6 +43,9 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
     search->rigidModelsPassed = 0U;
     search->limitedToOneFile = BOOLEAN_FALSE;
     search->onlyFileIndex = 0U;
+    search->verticesPosed = 0U;
+    search->bonesInPalette = 0U;
+    search->firstBoneNameCount = 0U;
     search->packagePath[0] = '\0';
     search->packagesOpened = 0U;
     search->packagesCompressed = 0U;
@@ -499,6 +502,75 @@ static void placePartByItsNode(DiscContentSearch *search)
     geometryMeshApplyTransform(&search->mesh, matrix);
 }
 
+/* Puts the mesh where its skeleton says, when it has one.
+ *
+ * The tree's node that holds the shape carries no bone — a Sim's face reported
+ * bone 0x7FFFFFFF, which is the sentinel for none — so the bone a vertex hangs
+ * on cannot come from there. It comes from the primitive's own bone list, which
+ * a vertex's assignment slots index, and that list names bones in the tree.
+ *
+ * What a name in that list actually is has not been established: it may be an
+ * index into the tree's nodes, or it may be the identifier a node carries. This
+ * builds the palette by node index, which is the reading that costs nothing to
+ * try, and reports how many vertices it managed to move. Nought moved with
+ * weights present is the other reading, and the numbers logged beside it are
+ * what says so. */
+static void poseByTheSkeleton(DiscContentSearch *search)
+{
+    MemorySize marker;
+    Real32 *palette;
+    Unsigned32 nodeCount;
+    Unsigned32 index;
+
+    search->verticesPosed = 0U;
+    search->bonesInPalette = 0U;
+    if (search->mesh.boneAssignments == NULL_POINTER || !search->modelHasTree)
+    {
+        return;
+    }
+    nodeCount = search->modelTree.storedNodeCount;
+    if (nodeCount == 0U)
+    {
+        return;
+    }
+
+    /* The first bones a primitive names, kept for the log. Whether these are
+       small enough to be node indices is the whole question, and one line of
+       them answers it without another run. */
+    for (index = 0U; index < search->mesh.storedPrimitiveCount &&
+                     search->firstBoneNameCount < DISC_CONTENT_BONE_SAMPLE;
+         index++)
+    {
+        const GeometryPrimitive *primitive = &search->mesh.primitives[index];
+        Unsigned32 inner;
+
+        for (inner = 0U; inner < primitive->boneRemapCount &&
+                         search->firstBoneNameCount < DISC_CONTENT_BONE_SAMPLE;
+             inner++)
+        {
+            search->firstBoneNames[search->firstBoneNameCount] = primitive->boneRemap[inner];
+            search->firstBoneNameCount++;
+        }
+    }
+
+    marker = memoryArenaGetMarker(search->arena);
+    palette = (Real32 *)memoryArenaAllocate(search->arena,
+                                            (MemorySize)nodeCount * 16UL * sizeof(Real32),
+                                            sizeof(Real32));
+    if (palette == NULL_POINTER)
+    {
+        return;
+    }
+    for (index = 0U; index < nodeCount; index++)
+    {
+        resourceNodeGetWorldTransform(&search->modelTree, index, &palette[index * 16U]);
+    }
+    search->bonesInPalette = nodeCount;
+    search->verticesPosed = geometryMeshApplySkin(&search->mesh, palette, nodeCount);
+    /* The palette is read once and done with; the mesh keeps the result. */
+    memoryArenaRewindToMarker(search->arena, marker);
+}
+
 /* The material a part wears, and the texture it paints with.
  *
  * Every hop here is a string. A part wearing "ufocrash_cabin" wants the
@@ -813,6 +885,7 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
     }
 
     placePartByItsNode(search);
+    poseByTheSkeleton(search);
     chooseMaterialPerPrimitive(search);
     findTextureForMaterial(search, &package);
 

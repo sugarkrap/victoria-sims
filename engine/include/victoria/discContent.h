@@ -54,6 +54,10 @@ const char *discContentStatusGetName(DiscContentStatus status);
    normal. */
 #define DISC_CONTENT_PART_LIMIT 32U
 
+/* How many of a primitive's named bones are kept for reporting. Enough to see
+   what kind of number they are, which is all the log needs to settle it. */
+#define DISC_CONTENT_BONE_SAMPLE 6U
+
 /* One drawable piece of a model: a mesh, the material it wears, and which node
    of the transform tree placed it. The transform itself is not applied yet —
    that is the skeleton's job — but the node is recorded now because finding it
@@ -116,6 +120,18 @@ typedef struct DiscContentSearch
        holds is taken as it is. */
     Boolean limitedToOneFile;
     Unsigned32 onlyFileIndex;
+
+    /* What the skeleton did to the mesh. Nought posed with weights present
+       means the bone lists named nothing the tree could be indexed by, which is
+       a different problem from a mesh with no weights and must not read as the
+       same one. */
+    Unsigned32 verticesPosed;
+    Unsigned32 bonesInPalette;
+    /* The first few bones a primitive named, so a log can say whether they look
+       like indices into a tree of a hundred and twenty six nodes or like the
+       identifiers those nodes carry. */
+    Unsigned32 firstBoneNames[DISC_CONTENT_BONE_SAMPLE];
+    Unsigned32 firstBoneNameCount;
 
     /* Filled in when the status is FOUND. */
     char packagePath[DISC_CONTENT_PATH_LIMIT];
