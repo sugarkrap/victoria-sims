@@ -74,6 +74,13 @@ void discContentBegin(DiscContentSearch *search, VirtualFileSystem *fileSystem, 
    mounted out of it are the ones holding whole models rather than one face. */
 #define PREFERRED_DIRECTORY "Sims3D"
 
+/* Skipped on the first round. A locale's Sims3D holds that language's objects —
+   the archway this drew is the Japanese one — and objects are static: their
+   containers carry positions, normals and texture coordinates and nothing else.
+   The meshes a Sim is built from are under the plain Sims3D, and they are the
+   only ones that can say what a bone element looks like. */
+#define PREFERRED_EXCLUDES "Locale"
+
 static Boolean endsWithPackage(const char *path)
 {
     return stringEndsWithIgnoringCase(path, ".package");
@@ -600,7 +607,9 @@ DiscContentStatus discContentStep(DiscContentSearch *search)
        meshes in. On the second, anything — including that directory again,
        which costs one wasted pass over packages that already failed and saves
        a second flag to remember that they did. */
-    if (search->walkingPreferred && !stringContainsIgnoringCase(entry->path, PREFERRED_DIRECTORY))
+    if (search->walkingPreferred &&
+        (!stringContainsIgnoringCase(entry->path, PREFERRED_DIRECTORY) ||
+         stringContainsIgnoringCase(entry->path, PREFERRED_EXCLUDES)))
     {
         search->nextIndex++;
         return DISC_CONTENT_PENDING;
