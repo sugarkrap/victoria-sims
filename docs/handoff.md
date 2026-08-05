@@ -15,18 +15,27 @@ node tests/verifyWebModule.mjs     # the wasm module against a fixture disc
 node tests/verifyRuntimeUpload.mjs # the browser runtime's upload path
 ```
 
+`make web` needs `wasm-ld`, which is the `lld` package on Arch and
+`lld-<version>` on Debian. Without it the compile succeeds and the link fails
+with `posix_spawn failed`, which reads like a compiler problem and is not.
+
+To run the web build, serve `build/web/` over HTTP and open it —
+`python3 -m http.server 8173 --bind 127.0.0.1` is enough. `localhost` counts as
+a secure context, so WebGPU works without TLS. Drop an ISO on the page.
+
 The Linux binary takes:
 
 | Argument | What it does |
 | --- | --- |
 | `--disc=PATH` | An ISO **or a directory**. Which it is is decided by looking, not by the path's shape, so a mounted CD and a rip both work. |
 | `--inspect-disc=PATH` | Lists what is on the disc and stops. No window, no rendering. |
-| `--check` | Headless self-check; no window. Good for a machine with no display. |
+| `--check` | Headless self-check; no window. It does **not** load a disc. |
 | `--quiet` | Silences the periodic profiler line. |
 | `--graphics-memory-mebibytes=N` | Pretends the driver has that much, so a small device can be simulated on a large machine. |
 
-`--inspect-disc` and `--check` need no display, which makes them the two worth
-reaching for first on an unfamiliar machine.
+Shell note, since it has cost time twice: `--disc=~/path` does not work. Neither
+zsh nor bash expands a tilde after `=` in an ordinary argument, so the engine
+gets the literal string and says it cannot open that disc. Use `"$HOME/…"`.
 
 ## What happens on a real disc
 
@@ -46,241 +55,216 @@ The load then goes, in order:
    package.
 5. **Fetch the texture** the material names, following a TXTR's reference to the
    LIFO holding its largest mip level.
-6. If what was drawn has a skeleton, **index every package for animations** and
-   open them until one names this skeleton, then pose the mesh by it.
-
-On the tested disc that ends at a textured Sim face:
-`#0x7f9bd9b9!age3_00_shpe` out of
-`DATARUS/TSData/Res/UserData/Neighborhoods/Tutorial/Characters/Tutorial_User00001.package`,
-521 vertices, all of them weighted, painted with `amface-s1` at 512×512.
+6. If what was drawn has a skeleton, **assemble a whole Sim** from the parts the
+   game names, painting each part separately.
+7. **Index every package for animations** and play the first that stands on its
+   own and targets this skeleton.
 
 Every stage says what it saw. A run's log is meant to be self-describing enough
 that this document is not needed to interpret it.
 
-## The skeleton, and why a resting mesh still does not move
+## A whole Sim
 
-`#23` read the skeleton and applied nothing. That was a finding rather than a
-gap, and it still holds — what changed with #26 is that there is now an
-animation to supply transforms that are not the bind pose:
-
-> Skinning is `Σ weight · bonePose · inverseBind · v`. The inverse bind is the
-> bone's transform in the pose the mesh was authored in. The mesh on the disc
-> **is** in that pose, so at rest every pair multiplies out to the identity and
-> a correct skin moves nothing at all.
-
-Applying world transforms alone — the first attempt — double-transforms vertices
-that are already in world space, and draws a Sim's face with a limb stretched
-out of it. The disproof had been on screen for several runs beforehand: the face
-drew correctly with no skinning applied whatsoever. The rule is documented on
-`geometryMeshApplySkin` in `engine/include/victoria/geometryReader.h`, and a
-check pins it: a palette of identities moves every vertex and lands each one
-exactly where it started.
-
-What is read and kept, and now fed to one:
-
-- **Bone assignments** `0xFBD70111` — one word per vertex, four byte indices
-  packed low-byte-first, 255 meaning an unused slot.
-- **Bone weights** `0x3BD70105` — one to three floats stored, the last implied
-  so they sum to one. The reader works the implied one back out.
-- **The per-primitive bone list** — the last index array in a primitive's
-  record. A vertex's assignment slots are indices into *this*, not bones. Slot 1
-  means a different bone on the head than on the hands, and a mesh skinned as
-  though the slots were bones folds itself inside out.
-
-The element identifiers are not guesswork and never were: the format's own table
-lives in the repo at
-`legacy/scripts/openTS2/Files/Formats/DBPF/Scenegraph/Block/GeometryData/GeometryElement.cs`,
-with all nineteen and both their wiki and in-game names. Read it before
-inferring anything about an element.
-
-## The question that was open, and the answer
-
-Whether a primitive's bone numbers were **positions in the node list** or the
-**identifiers its nodes carry** is settled: they are identifiers.
-
-The heuristic written down here for telling them apart — small means positions,
-large means identifiers — was **wrong**, and worth recording as wrong. Real bone
-identifiers are small: this disc's face names bones 7, 6 and 5. What is large is
-`0x7FFFFFFF`, the sentinel a node carries when it is *not* a bone, and seeing
-that on a root node is what made identifiers look like they ought to be big.
-
-The reference settles it without any inference at all: `ScenegraphComponent.cs`
-keys its own lookup as `_boneIdToTransform[transformNode.BoneId]`.
-`resourceNodeFindByBoneIdentifier` now searches rather than indexes, and a check
-pins it against a tree whose two orders deliberately disagree.
-
-## The bind pose was in the file all along
-
-The plan recorded here was to invert what `resourceNodeGetWorldTransform`
-returns. That is not necessary: the GMDC carries its own pose-transform array,
-one quaternion and translation per bone, in a section straight after the
-primitives that this reader used to stop short of. It is numbered the way the
-primitives' bone lists are numbered, so a bone number indexes it directly.
-
-It holds the **inverse** bind, which was measured rather than assumed:
+This is the frontier. A Sim is not one model: it is a skeleton and three things
+that skin to it, and openTS2's own base case names them — `auskel_cres`,
+`amBodyNaked_cres`, `amFace_cres`, `amHairBald_cres`. All four are on this disc.
 
 ```
-engine: 3 bone name(s) matched a node by identifier, 0 matched none; over 3
-measured, world x stored is 0.000 from the identity and stored is 1.666 from
-world — the smaller says which the file holds
+engine: 4 of 4 of a whole Sim's parts are on this disc by name
+engine:   amBodyNaked_cres — 1173 vertices, 1768 triangles, wearing ambodynaked_nude_s1
+engine:   amFace_cres      —  521 vertices,  737 triangles, wearing uuface_browbushy_brown
+engine:   amHairBald_cres  —  144 vertices,  244 triangles, wearing amhairbald_skin_s1
+engine: a whole Sim — 3 part(s) joined into 1838 vertices and 2749 triangles across 3 range(s)
+engine: hung on auskel_cres — 125 node(s)
+engine:   part 0 painted with ambodynaked-nude-s1 at 1024x1024
+engine:   part 1 painted with amface-s1 (overriding what its shape bound) at 512x512
+engine:   part 2 painted with umhairbald-skin-s1 at 512x512
+engine: posed 1838 of 1838 vertices over 63 bone(s); it moved by 0.030 against a model 1.879 across
+engine: that was the rest pose ... so the pose composes the way the game does
 ```
 
-Both directions are printed on every run, because the number that matters is
-whichever is near nought and a reader told only the winner has to take the
-comparison on trust. So the engine still has no matrix inverse and, on this
-evidence, needs none.
+Four things about that are not obvious and each was got wrong first.
 
-## #26 — posing from an animation
+**A scenegraph reference is disc-global, not package-local.** All three trees
+are in `Sims06.package` and not one of the shapes they name is. Resolving
+through the package found three trees and zero shapes; the chain has to ask the
+index, which is how the game's own content manager resolves them.
 
-Done. A skinned mesh on screen now sends the load into
-`DISC_PHASE_SEEK_ANIMATION`, which indexes the disc for `0xFB00791E` exactly as
-the skin search indexes for geometry, and opens animations until one will pose
-the model:
+**A shape does not name a container.** It names a geometry **node**, and that
+node references the container. Looking for a container by the shape's mesh name
+finds nothing at all.
 
-```
-engine: 11757 animation(s) across 1411 package(s) to choose from
-engine: animation a2o-exerciseMachine-benchPress-start_anim — 89 channel(s) over
-5 target(s), 3400 tick(s) long, authored against auskel, and 4 inverse
-kinematics chain(s) this does not follow
-engine: posed 521 of 521 vertices over 63 bone(s), 52 channel(s) of the
-animation reaching them; it moved by 0.410 against a model 0.242 across
-```
+**A material binds to a primitive by name, not by position** — and a shape lists
+more materials than the part has parts. A face shape carries the face, the
+brows, the eyes and the lips, so taking the first binding paints the face with a
+bushy brown eyebrow. Both names must be non-empty, too: an unnamed primitive and
+an unnamed binding compare equal, which is two blanks agreeing rather than a
+match. `discContent.c` already carried this warning before any of it was
+written, and it got made anyway.
 
-Two things about that run are the whole lesson of it.
+**The base face resource really does bind its face to a brow material**, because
+it cannot know which face a Sim has. The game overrides it per subset. The
+override here takes the tone from whatever the body ended up wearing — `s1` out
+of `ambodynaked-nude-s1` — and asks for `amface-s1`, so a disc toned differently
+follows its own naming. It stands in for real skin-tone resolution.
 
-**An animation is matched by name, not by number.** A channel carries a bone's
-name as a string and the tree carries nodes with names, so no hash is resolved
-and no index is trusted. The model's own bones on this disc are `head`, `neck`
-and `spine2`.
+## The skeleton, the bind pose, and posing
 
-**The rest pose is what proves it, and nothing else can.** Every animation on
-the disc produces a shape nobody here can check by looking — except
-`a-pose-neutral-stand_anim`, which is very nearly the pose the mesh was authored
-in and so should move it almost not at all. The animation phase now asks for
-that one by name before falling back to the scan, and says outright whether the
-result was what it had to be:
+Skinning is `Σ weight · bonePose · inverseBind · v`. The mesh on the disc **is**
+in its bind pose, so at rest every pair multiplies out to the identity and a
+correct skin moves nothing. Applying world transforms alone draws a Sim's face
+with a limb stretched out of it.
 
-```
-engine: posed 521 of 521 vertices over 63 bone(s), 48 channel(s) of the
-animation reaching them; it moved by 0.011 against a model 0.242 across
-engine: that was the rest pose, which should move the mesh almost not at all —
-and it did not, so the pose composes the way the game does
-```
+**Bone numbers are the identifiers nodes carry, not positions in the node
+list.** An earlier version of this document said small values meant positions
+and large ones meant identifiers; that was **wrong**. Real identifiers are
+small — this disc's face names bones 7, 6 and 5. What is large is `0x7FFFFFFF`,
+the sentinel a node carries when it is *not* a bone.
 
-Under five per cent of the model's own span. That number is the standing proof
-that the palette, the bind pose, the bone numbering and the Euler convention all
-agree with the game; run it before trusting any change to them.
+**The inverse bind is in the file.** A GMDC carries its own pose-transform array
+after the primitives, one quaternion and translation per bone, numbered the way
+the primitives' bone lists are numbered. It holds the **inverse** bind, measured
+rather than assumed: `world x stored` came out 0.000 from the identity while
+`stored` sat 1.666 from world. So there is no matrix inverse in the engine and,
+on this evidence, none is needed.
 
-**Do not diagnose this by looking at two screenshots.** The camera orbits at
-`elapsedSeconds * 0.6f` (`render/openGLES2/renderOpenGLES2.c`), so two captures
-taken at different moments show the model from different angles. A 521-vertex
-face has no modelled back to the skull, and seen from the side it is a profile
-with a smooth shapeless mass behind it — which looks exactly like a mesh torn
-apart. That cost a full round of misdirected diagnosis here: a working pose was
-called a spike, and two hypotheses were built and refuted before the rest pose
-settled it in one run. The instrument to reach for is that check, not the eye.
+**The rest pose is the instrument.** `a-pose-neutral-stand_anim` is very nearly
+the pose the mesh was authored in, so posing by it must move almost nothing. It
+is asked for by name before the scan, and the run says outright whether the
+result was what it had to be. It is the only animation on the disc whose correct
+outcome is knowable in advance, and it has caught the wrong-skeleton class of
+error twice. **Run it before trusting any change to the palette, the bind pose,
+the bone numbering or the Euler convention.**
 
-**The first version of it did lie, though.** It accepted the first animation that read, and
-reported 521 vertices posed by a lighting rig's animation — because
-`geometryMeshApplySkin` returns the number of vertices it *walked*, and an
-all-identity palette walks every one of them to put each back where it was. Two
-guards followed, and neither is optional: the animation's skeleton tag has to
-name a node this model actually has, and the movement is measured against the
-model's own size. A shift on the order of the span is a pose; nought is a
-no-op; many times larger is the spike this project drew once already.
+Know its limit as well: it is a single keyframe with nothing to interpolate, so
+it passes whatever the interpolation does. See the tangents below.
 
-## Playing it, rather than holding one frame
+## The animation
 
-The pose advances on the engine's clock. A tick is an eight hundredth of a
-second — the format's own `FramesPerTick / 24` — and the tick is computed from
-the clock each frame rather than accumulated into, so a dropped frame skips
-ahead instead of slowing the animation down and a long run cannot drift.
+Played on the engine's clock. A tick is an eight hundredth of a second — the
+format's own `FramesPerTick / 24` — computed from the clock each frame rather
+than accumulated, so a dropped frame skips ahead instead of slowing the
+animation and a long run cannot drift.
 
 Skinned on the processor, not blended on the graphics one, which the note on
 `geometryMeshApplySkin` would rather it were. The device ladder decides it: the
 floor has no programmable shading at all and the software rasterizer is the
-expected backend there, so a processor path is needed whatever the top of the
-ladder eventually does.
+expected backend there.
 
-Three things had to be right for this to work at all, and each was wrong first:
+**An animation marked to-object is authored in that object's space.** The mark
+is `2o` and the letter before it says who — `a2o` adult, `t2o` teen, `c2o`
+child. Played with no object in the scene the Sim tumbles through empty air with
+every limb perfectly sensible: a pose missing its other half, not a pose gone
+wrong. Those are skipped, out loud. Matching only `a2o` is not enough; it lands
+on a teen at a mirror instead.
 
-- **A pose has to be idempotent.** `geometryMeshApplySkin` rewrites the mesh in
-  place, so posing an already-posed mesh compounds the two. The bind pose is
-  copied aside and restored before each pose. It is copied *before* the first
-  attempt, not lazily inside it — a pose attempt runs against an arena marker a
-  rejected animation rewinds, so a copy taken there gets handed back while a
-  later pose still believes in it. The only visible sign of that bug was the
-  model's measured span quietly changing from 0.242 to 0.230.
-- **`renderSetMesh` cannot be the per-frame path.** It charges the graphics
-  ledger for a new buffer, compiles the program, and re-frames the camera.
-  Called every frame it leaked the buffer category to fifteen megabytes in
-  twelve seconds and would have hit the ceiling shortly after, and its shader
-  rebuild was a twenty-two millisecond frame. `renderUpdateMeshVertices` exists
-  for this and reuses both; the ledger now sits flat at one mesh's 21 KiB.
-- **The rest pose has no duration.** It is one pose, which is exactly what makes
-  it checkable, so the search keeps its verdict and carries on for an animation
-  with a length to play.
+**The tangents are per second, and are still not followed.**
+`animationMeasureTangentScale` totals what each slope accounts for across an
+interval against the change that interval makes; on two real animations it came
+back 594 over 602 intervals and 784 over 936, against 1 for per tick and 800 for
+per second. Applied as a Hermite at that scale, a Sim that had been moving
+fluidly flew about. So the unit was not the only unknown — which slope belongs
+to which side of a keyframe is also unestablished, and openTS2 carries a "fix
+tangentin and tangentout values" note over the same code. Sampling is a straight
+line: exact at every keyframe, close between them.
 
-## Next
+The check asserts the curve is **not** used, at the scale the measurement
+indicates. Restoring it means deliberately changing a check rather than quietly
+passing one — which is exactly how the wrong curve shipped, twice.
 
-- **#24 — paint each primitive range separately.** The data is already recorded:
-  each part's `firstIndex`, `indexCount` and its own material. What is missing is
-  N draw calls over those ranges in all three backends, and a per-part texture
-  fetch that survives the browser's pending reads.
-- **#22 — walk the archive in fewer reads.** 1,529 entries at one round trip
-  each.
-- **Blend on the graphics processor for the tiers that can.** The processor
-  path is required by the floor of the ladder and is what runs everywhere now,
-  at about 0.64 ms a frame for a 521-vertex face on a desktop. A shader doing
-  the same on the OpenGL ES 2.0 and WebGPU tiers would leave the vertices alone
-  and send a palette instead. Nothing has been measured on real hardware, so
-  whether that is needed is not yet a question anyone here can answer.
-- **Inverse kinematics.** Still counted and skipped; the animation playing
-  carries four chains.
+## Drawing
+
+`renderSetMesh` uploads a mesh; `renderUpdateMeshVertices` re-sends only its
+vertices; `renderSetPartTexture` gives one of the mesh's parts its own image.
+The ranges come from `GeometryPrimitive`, which has always recorded them.
+
+**`renderSetMesh` releases everything the previous mesh took, textures
+included.** Using it as the per-frame path leaks the graphics ledger — fifteen
+megabytes in twelve seconds — and rebuilds a shader every frame. Using it after
+per-part textures are set throws them away, which put a Sim's body back in a
+face the moment it started moving.
+
+The three backends differ deliberately: OpenGL ES 2.0 and WebGPU paint parts
+separately; the software rasterizer ignores textures entirely, because the
+hardware at the floor of the ladder cannot afford to sample per pixel.
+
+## The web build
+
+Everything above runs in a browser, including the whole-Sim assembly. Two things
+are specific to it.
+
+**The disc store holds exactly one delivered range, and consuming it clears the
+hold.** So anything reading a chain must do **exactly one read per step** and
+record what it learned. Code that re-reads its chain on every attempt cannot
+converge: it reads the tree, pends on the shape, comes back to find the tree no
+longer held, pends on that instead, and alternates forever. That is written on
+the skin search in `engineCore.c`, and the Sim assembly was nonetheless built
+doing thirteen reads per step. It retried fifteen thousand times and got
+nowhere. It is a stepper now.
+
+**Nothing native exercises that.** A file descriptor never pends, so every
+native run of the broken version was fine. A change to any multi-read path needs
+the browser to test it.
 
 ## Known soft spots
 
-- **The find-and-redirect path has no fixture.** The test disc holds no skinned
-  mesh, so `make verify` cannot catch a regression in the search that finds one
-  or the redirect that draws it — only the real disc exercises those. A skinned
-  container in `scripts/makeTestDisc.sh` would close it, and it would also give
-  the pose path something to run against, which it likewise has no fixture for:
-  `verifyAnimationReader` covers the format thoroughly and covers the palette,
-  the tag check and the skinning composition not at all.
-- **Past the rest pose, the animation is whichever the scan reaches first.** The
-  named rest pose is tried first; if it is missing, the fallback opens indexed
-  animations until one names this skeleton, so which one poses the Sim then
-  depends on index order, and up to 64 are opened looking for it.
-- **The tangents are followed, but were never checked against the game.** A
-  continuous curve stores one slope and means it both ways; a discontinuous one
-  stores both. A baked curve stores neither and is still sampled as a straight
-  line, because a Hermite with slopes of nought would ease at every keyframe —
-  a shape the file never asked for. The rest pose still lands at 0.011 with
-  these in, which says they did not break anything; it does not say they are
-  right, because that check is exact at keyframes either way.
-- **Inverse kinematics chains are counted and skipped.** Every run says how
-  many, which is what stops the omission from being invisible: the animation
-  above carries four.
-- **The fixture disc reads more bytes than the image is long** (about 1.8×).
-  That is not a leak: every model in it is rigid, so it takes the worst case of
-  both searches — read every package, come back for the first, then index and
-  survey. `tests/verifyWebModule.mjs` bounds it at 3× and explains which two
-  costs make it up.
-- **Load is slower than it was**, deliberately. Finding a skinned mesh means a
-  second index pass over every package and up to 256 container reads. It runs
-  after the picture is already on screen, so it delays "loaded" rather than the
-  render.
+- **The WebGPU build shows banding on the Sim's arm that the OpenGL ES build
+  does not.** Unexplained. What is ruled out: all three materials resolve, all
+  three textures decode at full resolution, all three bind groups build with no
+  fallback logged, the sampler repeats on both axes as the GL one does for
+  power-of-two images, the pixels come from shared C code, and the mesh is not
+  re-uploaded after the parts are painted. First thing to look at next.
+- **The web build is slow**, minutes rather than seconds. The store answers one
+  read per step and a step is a frame, so indexing 1,411 packages costs at least
+  1,411 frames before anything else. Letting several reads be outstanding at
+  once is where the time is; it would also make the one-read-per-step rule a
+  performance choice rather than a correctness one.
+- **The web build has no folder support.** The engine already accepts a
+  directory natively, so the catalogue side is done; `webDiscStore` is what would
+  change. `<input webkitdirectory>` gives a `FileList` and works everywhere;
+  `showDirectoryPicker()` gives a persistent handle in Chromium.
+- **Inverse kinematics are counted and skipped.** Every run says how many; the
+  animation currently played carries two.
+- **The find-and-redirect path and the Sim assembly have no fixture.** The test
+  disc holds no skinned mesh and no Sim, so `make verify` cannot catch a
+  regression in either. A skinned container in `scripts/makeTestDisc.sh` would
+  close the first.
+- **The parts' bind poses agree to 0.015, not to nought**, over 195 bones. Small
+  enough that nothing rests on it, measured every run rather than assumed.
 - **Two unexplained singletons** in the index, unchanged for many runs:
   `refused 1 meshes — not a scenegraph resource`, and `1 would not be read`.
-  One resource each. Small enough to have been left alone, large enough to be
-  worth a look eventually.
 
-## The rule that kept working
+## How to be wrong here
 
-Four separate times, the disc contradicted an entirely reasonable inference —
-that the installer kept a table at `0x30`, that its offset table would be near
-the front, that a Sim is several shapes, that character meshes live where the
-directory names suggest. Each time the fix was the same: stop reasoning about
-what the disc should contain and make the engine report what it actually saw.
+The disc has now contradicted a reasonable inference more than a dozen times,
+and the fix has always been the same: stop reasoning about what it should
+contain and make the engine report what it saw. Beyond that, this session added
+four failure modes worth knowing before repeating them.
+
+**A test that cannot fail is not evidence.** The Hermite curve was added, the
+rest-pose check was recorded *at the time* as unable to discriminate it, and it
+shipped on that check anyway. If a check would pass either way, it is not
+testing the thing.
+
+**Two screenshots are not a diagnosis.** The camera orbits at
+`elapsedSeconds * 0.6f`, so captures at different moments show different angles.
+A correctly posed head seen from the side — a face mesh has no modelled skull
+behind it — looks exactly like a torn one. That cost a full round of misdirected
+work. Worse, three separate bugs this session were visible **only in motion**: a
+body thrashing, part textures lost on the first pose, and a browser livelocking.
+A still frame cannot see any of them.
+
+**Read the warnings already in the tree.** Two of the day's bugs were things
+this codebase had written down: materials bind by name not position, and exactly
+one read per step against a pending store. Both comments were read, and in one
+case copied verbatim, before the rule in them was broken.
+
+**An invariant that holds inside one file does not survive being merged.** A
+component index means something only within its own container, so every part's
+first primitive draws from component nought. Joined without shifting them,
+`geometryMeshApplySkin` sees two primitives over one component, skips the second
+to avoid transforming shared vertices twice, and leaves a Sim's head behind
+while its body lies down — reported as `posed 1173 of 1838`, which is exactly
+the body's count and the number that gave it away.
 
 The logs are verbose on purpose. That is the method, not clutter.
