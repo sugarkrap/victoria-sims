@@ -998,3 +998,57 @@ A measurement note, since it misled once: counting a function by the distance to
 the next line that looks like a definition is wrong in this file, because the
 declaration blocks between functions are hundreds of lines long.
 `engineReportDiscCatalogue` measures 635 that way and is 63.
+
+
+## The state of continuous integration
+
+Six runs reported failure while this work was going on and **not one of them was
+a real failure**. Every job that actually ran passed; the ones marked failed had
+the conclusion `cancelled` after up to four hours of
+
+    The job was not acquired by Runner of type hosted even after multiple attempts
+
+which is GitHub's runner fleet, not this repository. Worth knowing because a red
+tick that means nothing is worse than no tick at all: check the per-job
+conclusions before believing the run.
+
+One thing that outage did settle by accident. Run `31124173549` on the bootstrap
+branch got a runner for the **ARMv7 Cortex-A8** job and it passed — which
+retroactively verifies the ARM rasterizer link fix that had been pushed
+untestable, because there was no cross compiler here at the time.
+
+**Tonight's two commits are unbuilt.** Actions was still in `major_outage` when
+they were pushed, so they will queue until it clears. What has been covered
+locally instead:
+
+| | |
+| --- | --- |
+| Linux, OpenGL ES 2.0 | builds `-Werror` |
+| Linux, software rasterizer | builds `-Werror` |
+| WebAssembly, WebGPU | builds `-Werror`, and both node suites pass |
+| ARMv5TE engine core | builds — `make armv5 ARM_COMPILER="clang --target=armv5te-linux-gnueabi" ARCHIVER=llvm-ar` |
+| ARMv7-A with NEON | builds and verifies its own attributes, same shape plus `ARMV7_READELF=llvm-readelf` |
+| old-ABI ARM | **not covered locally** — `-mabi=apcs-gnu` is a GCC backend flag and clang has no equivalent, so this one genuinely needs the cross compiler CI has |
+| 854 checks across 25 suites | pass |
+| no dynamic allocation, no retail data | pass |
+
+There is no cross toolchain installed here, but clang can target both ARM tiers
+out of the box, which is what those two command lines exploit. The ARMv7 target
+verified its attributes with GNU `readelf` only; it now accepts LLVM's spelling
+of the same tags as well, so the tier can be built by anyone with either.
+
+### A new check
+
+`scripts/checkNoFloatingPoint.sh`, wired into `make check`. glyphRaster.h claims
+the font path does no floating point, and the reason is not stylistic: the floor
+of the ladder has no unit for it, and one glyph is tens of thousands of
+operations. A claim like that rots in exactly one way — somebody writes
+`x / 2.0f` in a helper, it compiles everywhere, it is correct everywhere, and it
+is thirty times slower on the one machine nobody has to hand.
+
+So the check does the only thing that cannot be argued with: it cross-compiles
+the six modules for ARMv5TE with `-mfloat-abi=soft` and looks for calls to the
+soft-float library in the objects. It was confirmed to work by putting a float
+in `glyphRaster.c` and watching it fail on `__aeabi_fmul`. All six are clean.
+`renderSoftware.c` has nine such calls and is not checked — it projects a camera
+and shades a triangle, which is floating point on purpose.

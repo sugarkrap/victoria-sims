@@ -219,9 +219,9 @@ armv7: $(ARMV7_LIBRARY)
 $(ARMV7_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	$(call buildEngineLibrary,$(ARMV7_COMPILER),$(ARMV7_OUTPUT_DIRECTORY),$(ARMV7_FLAGS),$@)
 	@attributes=`$(ARMV7_READELF) -A $(ARMV7_OUTPUT_DIRECTORY)/memoryArena.o`; \
-	echo "$$attributes" | grep -q 'Tag_CPU_arch: v7' || \
+	echo "$$attributes" | grep -qE 'Tag_CPU_arch: v7|Description: ARM v7' || \
 		{ echo "ERROR: not ARMv7" >&2; exit 1; }; \
-	echo "$$attributes" | grep -q 'Tag_Advanced_SIMD_arch: NEON' || \
+	echo "$$attributes" | grep -qE 'Tag_Advanced_SIMD_arch: NEON|Description: NEON' || \
 		{ echo "ERROR: NEON not enabled" >&2; exit 1; }; \
 	echo "verified ARMv7-A with NEON"
 
@@ -491,6 +491,7 @@ $(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
 
 check:
 	@scripts/checkNoDynamicAllocation.sh
+	@scripts/checkNoFloatingPoint.sh
 
 clean:
 	rm -rf $(BUILD_DIRECTORY)
