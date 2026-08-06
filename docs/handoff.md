@@ -243,9 +243,31 @@ Widening the sample to two thousand settled it:
 0x18 —    3 entr(ies) — a bottom and a body at once
 ```
 
-**The face slot is 0x02, and it is mostly paint but not only paint**: 151 of its
-entries reach no mesh and 21 do. Brows and lips and tones are painted onto a
-face that is already drawn; whatever the twenty-one are, they are geometry.
+**The face slot is 0x02, and what is in it is faces.** Every named entry in it
+is a face mesh, one per age, gender and skin tone:
+
+```
+face slot — CASIE_tmface_s1, key 1 of 3 is a shape, found on this disc
+face slot — CASIE_emface_s3, key 1 of 3 is a shape, found on this disc
+face slot — buface_s4, tfface_alien, CASIE_puface_mannequin, …
+```
+
+`<age><gender>face_<tone>`, all reaching a shape on this disc. **This is how a
+Sim gets the right face** — the engine still hardcodes `amFace_cres`, and the
+catalogue can name the correct one for an age, a gender and a tone instead.
+
+**The entries in that slot that reach no mesh are the groupings, not overlays.**
+It is tempting to read "151 painting one instead" as a hundred and fifty one
+brows and lips. It is not: those are the unnamed grouping entries, whose key 1
+is the type-nought hole. That misreading survived several rounds here because
+the count was consistent with the guess.
+
+**So brows, eyes and lips are not among the catalogue's skin entries at all.**
+Where they are is not yet known. Two leads, both from things the disc has
+already said: the base face binds a material called `uuface_browbushy_brown`, so
+brows exist as materials with a legible naming scheme; and 886 catalogue entries
+are the XML spelling this reader skips, which is where the kinds a binary sample
+never showed — `facearchetype`, `facemodifier`, `meshoverlay` — would live.
 
 The lesson to carry, since it cost three wrong answers in a row: a homogeneous
 sample of a clustered catalogue says where the walk started, not what the disc
