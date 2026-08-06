@@ -27,6 +27,9 @@ void victoriaWebShutdown(void);
 Unsigned32 victoriaWebGetBudgetTotalBytes(void);
 Unsigned32 victoriaWebGetBudgetUsedBytes(void);
 Unsigned32 victoriaWebGetProfilerReportPointer(void);
+Unsigned32 victoriaWebGetMenuTextPointer(void);
+Unsigned32 victoriaWebGetMenuTextLength(void);
+Unsigned32 victoriaWebHandleMenuKey(Unsigned32 character);
 Unsigned32 victoriaWebGetProfilerReportLength(void);
 Unsigned32 victoriaWebGetFrameMicroseconds(void);
 Unsigned32 victoriaWebGetAverageFrameMicroseconds(void);
@@ -137,6 +140,28 @@ WEB_EXPORT("victoriaWebGetProfilerReportLength")
 Unsigned32 victoriaWebGetProfilerReportLength(void)
 {
     return (Unsigned32)stringLength(engineGetProfilerReportText());
+}
+
+/* The menu, read out of linear memory exactly as the profiler report is. The
+   engine formats it; the page shows it. Nothing is drawn on the canvas. */
+WEB_EXPORT("victoriaWebGetMenuTextPointer")
+Unsigned32 victoriaWebGetMenuTextPointer(void)
+{
+    return (Unsigned32)(MemorySize)engineGetMenuText();
+}
+
+WEB_EXPORT("victoriaWebGetMenuTextLength")
+Unsigned32 victoriaWebGetMenuTextLength(void)
+{
+    return (Unsigned32)stringLength(engineGetMenuText());
+}
+
+/* One character. The engine decides what it means — the page has no business
+   knowing that j moves down — and answers whether anything changed. */
+WEB_EXPORT("victoriaWebHandleMenuKey")
+Unsigned32 victoriaWebHandleMenuKey(Unsigned32 character)
+{
+    return (engineHandleMenuKey((char)(character & 0x7FU)) == BOOLEAN_TRUE) ? 1U : 0U;
 }
 
 WEB_EXPORT("victoriaWebGetFrameMicroseconds")

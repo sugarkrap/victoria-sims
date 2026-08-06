@@ -18,6 +18,7 @@
 #include "victoria/textureDecode.h"
 #include "victoria/wardrobe.h"
 #include "victoria/debugMenu.h"
+#include "victoria/resourceCache.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
    and nothing reads it faster than a human can. */
@@ -452,6 +453,31 @@ static Unsigned32 menuAnimationCursor = 0U;
 static Unsigned32 menuAnimationOpened = 0U;
 /* The animation the menu asked for, waiting to be read. */
 static const ResourceIndexEntry *simWardrobeAnimationWanted = NULL_POINTER;
+
+/* Where the animation being played lives.
+ *
+ * A region of its own, carved from the global arena once, and reset before each
+ * animation is read into it. The global arena cannot express this lifetime: it
+ * frees by rewinding, so releasing the current animation would release
+ * everything allocated after it, and there is a Sim allocated after it. Loading
+ * each new one on top instead is what made switching grow the arena until it
+ * refused — a few hundred changes of mind and the engine stops.
+ *
+ * The size is a ceiling on one animation rather than on all of them, which is
+ * the point: it is the same number of bytes after a thousand switches as after
+ * one. An animation that will not fit is refused and the previous one keeps
+ * playing, which is a menu that says no rather than an engine that dies. */
+#define ANIMATION_ARENA_BYTES (8UL * 1024UL * 1024UL)
+static MemoryArena animationArena;
+static Boolean animationArenaReady = BOOLEAN_FALSE;
+
+/* And the bytes resources are read from, kept so that asking for the same one
+ * twice does not go back to the disc twice.
+ *
+ * It knows nothing about where the bytes came from — a file descriptor, or a
+ * range a browser delivered three frames later. The read path admits what it
+ * read and looks here first, so the same code serves both stores. */
+static ResourceCache resourceCache;
 /* The four names, built rather than written down.
  *
  * Case does not matter to any of them: resourceIndexFindNamed hashes a name
@@ -4420,8 +4446,16 @@ static EngineDiscLoadStatus stepTheChosenAnimation(void)
     {
         return ENGINE_DISC_WORKING;
     }
+    /* Reset, not appended to. This is the whole reason the region exists. */
+    if (animationArenaReady)
+    {
+        memoryArenaRewindToMarker(&animationArena, 0UL);
+    }
     if (bytes != NULL_POINTER &&
-        animationReaderOpen(&posedAnimation, bytes, size, globalArena) == ANIMATION_READ_OK)
+        animationReaderOpen(&posedAnimation,
+                            bytes, size,
+                            animationArenaReady ? &animationArena : globalArena) ==
+            ANIMATION_READ_OK)
     {
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine: playing ");
@@ -4443,6 +4477,13 @@ static EngineDiscLoadStatus stepTheChosenAnimation(void)
             platformLogMessage("engine: that one reached none of this Sim's bones, so the pose "
                                "is left as it was");
         }
+    }
+    else
+    {
+        /* Most likely too big for the region. Refused rather than loaded on top
+           of the arena, which is what this was built to stop. */
+        platformLogMessage("engine: that animation would not fit the space kept for one, so the "
+                           "Sim goes on doing what it was doing");
     }
     simWardrobeAnimationWanted = NULL_POINTER;
     discPhase = DISC_PHASE_DONE;
@@ -6625,6 +6666,29 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         stringAppend(simArchetype, sizeof(simArchetype), configuration->simArchetype);
     }
     debugMenuInitialize(&debugMenu);
+    {
+        Unsigned8 *block = (Unsigned8 *)memoryArenaAllocate(globalArena, ANIMATION_ARENA_BYTES,
+                                                           16UL);
+
+        if (block != NULL_POINTER)
+        {
+            memoryArenaInitialize(&animationArena, block, ANIMATION_ARENA_BYTES);
+            animationArenaReady = BOOLEAN_TRUE;
+        }
+        else
+        {
+            platformLogMessage("engine: no room for an animation of its own, so changing one "
+                               "will grow the arena instead of replacing what is there");
+        }
+    }
+    /* Sized for the resources a menu asks for over and over — an entry, its key
+       list, a shape — rather than for a texture. What does not fit is read the
+       way it always was, and the count of those is reported. */
+    if (!resourceCacheBegin(&resourceCache, globalArena, 64U, 64UL * 1024UL))
+    {
+        platformLogMessage("engine: no room for a resource cache, so every read goes to the "
+                           "disc — slower, and correct");
+    }
     debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_BODY, menuBodyRows, MENU_BODY_CAPACITY);
     /* From the arena rather than a static: five hundred names is thirty
        kilobytes, and this engine counts them. */

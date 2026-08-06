@@ -43,6 +43,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/resourceKeyList.c \
                   engine/source/wardrobe.c \
                   engine/source/debugMenu.c \
+                  engine/source/resourceCache.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -102,7 +103,7 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetBudgetTotalBytes \
                -Wl,--export=victoriaWebGetBudgetUsedBytes \
                -Wl,--export=victoriaWebGetProfilerReportPointer \
-               -Wl,--export=victoriaWebGetProfilerReportLength \
+               -Wl,--export=victoriaWebGetProfilerReportLength -Wl,--export=victoriaWebGetMenuTextPointer -Wl,--export=victoriaWebGetMenuTextLength -Wl,--export=victoriaWebHandleMenuKey \
                -Wl,--export=victoriaWebGetFrameMicroseconds \
                -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
@@ -247,6 +248,7 @@ ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 PROPERTY_SET_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPropertySet
 WARDROBE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyWardrobe
 DEBUG_MENU_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDebugMenu
+RESOURCE_CACHE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCache
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
@@ -254,7 +256,8 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
-		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER)
+		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
+		$(RESOURCE_CACHE_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -275,6 +278,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(PROPERTY_SET_VERIFIER)
 	@$(WARDROBE_VERIFIER)
 	@$(DEBUG_MENU_VERIFIER)
+	@$(RESOURCE_CACHE_VERIFIER)
 
 # The web checks, which need the module built and a node to run it under rather
 # than a compiler. Kept out of `verify` so a machine without either still gets
@@ -412,6 +416,12 @@ $(DEBUG_MENU_VERIFIER): tests/verifyDebugMenu.c engine/source/debugMenu.c utils/
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDebugMenu.c engine/source/debugMenu.c \
 		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_CACHE_VERIFIER): tests/verifyResourceCache.c engine/source/resourceCache.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCache.c engine/source/resourceCache.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
 
 $(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
 		$(VERIFIER_SUPPORT)

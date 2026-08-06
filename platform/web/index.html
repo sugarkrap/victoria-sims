@@ -62,6 +62,19 @@
         white-space: pre;
         overflow-x: auto;
     }
+    #menuPanel {
+        margin-top: 0.5rem;
+        padding-top: 0.5rem;
+        border-top: 1px solid #262a35;
+    }
+    #menuText {
+        margin: 0;
+        font-size: 0.7rem;
+        line-height: 1.45;
+        color: #d7dcea;
+        white-space: pre;
+        overflow-x: auto;
+    }
     #profilerSparkline {
         display: block;
         width: 100%;
@@ -80,6 +93,10 @@
     <div id="profilerPanel">
         <pre id="profilerReport">profiler: waiting for first frame</pre>
         <canvas id="profilerSparkline"></canvas>
+        <!-- The menu is text, for the same reason it is text on a terminal: the
+             engine formats it and the platform shows it, so nothing has to draw
+             a font on a backend that has no shaders. -->
+        <div id="menuPanel"><pre id="menuText">menu: press m</pre></div>
     </div>
 </div>
 <script src="victoriaRuntime.js"></script>

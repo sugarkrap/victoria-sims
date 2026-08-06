@@ -511,7 +511,53 @@ function updateProfilerOverlay() {
         reportElement.textContent = readUTF8(pointer, length);
     }
 
+    updateMenuOverlay();
     drawFrameSparkline();
+}
+
+// The menu, read the same way and for the same reason: the engine formats it,
+// the page shows it. Nothing about which key does what is known here.
+function updateMenuOverlay() {
+    const exports = runtimeState.instance.exports;
+
+    if (!exports.victoriaWebGetMenuTextPointer) {
+        return;
+    }
+    const pointer = exports.victoriaWebGetMenuTextPointer();
+    const length = exports.victoriaWebGetMenuTextLength();
+    const element = document.getElementById("menuText");
+
+    if (element && length > 0) {
+        element.textContent = readUTF8(pointer, length);
+    }
+}
+
+// One character to the engine, which decides what it means.
+//
+// Keys are letters rather than arrows precisely so this can stay a pipe: an
+// arrow is a named code here and an escape sequence on a terminal, and a letter
+// is one character on both.
+function connectMenuKeys() {
+    window.addEventListener("keydown", (event) => {
+        if (!runtimeState.instance || event.ctrlKey || event.metaKey || event.altKey) {
+            return;
+        }
+        const exports = runtimeState.instance.exports;
+        if (!exports.victoriaWebHandleMenuKey) {
+            return;
+        }
+        // Enter arrives as a named key rather than a character.
+        const key = event.key === "Enter" ? "\r" : event.key;
+        if (key.length !== 1) {
+            return;
+        }
+        if (exports.victoriaWebHandleMenuKey(key.charCodeAt(0)) === 1) {
+            // Only when something changed, so a page full of typing does not
+            // fight the render loop for the element.
+            updateMenuOverlay();
+            event.preventDefault();
+        }
+    });
 }
 
 function drawFrameSparkline() {
@@ -734,6 +780,7 @@ function connectDiscPicker() {
 
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", connectDiscPicker);
+    document.addEventListener("DOMContentLoaded", connectMenuKeys);
 } else {
     connectDiscPicker();
 }
