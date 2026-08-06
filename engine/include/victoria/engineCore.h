@@ -76,6 +76,19 @@ typedef struct EngineConfiguration
      * is the difference between reaching a fifth of the catalogue and reaching
      * the rest of it. */
     const char *simArchetype;
+
+    /* Opens the debug menu straight away instead of waiting for somebody to
+     * press m.
+     *
+     * Which is a smaller thing than it sounds: a menu is the one part of an
+     * engine that cannot be judged from a log, and a machine with no way to
+     * synthesise a keystroke — a headless capture, a continuous integration
+     * runner, this one — otherwise has no way to see it at all. `--menu` is how
+     * to ask from the command line. */
+    Boolean menuIsOpen;
+    /* Which page it opens on: 0 body, 1 clothing, 2 animation. Only read when
+       menuIsOpen, and `--menu=clothing` is how to ask. */
+    Unsigned32 menuPage;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);
@@ -119,6 +132,45 @@ EngineDiscLoadStatus engineStepDiscLoad(void);
    renderer — and because "what is on this disc" is a question worth being able
    to ask on its own. */
 void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
+
+/* The debug menu, displayed the way the profiler report is: the engine formats
+ * plain text and the platform shows it — printed on Linux, put in an element on
+ * the web. Nothing is drawn on screen, which is what makes it work on the
+ * backend at the floor of the device ladder that has no shaders at all.
+ *
+ * Never null. Says how to open the menu even while it is shut, because a debug
+ * feature nobody can discover is a debug feature nobody has. */
+const char *engineGetMenuText(void);
+
+/* One keystroke. Returns whether anything changed, so a platform knows whether
+ * to redraw rather than reprinting a menu on every key that did nothing.
+ *
+ * Choosing a different Sim restarts the assembly, which the platform drives by
+ * going on calling engineStepDiscLoad — the index is kept, so it costs a second
+ * rather than another walk of the disc. */
+Boolean engineHandleMenuKey(char key);
+
+/* What a pointer did. Three actions rather than a position and a button flag:
+ * a click is not a move that happens to have a button held, and a pointer that
+ * has left the window is not a pointer at (0, 0) — which is a corner of the
+ * menu, and would light a button up every time somebody moved the mouse off the
+ * window. */
+typedef enum EnginePointerAction
+{
+    ENGINE_POINTER_MOVED = 0,
+    ENGINE_POINTER_PRESSED,
+    ENGINE_POINTER_LEFT
+} EnginePointerAction;
+
+/* One pointer event, in window pixels from the top left. Returns whether
+ * anything changed, so a platform knows whether to redraw.
+ *
+ * The engine decides whether the point is over anything, so a platform never
+ * has to know where the menu is — which is what keeps the same interface
+ * working on a backend with shaders and one without. A press that lands on
+ * nothing is answered as nothing rather than passed on to the world behind,
+ * because there is nothing behind it to pass to yet. */
+Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y);
 
 MemoryArena *engineGetGlobalArena(void);
 

@@ -43,6 +43,14 @@ static const WardrobePartRule wardrobeRules[WARDROBE_PART_COUNT] = {
     { "bottom", 0x10U, "_nude", BOOLEAN_FALSE }
 };
 
+/* What a part is called, in words. The suffix serves: "body", "face", "hair",
+   "top", "bottom" are exactly what the catalogue calls them and exactly what a
+   person would. */
+const char *wardrobeGetPartName(Unsigned32 part)
+{
+    return (part < WARDROBE_PART_COUNT) ? wardrobeRules[part].suffix : "";
+}
+
 const char *wardrobeGetPartMark(const Wardrobe *wardrobe, Unsigned32 part)
 {
     return (part < WARDROBE_PART_COUNT) ? wardrobe->marks[part] : "";
@@ -82,8 +90,11 @@ void wardrobeBegin(Wardrobe *wardrobe, const char *archetype, const char *wanted
         wardrobe->toneMatched[part] = BOOLEAN_FALSE;
         wardrobe->toneRank[part] = 0U;
         wardrobe->nameWanted[part] = BOOLEAN_FALSE;
+        wardrobe->askedForByName[part] = BOOLEAN_FALSE;
         wardrobe->names[part][0] = '\0';
         wardrobe->alternativeCount[part] = 0U;
+        wardrobe->alternativesBeyondRoom[part] = 0U;
+        wardrobe->wantedPerPart[part][0] = '\0';
     }
     wardrobe->wanted[0] = '\0';
     wardrobe->tone[0] = '\0';
@@ -104,6 +115,24 @@ void wardrobeBegin(Wardrobe *wardrobe, const char *archetype, const char *wanted
     wardrobe->refusedAsWorn = 0U;
     wardrobe->matchedWanted = 0U;
     wardrobe->refusedAsSettled = 0U;
+}
+
+void wardrobeWant(Wardrobe *wardrobe, Unsigned32 part, const char *entryName)
+{
+    if (part >= WARDROBE_PART_COUNT)
+    {
+        return;
+    }
+    wardrobe->wantedPerPart[part][0] = '\0';
+    if (entryName != NULL_POINTER)
+    {
+        stringAppend(wardrobe->wantedPerPart[part], (MemorySize)WARDROBE_NAME_LIMIT, entryName);
+    }
+}
+
+const char *wardrobeGetWanted(const Wardrobe *wardrobe, Unsigned32 part)
+{
+    return (part < WARDROBE_PART_COUNT) ? wardrobe->wantedPerPart[part] : "";
 }
 
 /* Whether a name ends in this tone, the way the catalogue writes it: an
@@ -168,6 +197,7 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
     Unsigned32 toneRank;
     Boolean tonedRight;
     Boolean wantedRight;
+    Boolean askedForByName;
 
     wardrobe->offered++;
 
@@ -223,6 +253,17 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
                    stringContainsIgnoringCase(entryName, wardrobe->wanted))
                       ? BOOLEAN_TRUE
                       : BOOLEAN_FALSE;
+    /* Named exactly, for this part alone. Ranked above the substring below,
+       because a name taken off a list of what the disc actually carries is a
+       better guide to what somebody meant than a fragment typed at a shell. */
+    askedForByName = (wardrobe->wantedPerPart[part][0] != '\0' &&
+                      stringEqualsIgnoringCase(entryName, wardrobe->wantedPerPart[part]))
+                         ? BOOLEAN_TRUE
+                         : BOOLEAN_FALSE;
+    if (askedForByName)
+    {
+        wantedRight = BOOLEAN_TRUE;
+    }
     if (wantedRight)
     {
         wardrobe->matchedWanted++;
@@ -260,6 +301,10 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
         slot[0] = '\0';
         stringAppend(slot, (MemorySize)WARDROBE_NAME_LIMIT, entryName);
     }
+    else
+    {
+        wardrobe->alternativesBeyondRoom[part]++;
+    }
 
     if (wardrobe->chosen[part])
     {
@@ -268,8 +313,13 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
            them settles rather than changing its mind a thousand times. Asked
            for outranks the right tone: someone who named a face wants that
            face, whatever tone it turns out to be. */
-        Unsigned32 held = (wardrobe->nameWanted[part] ? 4U : 0U) + wardrobe->toneRank[part];
-        Unsigned32 offer = (wantedRight ? 4U : 0U) + toneRank;
+        /* Asked for by name for this part outranks asked for by fragment,
+           which outranks the right tone. Eight and four rather than two and
+           one so that the tone rank, which goes to two, can never bridge the
+           gap between them. */
+        Unsigned32 held = (wardrobe->askedForByName[part] ? 8U : 0U) +
+                          (wardrobe->nameWanted[part] ? 4U : 0U) + wardrobe->toneRank[part];
+        Unsigned32 offer = (askedForByName ? 8U : 0U) + (wantedRight ? 4U : 0U) + toneRank;
 
         if (offer <= held)
         {
@@ -287,6 +337,7 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
     wardrobe->toneMatched[part] = tonedRight;
     wardrobe->toneRank[part] = toneRank;
     wardrobe->nameWanted[part] = wantedRight;
+    wardrobe->askedForByName[part] = askedForByName;
     wardrobe->names[part][0] = '\0';
     stringAppend(wardrobe->names[part], (MemorySize)WARDROBE_NAME_LIMIT, entryName);
     return part;
@@ -350,6 +401,16 @@ Boolean wardrobeIsChosen(const Wardrobe *wardrobe, Unsigned32 part)
 const char *wardrobeGetChosenName(const Wardrobe *wardrobe, Unsigned32 part)
 {
     return (part < WARDROBE_PART_COUNT) ? wardrobe->names[part] : "";
+}
+
+Unsigned32 wardrobeGetAlternativeCount(const Wardrobe *wardrobe, Unsigned32 part)
+{
+    return (part < WARDROBE_PART_COUNT) ? wardrobe->alternativeCount[part] : 0U;
+}
+
+Unsigned32 wardrobeGetAlternativesBeyondRoom(const Wardrobe *wardrobe, Unsigned32 part)
+{
+    return (part < WARDROBE_PART_COUNT) ? wardrobe->alternativesBeyondRoom[part] : 0U;
 }
 
 const char *wardrobeGetAlternative(const Wardrobe *wardrobe, Unsigned32 part, Unsigned32 which)

@@ -107,6 +107,14 @@ WEB_IMPORT("uploadPartTexture")
 extern Integer32 hostUploadPartTexture(Unsigned32 partIndex, const Unsigned8 *rgbaPixels,
                                        Unsigned32 widthInPixels, Unsigned32 heightInPixels);
 
+/* The engine's interface, as one premultiplied image drawn over everything. The
+ * host builds its own pipeline for it the first time one arrives, for the same
+ * reason the OpenGL ES backend does: a run that never opens the menu never pays
+ * for it. Nought by nought takes it away again. */
+WEB_IMPORT("uploadOverlay")
+extern Integer32 hostUploadOverlay(const Unsigned8 *pixels, Unsigned32 widthInPixels,
+                                   Unsigned32 heightInPixels);
+
 #define TRIANGLE_UNIFORM_BUFFER_BYTES 16UL
 
 static Unsigned32 shaderProgramCount = 0;
@@ -391,6 +399,45 @@ void renderSetTexture(const Unsigned8 *rgbaPixels, Unsigned32 widthInPixels,
     }
     textureChargedBytes = wantedBytes;
     platformLogMessage("render: texture uploaded to the WebGPU backend");
+}
+
+static MemorySize overlayChargedBytes = 0UL;
+
+void renderSetOverlay(const Unsigned8 *pixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    MemorySize wantedBytes;
+
+    if (pixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        (void)hostUploadOverlay(NULL_POINTER, 0U, 0U);
+        if (overlayChargedBytes > 0UL)
+        {
+            graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, overlayChargedBytes);
+            overlayChargedBytes = 0UL;
+        }
+        return;
+    }
+
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+    if (wantedBytes > overlayChargedBytes &&
+        graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                    wantedBytes - overlayChargedBytes) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("render: the graphics ceiling will not hold the text overlay");
+        return;
+    }
+    if (hostUploadOverlay(pixels, widthInPixels, heightInPixels) == 0)
+    {
+        platformLogMessage("render: the host would not take the text overlay");
+        return;
+    }
+    if (wantedBytes < overlayChargedBytes)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                    overlayChargedBytes - wantedBytes);
+    }
+    overlayChargedBytes = wantedBytes;
 }
 
 void renderDrawFrame(Real32 elapsedSeconds)

@@ -51,6 +51,7 @@ The Linux binary takes:
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
 | `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
 | `--sim=CODE` | Which Sim to build: an age and a gender as the catalogue spells them — `am`, `af`, `cu`, `tf`, `em`. Every one of the four names is composed from it, and the run reports which archetypes the disc actually carries. Defaults to `am`. |
+| `--menu[=PAGE]` | Opens the debug menu at start rather than waiting for an `m`, optionally on `body`, `clothing` or `animation`. A menu is the one part of an engine that cannot be judged from a log, and a machine with no way to synthesise a keystroke has no other way to see it — nor to reach a page that is not the first. |
 | `--wear=NAME` | Dresses the Sim in the catalogue entry whose name holds NAME. A preference, not a filter: parts nothing matching was offered for still wear whatever the catalogue offered them. The run names eight alternatives per part, so the next run's argument comes out of the last one's output. |
 
 Use both together whenever anything is being judged by eye across frames. An
@@ -900,3 +901,219 @@ only "not enough arena space", which costs a run of the disc per guess — it no
 reports the bytes it wanted, and that number named the array immediately.
 
 The logs are verbose on purpose. That is the method, not clutter.
+
+
+## Text, and the interface drawn with it
+
+The engine draws its own words now, in the game's own font, read off the disc
+the way its meshes and textures are.
+
+**The font.** `TSData/Res/UI/Fonts/*.mxf` is a TrueType font behind a very thin
+door: the magic `MXFN`, five bytes nobody here claims to understand, and then
+the whole sfnt with every byte exclusive-ored against one constant. The padding
+gave the key away — a fixed-length container pads with zeroes, and this one pads
+with `0x9d`, so a constant applied to a constant is a constant.
+
+Nothing hardcodes that. A TrueType file begins `00 01 00 00`, so both the key
+and where the payload starts fall out of looking for those four bytes under a
+single-byte mask, over the first few dozen offsets, with the table directory
+behind each candidate as the arbiter. A disc that obfuscates differently — or
+not at all — reads without anybody editing a constant, and `verifyFontReader`
+proves it by handing the same font over unmasked.
+
+**The rasterizer.** `glyphRaster.c` turns outlines into coverage in integers all
+the way down: 24.8 coordinates, four sample rows a pixel with exact horizontal
+coverage, non-zero winding so an `o` keeps its hole. There is no floating point
+and there will not be — the floor of the ladder has no unit for it. Hinting is
+not run; unhinted-and-smoothed is how every renderer written in the last fifteen
+years draws text.
+
+**Paid once.** `fontAtlas.c` rasterizes printable ASCII into one sheet and can
+store the whole thing — metrics and pixels — as a block of bytes. Natively that
+block goes to `~/.cache/victoriaSims/glyphs<mark>` through two new platform
+calls, and the next run reads it back without opening the font file at all. On
+the web there is no disk, so the sheet lives in an arena for the session, which
+is the one lifetime an arena expresses perfectly. The mark is the font's path,
+its length and the size drawn — not a checksum of its bytes, because reading
+those is most of the cost being avoided.
+
+**A fallback.** `builtinFont.c` is five by seven, ninety-five characters, drawn
+as pictures rather than encoded as hex, and authored here. It is what draws
+before a disc is open and on a disc with no font on it — including the message
+saying so.
+
+**The interface.** `interfaceSurface.c` is one RGBA premultiplied image with
+fill, border, text and image on it; `interfaceMenu.c` lays the debug menu out as
+a sidebar of pages and a grid of tiles with a pager, and answers what is under
+the pointer. Layout and hit testing are one file on purpose: a button drawn
+somewhere the pointer is not tested is a button that does not work, and the bug
+is invisible in both the code and the picture.
+
+Backends get exactly one call — `renderSetOverlay` — and composite with
+`out = source + destination * (1 - sourceAlpha)`. That is a blend mode on
+hardware older than this project's floor, so the software rasterizer does the
+same arithmetic itself in integers and the menu looks identical on all three.
+
+Mouse and keys both. X11 motion, button and leave events natively; canvas events
+on the web, scaled by the ratio between the canvas's layout size and its render
+size — without which the menu is hit accurately in one corner and nowhere else.
+
+**Still to do.** Thumbnails are stand-ins everywhere. `thumbnailForRow` in
+engineCore is the hook and returns false for every row; see below for what a
+real one costs.
+
+
+## engineCore, and what is still in it
+
+It was 7456 lines with `engineStepDiscLoad` accounting for 2010 of them in one
+function. Two things have been done about that.
+
+**The dispatcher is 86 lines.** Every phase of the load — probe, installer,
+content, index, fetch, seek, and the rest — was written out inside one `if`
+chain, because each capability added since the bootstrap needed a turn of that
+loop and another branch was always the cheapest way to get one. Each is now a
+named function: `probeTheDisc`, `openTheInstaller`, `searchTheContent`,
+`seekTheSim`, `seekTheAnimation` and so on. Nothing about the state changed —
+they still share it — only where each one is written down, so reading any of
+them no longer means scrolling past the other nine.
+
+**The text is its own module.** `engineText.c` owns the order of things between
+a font on a disc and words on a screen: try the cache, then the disc, then the
+font we carry. It needs four things from the rest of the engine and is handed
+all four — an arena, a file system, the menu's state, the words — so it knows
+nothing about assembling a Sim and nothing about it knows anything about text.
+
+That leaves engineCore at 7266 lines, of which the honest remainder is the Sim
+assembly: `stepTheSidecar` at 392, `stepTheSim` at 346, `stepTheCatalogue`,
+`stepThePaint`, `stepTheWardrobe`, `stepTheFollow`, and about two dozen
+statics they all read — `simParts`, `simRange*`, `simWardrobe*`, `discSearch`,
+`simIndex`. Moving those to a `simAssembly.c` is not a file move; it needs that
+state named and passed explicitly, or the new file reaches back through a header
+full of `extern`s, which is worse than one big file. That is a session of its
+own and it has not been started.
+
+A measurement note, since it misled once: counting a function by the distance to
+the next line that looks like a definition is wrong in this file, because the
+declaration blocks between functions are hundreds of lines long.
+`engineReportDiscCatalogue` measures 635 that way and is 63.
+
+
+## The state of continuous integration
+
+Six runs reported failure while this work was going on and **not one of them was
+a real failure**. Every job that actually ran passed; the ones marked failed had
+the conclusion `cancelled` after up to four hours of
+
+    The job was not acquired by Runner of type hosted even after multiple attempts
+
+which is GitHub's runner fleet, not this repository. Worth knowing because a red
+tick that means nothing is worse than no tick at all: check the per-job
+conclusions before believing the run.
+
+One thing that outage did settle by accident. Run `31124173549` on the bootstrap
+branch got a runner for the **ARMv7 Cortex-A8** job and it passed — which
+retroactively verifies the ARM rasterizer link fix that had been pushed
+untestable, because there was no cross compiler here at the time.
+
+**Tonight's two commits are unbuilt.** Actions was still in `major_outage` when
+they were pushed, so they will queue until it clears. What has been covered
+locally instead:
+
+| | |
+| --- | --- |
+| Linux, OpenGL ES 2.0 | builds `-Werror` |
+| Linux, software rasterizer | builds `-Werror` |
+| WebAssembly, WebGPU | builds `-Werror`, and both node suites pass |
+| ARMv5TE engine core | builds — `make armv5 ARM_COMPILER="clang --target=armv5te-linux-gnueabi" ARCHIVER=llvm-ar` |
+| ARMv7-A with NEON | builds and verifies its own attributes, same shape plus `ARMV7_READELF=llvm-readelf` |
+| old-ABI ARM | **not covered locally** — `-mabi=apcs-gnu` is a GCC backend flag and clang has no equivalent, so this one genuinely needs the cross compiler CI has |
+| 854 checks across 25 suites | pass |
+| no dynamic allocation, no retail data | pass |
+
+There is no cross toolchain installed here, but clang can target both ARM tiers
+out of the box, which is what those two command lines exploit. The ARMv7 target
+verified its attributes with GNU `readelf` only; it now accepts LLVM's spelling
+of the same tags as well, so the tier can be built by anyone with either.
+
+### A new check
+
+`scripts/checkNoFloatingPoint.sh`, wired into `make check`. glyphRaster.h claims
+the font path does no floating point, and the reason is not stylistic: the floor
+of the ladder has no unit for it, and one glyph is tens of thousands of
+operations. A claim like that rots in exactly one way — somebody writes
+`x / 2.0f` in a helper, it compiles everywhere, it is correct everywhere, and it
+is thirty times slower on the one machine nobody has to hand.
+
+So the check does the only thing that cannot be argued with: it cross-compiles
+the six modules for ARMv5TE with `-mfloat-abi=soft` and looks for calls to the
+soft-float library in the objects. It was confirmed to work by putting a float
+in `glyphRaster.c` and watching it fail on `__aeabi_fmul`. All six are clean.
+`renderSoftware.c` has nine such calls and is not checked — it projects a camera
+and shades a triangle, which is floating point on purpose.
+
+
+## The clothing page
+
+It lists every garment this Sim could wear — 227 of them on the tested ISO for
+an adult male — and choosing one puts it on.
+
+**Where the list comes from.** Not a second walk of the catalogue. The wardrobe
+already makes this decision for every entry during the walk it does: right age,
+right gender, right slot, not the thing the part already wears. It kept the
+ones it passed over so a run could name them in its log, eight per part, which
+is exactly the right number to print and the wrong number to keep. The store
+behind that line is now 128 a part and the log still stops at eight, saying how
+many more the menu has. `fillTheClothingPage` reads them straight out.
+
+Making that decision twice would have been two answers to one question, and the
+second one would eventually have disagreed with the first.
+
+**How a choice sticks.** `wardrobeWant(wardrobe, part, name)` — a garment asked
+for by name, for one part, exactly. The single `wanted` the wardrobe already had
+is a substring matched against every part, which is right for `--wear=cowboy`
+typed at a shell and wrong for a menu: a top and a bottom get chosen one after
+the other and both have to stay on. One preference between them would make the
+second choice forget the first.
+
+The ranking is now asked-for-by-name (8) over asked-for-by-fragment (4) over the
+right skin tone (2 or 1), so a name taken off a list of what the disc actually
+carries beats a guess, and nothing met later in the walk displaces either.
+
+Choosing restarts the assembly, which is what the body page already did — the
+wardrobe is decided during the catalogue walk and nowhere else, so a different
+garment means walking it again. The index is kept, so it costs about a second.
+The page is rebuilt from that walk and the cursor is put back where it was,
+because losing your place in a list of 227 on the very action that comes of
+finding something is not a menu anybody can use.
+
+**What is not done: real thumbnails.** Every tile is still a checkerboard
+stand-in. The honest reason is that a garment's picture is four reads away from
+its name — entry, key list, material, texture — and then a decode, which is the
+same chain `stepThePaint` walks for the handful of garments actually worn. Doing
+it for a page of tiles means a lazy cache (say 64 slots of 48 by 48, about
+590 KB) filled one tile a step for the visible page only, driven by the same
+state machine, because on the web each of those reads is answered a frame later.
+That is a session's work and it is written down here rather than half done.
+
+### Two compilers, not one
+
+A real defect reached CI while every local build was green: `debugMenuStepPage`
+indexed `menu->lists[menu->page]` without checking the page first, and GCC
+refused it — an enumeration of three named values has a declared range wider
+than three, so an index taken straight from one is a subscript the compiler can
+prove nothing about. Every other function in that file that indexes by page
+checks first; this was the one that did not.
+
+Clang does not make that complaint, and every local build here was clang,
+including the two ARM tiers. So: **compile with both before pushing.** The host
+GCC reproduces it exactly, which makes it a one-liner to check —
+
+    for f in engine/source/*.c utils/*.c render/software/*.c; do
+      gcc -std=c99 -pedantic -Wall -Wextra -Wshadow -Wstrict-prototypes \
+          -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings \
+          -Werror -O2 -Iengine/include -I. -c "$f" -o /dev/null || break
+    done
+
+— and the whole engine is clean under it. The ARM jobs in continuous integration
+use GCC, which is why they were the three that went red while the Linux and
+WebAssembly jobs, both clang, stayed green.

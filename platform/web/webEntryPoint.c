@@ -27,6 +27,10 @@ void victoriaWebShutdown(void);
 Unsigned32 victoriaWebGetBudgetTotalBytes(void);
 Unsigned32 victoriaWebGetBudgetUsedBytes(void);
 Unsigned32 victoriaWebGetProfilerReportPointer(void);
+Unsigned32 victoriaWebGetMenuTextPointer(void);
+Unsigned32 victoriaWebGetMenuTextLength(void);
+Unsigned32 victoriaWebHandleMenuKey(Unsigned32 character);
+Unsigned32 victoriaWebHandlePointer(Unsigned32 action, Integer32 x, Integer32 y);
 Unsigned32 victoriaWebGetProfilerReportLength(void);
 Unsigned32 victoriaWebGetFrameMicroseconds(void);
 Unsigned32 victoriaWebGetAverageFrameMicroseconds(void);
@@ -57,6 +61,31 @@ Unsigned64 platformGetMicroseconds(void)
     return (Unsigned64)(hostGetMilliseconds() * 1000.0);
 }
 
+/* There is no disk here, and pretending otherwise would be worse than saying
+ * so. A browser has places a page could persist bytes — none of them readable
+ * without going back through the host and waiting a frame, which is the one
+ * thing a cache lookup cannot do.
+ *
+ * So the web pays the rasterizing cost once per session and keeps the result in
+ * an arena, which is exactly the lifetime an arena is good at: built once at
+ * the start, released never. Saying nought here is what makes the engine do
+ * that, and the engine needs no branch for it. */
+Boolean platformCacheStore(const char *name, const Unsigned8 *bytes, MemorySize byteCount)
+{
+    (void)name;
+    (void)bytes;
+    (void)byteCount;
+    return BOOLEAN_FALSE;
+}
+
+MemorySize platformCacheLoad(const char *name, Unsigned8 *destination, MemorySize capacity)
+{
+    (void)name;
+    (void)destination;
+    (void)capacity;
+    return 0UL;
+}
+
 WEB_EXPORT("victoriaWebInitialize")
 Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPixels,
                                  Unsigned32 graphicsMemoryLimitBytes)
@@ -75,6 +104,8 @@ Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPi
     configuration.heldMorphChannel = 0U;
     configuration.wornName = NULL_POINTER;
     configuration.simArchetype = NULL_POINTER;
+    configuration.menuIsOpen = BOOLEAN_FALSE;
+    configuration.menuPage = 0U;
 
     return (Unsigned32)engineInitialize(&configuration);
 }
@@ -137,6 +168,51 @@ WEB_EXPORT("victoriaWebGetProfilerReportLength")
 Unsigned32 victoriaWebGetProfilerReportLength(void)
 {
     return (Unsigned32)stringLength(engineGetProfilerReportText());
+}
+
+/* The menu, read out of linear memory exactly as the profiler report is. The
+   engine formats it; the page shows it. Nothing is drawn on the canvas. */
+WEB_EXPORT("victoriaWebGetMenuTextPointer")
+Unsigned32 victoriaWebGetMenuTextPointer(void)
+{
+    return (Unsigned32)(MemorySize)engineGetMenuText();
+}
+
+WEB_EXPORT("victoriaWebGetMenuTextLength")
+Unsigned32 victoriaWebGetMenuTextLength(void)
+{
+    return (Unsigned32)stringLength(engineGetMenuText());
+}
+
+/* One character. The engine decides what it means — the page has no business
+   knowing that j moves down — and answers whether anything changed. */
+WEB_EXPORT("victoriaWebHandleMenuKey")
+Unsigned32 victoriaWebHandleMenuKey(Unsigned32 character)
+{
+    return (engineHandleMenuKey((char)(character & 0x7FU)) == BOOLEAN_TRUE) ? 1U : 0U;
+}
+
+/* One pointer event from the page, in canvas pixels.
+ *
+ * The action is the enumeration in engineCore.h rather than a button flag, and
+ * the host passes it through unchanged: a click is not a move with a button
+ * held, and a pointer that has left the canvas is not a pointer at the origin —
+ * which is a corner of the menu, and would leave a button lit every time
+ * somebody moved the mouse off the page. */
+WEB_EXPORT("victoriaWebHandlePointer")
+Unsigned32 victoriaWebHandlePointer(Unsigned32 action, Integer32 x, Integer32 y)
+{
+    EnginePointerAction which = ENGINE_POINTER_MOVED;
+
+    if (action == 1U)
+    {
+        which = ENGINE_POINTER_PRESSED;
+    }
+    else if (action == 2U)
+    {
+        which = ENGINE_POINTER_LEFT;
+    }
+    return (engineHandlePointer(which, x, y) == BOOLEAN_TRUE) ? 1U : 0U;
 }
 
 WEB_EXPORT("victoriaWebGetFrameMicroseconds")

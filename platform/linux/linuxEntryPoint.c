@@ -1,6 +1,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -48,6 +50,105 @@ Unsigned64 platformGetMicroseconds(void)
 
     gettimeofday(&currentTime, NULL_POINTER);
     return ((Unsigned64)currentTime.tv_sec * 1000000ULL) + (Unsigned64)currentTime.tv_usec;
+}
+
+/* Where a cached block lands: under the user's own cache directory, following
+ * the same convention every other program on the machine does. Not beside the
+ * executable, which may be read-only and is shared between users, and not in a
+ * temporary directory, which is emptied by the thing that makes caching
+ * pointless.
+ *
+ * Returns false rather than inventing somewhere when there is no home to put it
+ * under. Caching is an optimisation and never a requirement: without it the
+ * engine rasterizes a font on every run and is a second slower to start. */
+static Boolean buildCachePath(const char *name, char *destination, MemorySize capacity)
+{
+    const char *base = getenv("XDG_CACHE_HOME");
+
+    destination[0] = '\0';
+    if (base == NULL_POINTER || base[0] != '/')
+    {
+        const char *home = getenv("HOME");
+
+        if (home == NULL_POINTER || home[0] != '/')
+        {
+            return BOOLEAN_FALSE;
+        }
+        (void)stringAppend(destination, capacity, home);
+        (void)stringAppend(destination, capacity, "/.cache");
+    }
+    else
+    {
+        (void)stringAppend(destination, capacity, base);
+    }
+    (void)stringAppend(destination, capacity, "/victoriaSims");
+    /* Made if it is not there, ignored if it is. A failure here is caught by
+       the open that follows, which has to be checked anyway. */
+    (void)mkdir(destination, 0700);
+    (void)stringAppend(destination, capacity, "/");
+
+    /* The name is an identifier and not a path, and this is where that is
+       enforced rather than trusted. A name carrying a slash or a pair of dots
+       would write wherever it liked, and the engine composes these from things
+       it read off a disc somebody else wrote. */
+    while (*name != '\0')
+    {
+        char character = *name;
+        char text[2];
+
+        if (!((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9') || character == '-' || character == '_'))
+        {
+            return BOOLEAN_FALSE;
+        }
+        text[0] = character;
+        text[1] = '\0';
+        (void)stringAppend(destination, capacity, text);
+        name++;
+    }
+    return (stringLength(destination) + 1UL < capacity) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+}
+
+Boolean platformCacheStore(const char *name, const Unsigned8 *bytes, MemorySize byteCount)
+{
+    char path[512];
+    FILE *handle;
+    MemorySize written;
+
+    if (name == NULL_POINTER || bytes == NULL_POINTER || byteCount == 0UL ||
+        !buildCachePath(name, path, sizeof(path)))
+    {
+        return BOOLEAN_FALSE;
+    }
+    handle = fopen(path, "wb");
+    if (handle == NULL_POINTER)
+    {
+        return BOOLEAN_FALSE;
+    }
+    written = (MemorySize)fwrite(bytes, 1, (size_t)byteCount, handle);
+    (void)fclose(handle);
+    return (written == byteCount) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+}
+
+MemorySize platformCacheLoad(const char *name, Unsigned8 *destination, MemorySize capacity)
+{
+    char path[512];
+    FILE *handle;
+    MemorySize read;
+
+    if (name == NULL_POINTER || destination == NULL_POINTER || capacity == 0UL ||
+        !buildCachePath(name, path, sizeof(path)))
+    {
+        return 0UL;
+    }
+    handle = fopen(path, "rb");
+    if (handle == NULL_POINTER)
+    {
+        return 0UL;
+    }
+    read = (MemorySize)fread(destination, 1, (size_t)capacity, handle);
+    (void)fclose(handle);
+    return read;
 }
 
 static Real32 readMonotonicSeconds(void)
@@ -100,7 +201,12 @@ static Boolean createWindowAndContext(void)
     }
 
     rootWindow = DefaultRootWindow(windowState.displayConnection);
-    windowAttributes.event_mask = ExposureMask | KeyPressMask | StructureNotifyMask;
+    /* Motion as well as buttons: a menu whose buttons light up under the
+       pointer has to hear about the pointer moving, not only about it being
+       pressed. LeaveWindow matters for the same reason in reverse — without it
+       a button stays lit after the pointer has gone somewhere else entirely. */
+    windowAttributes.event_mask = ExposureMask | KeyPressMask | StructureNotifyMask |
+                                  ButtonPressMask | PointerMotionMask | LeaveWindowMask;
 
     windowState.windowHandle = XCreateWindow(
         windowState.displayConnection, rootWindow,
@@ -160,6 +266,44 @@ static void pumpWindowEvents(void)
             {
                 windowState.shouldQuit = BOOLEAN_TRUE;
             }
+            else
+            {
+                /* The character rather than the keycode: the engine's menu is
+                   driven by letters precisely so that a terminal and a browser
+                   can agree without either learning the other's key names. */
+                char typed[8];
+                int written = XLookupString(&event.xkey, typed, (int)sizeof(typed) - 1,
+                                            NULL, NULL);
+
+                if (written > 0 && engineHandleMenuKey(typed[0]) == BOOLEAN_TRUE)
+                {
+                    /* Printed on change and not every frame. The menu shares the
+                       terminal with the load's own log, so reprinting it
+                       continuously would bury everything the engine says. */
+                    platformLogMessage(engineGetMenuText());
+                }
+            }
+            break;
+
+        case MotionNotify:
+            (void)engineHandlePointer(ENGINE_POINTER_MOVED, (Integer32)event.xmotion.x,
+                                      (Integer32)event.xmotion.y);
+            break;
+
+        case ButtonPress:
+            /* Button one only. Two and three are a paste and a context menu on
+               this platform and mean nothing here; scrolling arrives as buttons
+               four and five, which the pager buttons cover well enough for now. */
+            if (event.xbutton.button == Button1 &&
+                engineHandlePointer(ENGINE_POINTER_PRESSED, (Integer32)event.xbutton.x,
+                                    (Integer32)event.xbutton.y) == BOOLEAN_TRUE)
+            {
+                platformLogMessage(engineGetMenuText());
+            }
+            break;
+
+        case LeaveNotify:
+            (void)engineHandlePointer(ENGINE_POINTER_LEFT, 0, 0);
             break;
 
         case ClientMessage:
@@ -321,6 +465,8 @@ int main(int argumentCount, char **argumentValues)
     EngineConfiguration configuration;
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
     Boolean cameraIsStill = BOOLEAN_FALSE;
+    Boolean menuIsOpen = BOOLEAN_FALSE;
+    Unsigned32 menuPage = 0U;
     /* Half a turn, which is a Sim's front. Nought is its back. */
     Real32 cameraAngleDegrees = 180.0f;
     Boolean poseIsHeld = BOOLEAN_FALSE;
@@ -360,6 +506,28 @@ int main(int argumentCount, char **argumentValues)
             /* One deformation channel, held at full. The run's own log lists
                the channels and their numbers. */
             heldMorphChannel = (Unsigned32)stringParseUnsigned(argument + stringLength("--morph="));
+        }
+        else if (stringStartsWith(argument, "--menu=") == BOOLEAN_TRUE)
+        {
+            /* Which page to open on, for the same reason --menu exists at all:
+               a page nobody can click their way to is a page nobody can
+               capture. */
+            const char *page = argument + stringLength("--menu=");
+
+            menuIsOpen = BOOLEAN_TRUE;
+            menuPage = stringEqualsIgnoringCase(page, "clothing")
+                           ? 1U
+                           : (stringEqualsIgnoringCase(page, "animation") ? 2U : 0U);
+        }
+        else if (stringEquals(argument, "--menu") == BOOLEAN_TRUE)
+        {
+            /* Opens the menu at start rather than waiting for an m.
+             *
+             * A menu is the one part of an engine that cannot be judged from a
+             * log, and a machine with no way to synthesise a keystroke — a
+             * headless capture, a build runner, whatever is taking the
+             * screenshot — otherwise cannot see it at all. */
+            menuIsOpen = BOOLEAN_TRUE;
         }
         else if (stringStartsWith(argument, "--sim=") == BOOLEAN_TRUE)
         {
@@ -443,6 +611,8 @@ int main(int argumentCount, char **argumentValues)
     configuration.heldMorphChannel = heldMorphChannel;
     configuration.wornName = wornName;
     configuration.simArchetype = simArchetype;
+    configuration.menuIsOpen = menuIsOpen;
+    configuration.menuPage = menuPage;
 
     if (discPath != NULL_POINTER)
     {
@@ -477,6 +647,10 @@ int main(int argumentCount, char **argumentValues)
         return 1;
     }
 
+    /* Said once the load has had its say, so it is the last thing on the
+       terminal rather than the first. */
+    platformLogMessage(engineGetMenuText());
+
     while (windowState.shouldQuit == BOOLEAN_FALSE)
     {
         engineBeginFrame();
@@ -484,6 +658,24 @@ int main(int argumentCount, char **argumentValues)
         VICTORIA_PROFILE_ZONE_BEGIN("platformPumpEvents");
         pumpWindowEvents();
         VICTORIA_PROFILE_ZONE_END();
+
+        /* Kept stepping after the load has finished, because the menu can ask
+           it a second question — a different Sim restarts the assembly, and the
+           animation names are read after the Sim is on screen. Once there is
+           nothing to do the first call returns immediately.
+         *
+           A batch and not one, because a native read never pends: one step a
+           frame would spend five thousand frames on a list that takes a moment,
+           and the whole point of doing it out here is that the window stays
+           alive while it happens. */
+        {
+            Unsigned32 steps = 0U;
+
+            while (steps < 256U && engineStepDiscLoad() == ENGINE_DISC_WORKING)
+            {
+                steps++;
+            }
+        }
 
         engineRenderFrame(readMonotonicSeconds());
 

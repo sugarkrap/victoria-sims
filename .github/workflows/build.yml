@@ -177,7 +177,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libegl1-mesa-dev libgles2-mesa-dev libx11-dev
 
-      - name: No dynamic allocation
+      # `make check` now runs the no-floating-point check too, which
+      # cross-compiles the font path for ARMv5TE. Clang can target that without
+      # a cross toolchain — the script says so and skips rather than fails if it
+      # ever cannot, so this step never becomes a false red.
+      - name: No dynamic allocation, and no floating point in the font path
         run: make check
 
       - name: No retail game data committed

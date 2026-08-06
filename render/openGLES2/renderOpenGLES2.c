@@ -55,6 +55,45 @@ static const char *fragmentShaderSource =
     "    gl_FragColor = vec4(interpolatedColor * colorPulse, 1.0);\n"
     "}\n";
 
+/* The overlay program: one quad, one texture, no depth, no lighting, no camera.
+ *
+ * The blend GL_ONE, GL_ONE_MINUS_SRC_ALPHA gives out = source + scene *
+ * (1 - sourceAlpha), which is exactly compositing premultiplied pixels over
+ * what is already there — so a panel, a button on it and a letter on that all
+ * come out right in one pass, which straight alpha would not manage.
+ *
+ * The engine hands over pixels that are already premultiplied, so the fragment
+ * shader is a plain fetch and the blend does the rest. */
+static const char *overlayVertexShaderSource =
+    "attribute vec2 overlayPosition;\n"
+    "attribute vec2 overlayCoordinate;\n"
+    "varying vec2 interpolatedCoordinate;\n"
+    "void main()\n"
+    "{\n"
+    "    interpolatedCoordinate = overlayCoordinate;\n"
+    "    gl_Position = vec4(overlayPosition, 0.0, 1.0);\n"
+    "}\n";
+
+static const char *overlayFragmentShaderSource =
+    "precision mediump float;\n"
+    "varying vec2 interpolatedCoordinate;\n"
+    "uniform sampler2D overlaySampler;\n"
+    "void main()\n"
+    "{\n"
+    "    gl_FragColor = texture2D(overlaySampler, interpolatedCoordinate);\n"
+    "}\n";
+
+static GLuint overlayProgram = 0;
+static GLuint overlayTexture = 0;
+static GLint overlayPositionLocation = -1;
+static GLint overlayCoordinateLocation = -1;
+static GLint overlaySamplerLocation = -1;
+static Unsigned32 overlayWidth = 0U;
+static Unsigned32 overlayHeight = 0U;
+static MemorySize overlayChargedBytes = 0UL;
+static Unsigned32 viewportWidth = 1U;
+static Unsigned32 viewportHeight = 1U;
+
 static const GLfloat triangleVertices[] = {
     /* position */ 0.0f, 0.6f, /* color */ 1.0f, 0.35f, 0.55f,
     /* position */ -0.6f, -0.5f, /* color */ 0.35f, 0.75f, 1.0f,
@@ -365,6 +404,140 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
     glViewport(0, 0, (GLsizei)widthInPixels, (GLsizei)heightInPixels);
     viewportAspect = (heightInPixels > 0U) ? ((Real32)widthInPixels / (Real32)heightInPixels) : 1.0f;
+    /* Kept because the overlay is drawn in pixels rather than in the clip space
+       everything else here works in, and there is no way to ask GL what the
+       viewport is without a round trip to the driver every frame. */
+    viewportWidth = (widthInPixels > 0U) ? widthInPixels : 1U;
+    viewportHeight = (heightInPixels > 0U) ? heightInPixels : 1U;
+}
+
+void renderSetOverlay(const Unsigned8 *pixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    MemorySize wantedBytes;
+
+    if (pixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        overlayWidth = 0U;
+        overlayHeight = 0U;
+        return;
+    }
+
+    if (overlayProgram == 0)
+    {
+        GLuint vertexShader = compileShader(GL_VERTEX_SHADER, overlayVertexShaderSource);
+        GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, overlayFragmentShaderSource);
+        GLint linkStatus = GL_FALSE;
+
+        /* Built the first time there is something to draw rather than at
+           start-up. A run that never opens the menu never compiles it, and a
+           shader compile is the most expensive thing a driver does. */
+        if (vertexShader == 0 || fragmentShader == 0)
+        {
+            return;
+        }
+        overlayProgram = glCreateProgram();
+        glAttachShader(overlayProgram, vertexShader);
+        glAttachShader(overlayProgram, fragmentShader);
+        glLinkProgram(overlayProgram);
+        glGetProgramiv(overlayProgram, GL_LINK_STATUS, &linkStatus);
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        if (linkStatus != GL_TRUE)
+        {
+            platformLogMessage("renderer: the overlay program would not link, so no text");
+            glDeleteProgram(overlayProgram);
+            overlayProgram = 0;
+            return;
+        }
+        shaderProgramCount++;
+        overlayPositionLocation = glGetAttribLocation(overlayProgram, "overlayPosition");
+        overlayCoordinateLocation = glGetAttribLocation(overlayProgram, "overlayCoordinate");
+        overlaySamplerLocation = glGetUniformLocation(overlayProgram, "overlaySampler");
+    }
+
+    wantedBytes = (MemorySize)widthInPixels * (MemorySize)heightInPixels * 4UL;
+    if (wantedBytes > overlayChargedBytes)
+    {
+        if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                        wantedBytes - overlayChargedBytes) == BOOLEAN_FALSE)
+        {
+            platformLogMessage("render: the graphics ceiling will not hold the text overlay");
+            return;
+        }
+    }
+    else if (wantedBytes < overlayChargedBytes)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE,
+                                    overlayChargedBytes - wantedBytes);
+    }
+    overlayChargedBytes = wantedBytes;
+
+    if (overlayTexture == 0U)
+    {
+        glGenTextures(1, &overlayTexture);
+    }
+    glBindTexture(GL_TEXTURE_2D, overlayTexture);
+    /* Four bytes a pixel is always a multiple of four, so the default unpack
+       alignment would do — set anyway, because the day this becomes three bytes
+       is the day every row after the first is read from the wrong place, and
+       that reads as a font problem rather than as this line. */
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)widthInPixels, (GLsizei)heightInPixels, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    /* Nearest, deliberately. The overlay is drawn at exactly one texel a pixel
+       and linear sampling of that is a blur with no upside. */
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    overlayWidth = widthInPixels;
+    overlayHeight = heightInPixels;
+}
+
+/* One quad in the top left corner, a texel to a pixel.
+ *
+ * Client-side arrays rather than a buffer: the quad changes whenever the window
+ * is resized or the menu grows a line, and a buffer respecified every time it
+ * moves is a buffer that exists only to be rewritten. */
+static void drawOverlay(void)
+{
+    GLfloat right = -1.0f + (2.0f * (GLfloat)overlayWidth / (GLfloat)viewportWidth);
+    GLfloat bottom = 1.0f - (2.0f * (GLfloat)overlayHeight / (GLfloat)viewportHeight);
+    const GLfloat quad[] = {
+        /* position */ -1.0f, 1.0f,   /* coordinate */ 0.0f, 0.0f,
+        /* position */ -1.0f, bottom, /* coordinate */ 0.0f, 1.0f,
+        /* position */ right, 1.0f,   /* coordinate */ 1.0f, 0.0f,
+        /* position */ right, bottom, /* coordinate */ 1.0f, 1.0f
+    };
+    const GLsizei stride = (GLsizei)(4 * sizeof(GLfloat));
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    /* Premultiplied alpha, which is what the fragment shader writes and is what
+       makes the panel and the letters one pass instead of two. */
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(overlayProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, overlayTexture);
+    if (overlaySamplerLocation >= 0)
+    {
+        glUniform1i(overlaySamplerLocation, 0);
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glEnableVertexAttribArray((GLuint)overlayPositionLocation);
+    glVertexAttribPointer((GLuint)overlayPositionLocation, 2, GL_FLOAT, GL_FALSE, stride, quad);
+    glEnableVertexAttribArray((GLuint)overlayCoordinateLocation);
+    glVertexAttribPointer((GLuint)overlayCoordinateLocation, 2, GL_FLOAT, GL_FALSE, stride,
+                          &quad[2]);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray((GLuint)overlayPositionLocation);
+    glDisableVertexAttribArray((GLuint)overlayCoordinateLocation);
+
+    glDisable(GL_BLEND);
 }
 
 
@@ -842,6 +1015,13 @@ void renderDrawFrame(Real32 elapsedSeconds)
         glDisableVertexAttribArray((GLuint)vertexColorLocation);
     }
 
+    if (overlayWidth > 0U && overlayProgram != 0)
+    {
+        VICTORIA_PROFILE_ZONE_BEGIN("drawOverlay");
+        drawOverlay();
+        VICTORIA_PROFILE_ZONE_END();
+    }
+
     VICTORIA_PROFILE_ZONE_END();
 }
 
@@ -878,6 +1058,23 @@ void renderShutdown(void)
         meshProgram = 0;
     }
     meshIndexCount = 0;
+    if (overlayTexture != 0U)
+    {
+        glDeleteTextures(1, &overlayTexture);
+        overlayTexture = 0U;
+    }
+    if (overlayChargedBytes > 0UL)
+    {
+        graphicsMemoryBudgetRelease(GRAPHICS_MEMORY_CATEGORY_TEXTURE, overlayChargedBytes);
+        overlayChargedBytes = 0UL;
+    }
+    if (overlayProgram != 0)
+    {
+        glDeleteProgram(overlayProgram);
+        overlayProgram = 0;
+    }
+    overlayWidth = 0U;
+    overlayHeight = 0U;
     if (shaderProgram != 0)
     {
         glDeleteProgram(shaderProgram);

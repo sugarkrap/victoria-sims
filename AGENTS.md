@@ -190,6 +190,20 @@ hashed what was on disk while listing what git knew about, and so passed
 happily while `.gitignore`'s `*.package` line silently kept four fixtures out
 of the commit entirely.
 
+**Reading a disc is the feature, and it stays the feature.** The engine takes an
+ISO or a directory and works out which by looking, and that is the thing this
+project is for: no install step, no extraction pass, no converted asset
+directory. Anything that would make an extracted copy the normal path — a
+format only the extractor writes, a load that assumes files rather than
+packages — is a regression however convenient it is.
+
+An extracted install is a **development convenience only**. It is faster to
+grep, it lets a question be answered in a second instead of a four-minute walk,
+and it shows what a file is called before anything has to parse a container to
+find out. Use it to learn; never depend on it. Nothing in `engine/` may require
+one to exist, and nothing found that way may be committed — the provenance rule
+above does not relax because the bytes came off a hard disc instead of an image.
+
 Real content still comes from the user's own installation at run time, read by
 extraction tooling in `tools/`. Format documentation reverse-engineered
 upstream lives in `docs/formats/`; notes are fine, retail data is not.

@@ -42,6 +42,15 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/propertySet.c \
                   engine/source/resourceKeyList.c \
                   engine/source/wardrobe.c \
+                  engine/source/debugMenu.c \
+                  engine/source/resourceCache.c \
+                  engine/source/fontReader.c \
+                  engine/source/glyphRaster.c \
+                  engine/source/builtinFont.c \
+                  engine/source/fontAtlas.c \
+                  engine/source/interfaceSurface.c \
+                  engine/source/interfaceMenu.c \
+                  engine/source/engineText.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -101,7 +110,7 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetBudgetTotalBytes \
                -Wl,--export=victoriaWebGetBudgetUsedBytes \
                -Wl,--export=victoriaWebGetProfilerReportPointer \
-               -Wl,--export=victoriaWebGetProfilerReportLength \
+               -Wl,--export=victoriaWebGetProfilerReportLength -Wl,--export=victoriaWebGetMenuTextPointer -Wl,--export=victoriaWebGetMenuTextLength -Wl,--export=victoriaWebHandleMenuKey -Wl,--export=victoriaWebHandlePointer \
                -Wl,--export=victoriaWebGetFrameMicroseconds \
                -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
@@ -210,9 +219,9 @@ armv7: $(ARMV7_LIBRARY)
 $(ARMV7_LIBRARY): $(ARM_LIBRARY_SOURCES)
 	$(call buildEngineLibrary,$(ARMV7_COMPILER),$(ARMV7_OUTPUT_DIRECTORY),$(ARMV7_FLAGS),$@)
 	@attributes=`$(ARMV7_READELF) -A $(ARMV7_OUTPUT_DIRECTORY)/memoryArena.o`; \
-	echo "$$attributes" | grep -q 'Tag_CPU_arch: v7' || \
+	echo "$$attributes" | grep -qE 'Tag_CPU_arch: v7|Description: ARM v7' || \
 		{ echo "ERROR: not ARMv7" >&2; exit 1; }; \
-	echo "$$attributes" | grep -q 'Tag_Advanced_SIMD_arch: NEON' || \
+	echo "$$attributes" | grep -qE 'Tag_Advanced_SIMD_arch: NEON|Description: NEON' || \
 		{ echo "ERROR: NEON not enabled" >&2; exit 1; }; \
 	echo "verified ARMv7-A with NEON"
 
@@ -245,6 +254,12 @@ PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
 ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 PROPERTY_SET_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPropertySet
 WARDROBE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyWardrobe
+DEBUG_MENU_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDebugMenu
+RESOURCE_CACHE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCache
+FONT_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontReader
+GLYPH_RASTER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGlyphRaster
+FONT_ATLAS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontAtlas
+INTERFACE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInterface
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
@@ -252,7 +267,9 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
-		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER)
+		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
+		$(RESOURCE_CACHE_VERIFIER) $(FONT_READER_VERIFIER) $(GLYPH_RASTER_VERIFIER) \
+		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -272,6 +289,12 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(ARCHIVE_VERIFIER)
 	@$(PROPERTY_SET_VERIFIER)
 	@$(WARDROBE_VERIFIER)
+	@$(DEBUG_MENU_VERIFIER)
+	@$(RESOURCE_CACHE_VERIFIER)
+	@$(FONT_READER_VERIFIER)
+	@$(GLYPH_RASTER_VERIFIER)
+	@$(FONT_ATLAS_VERIFIER)
+	@$(INTERFACE_VERIFIER)
 
 # The web checks, which need the module built and a node to run it under rather
 # than a compiler. Kept out of `verify` so a machine without either still gets
@@ -404,6 +427,56 @@ $(WARDROBE_VERIFIER): tests/verifyWardrobe.c engine/source/wardrobe.c utils/stri
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyWardrobe.c engine/source/wardrobe.c \
 		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
+$(DEBUG_MENU_VERIFIER): tests/verifyDebugMenu.c engine/source/debugMenu.c utils/strings.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDebugMenu.c engine/source/debugMenu.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(RESOURCE_CACHE_VERIFIER): tests/verifyResourceCache.c engine/source/resourceCache.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCache.c engine/source/resourceCache.c \
+		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
+
+FONT_SOURCES := engine/source/fontReader.c engine/source/glyphRaster.c \
+                engine/source/builtinFont.c engine/source/fontAtlas.c \
+                utils/checksum.c
+
+# The interface needs the font under it and the menu's state beside it.
+INTERFACE_SOURCES := $(FONT_SOURCES) engine/source/interfaceSurface.c \
+                     engine/source/interfaceMenu.c engine/source/debugMenu.c \
+                     utils/strings.c
+
+$(FONT_READER_VERIFIER): tests/verifyFontReader.c engine/source/fontReader.c $(VERIFIER_SUPPORT) \
+		testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFontReader.c engine/source/fontReader.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(GLYPH_RASTER_VERIFIER): tests/verifyGlyphRaster.c engine/source/glyphRaster.c \
+		engine/source/fontReader.c $(VERIFIER_SUPPORT) testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGlyphRaster.c engine/source/glyphRaster.c \
+		engine/source/fontReader.c $(VERIFIER_SUPPORT) -o $@
+
+$(FONT_ATLAS_VERIFIER): tests/verifyFontAtlas.c $(FONT_SOURCES) utils/strings.c \
+		$(VERIFIER_SUPPORT) testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFontAtlas.c $(FONT_SOURCES) utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(INTERFACE_VERIFIER): tests/verifyInterface.c $(INTERFACE_SOURCES) $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyInterface.c $(INTERFACE_SOURCES) \
+		$(VERIFIER_SUPPORT) -o $@
+
+# Written by scripts/makeFontFixture.py rather than committed as a blob nobody
+# can check: the reader has to be exercised against a real TrueType file, and
+# the game's own can never be committed.
+testAssets/fonts/fixture.mxf: scripts/makeFontFixture.py
+	python3 scripts/makeFontFixture.py
+
 $(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
 		$(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
@@ -418,6 +491,7 @@ $(RASTERIZER_VERIFIER): tests/verifyRasterizer.c render/software/rasterizer.c \
 
 check:
 	@scripts/checkNoDynamicAllocation.sh
+	@scripts/checkNoFloatingPoint.sh
 
 clean:
 	rm -rf $(BUILD_DIRECTORY)

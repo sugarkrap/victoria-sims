@@ -103,6 +103,32 @@ void renderSetCameraOrbitRate(Real32 radiansPerSecond);
 #define RENDER_CAMERA_FRONT (3.14159265358979323846f)
 void renderSetCameraAngle(Real32 radians);
 
+/* Puts the engine's interface on the screen, as one image in the top left.
+ *
+ * This is deliberately the least a backend can be asked to do. Fonts, glyphs,
+ * baselines, buttons, thumbnails and hit testing all happen in the engine, in
+ * code that runs identically on all three backends and can be checked without
+ * opening a window — see interfaceSurface.h and interfaceMenu.h. What arrives
+ * here is pixels, and a backend that can copy pixels can show a debug menu.
+ *
+ * Four bytes a pixel, top row first, width * height * 4 bytes: red, green,
+ * blue, alpha, with the colour already multiplied by the alpha beside it.
+ * Premultiplied, so every backend composites with the same one line
+ *
+ *     out = source + destination * (1 - sourceAlpha)
+ *
+ * which is a standard blend mode on hardware older than this project's floor,
+ * and which is correct when two translucent things overlap — a panel under a
+ * button under a letter, which a menu does constantly. The software backend
+ * does the same arithmetic itself, in integers, because the hardware it exists
+ * for has no other kind.
+ *
+ * Called only when the pixels change, so a menu nobody is touching costs
+ * nothing per frame. Null, or nought by nought, takes it away — which is what
+ * closing the menu does and is not the same as never having called this. */
+void renderSetOverlay(const Unsigned8 *pixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels);
+
 void renderDrawFrame(Real32 elapsedSeconds);
 void renderShutdown(void);
 
