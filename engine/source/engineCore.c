@@ -1714,7 +1714,7 @@ static void reportOneTally(const SlotTally *tally, const char *what, const char 
  * bits at once, because hair is worn with every outfit. It is the set of outfit
  * categories a thing belongs to. `outfit` is the one that should say which part
  * of a Sim it dresses, and it is counted here rather than assumed. */
-static void reportCatalogueSlots(void)
+static void reportCatalogueSlots(Boolean withDumps)
 {
     Unsigned32 which;
 
@@ -1728,6 +1728,13 @@ static void reportCatalogueSlots(void)
        off the top of a copied tail. That has now happened to these dumps three
        times: first because they were not repeated at all, then because they
        were repeated in the wrong order. What is most specific goes last. */
+    if (!withDumps)
+    {
+        /* A checkpoint says how the counts are growing. Repeating every stored
+           dump alongside them prints the same sixteen lines a dozen times over
+           and buries the counts it was called to show. */
+        return;
+    }
     for (which = 0U; which < catalogueUncategorisedShown; which++)
     {
         platformLogMessage(catalogueUncategorisedDumps[which]);
@@ -1800,7 +1807,7 @@ static void reportCatalogue(void)
     stringAppend(message, sizeof(message), " named no mesh at all — an overlay or a tone");
     platformLogMessage(message);
 
-    reportCatalogueSlots();
+    reportCatalogueSlots(BOOLEAN_TRUE);
 
     for (index = 0U; index < catalogueKindCount; index++)
     {
@@ -1990,7 +1997,13 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                    paint on a face already drawn, an eye may be a mesh of its
                    own, and the two want completely different work. The counts
                    say the split exists; only the names say where it falls. */
+                /* Named ones only. The unnamed entries in this slot are the
+                   groupings, they are dumped in full elsewhere, and there are
+                   enough of them at the front of the walk to eat this whole
+                   budget before a named one is ever met — which is exactly what
+                   happened on the first run of it. */
                 if (catalogueEntryOutfit == (Unsigned32)CATALOGUE_OUTFIT_FACE &&
+                    catalogueEntryName[0] != '\0' &&
                     catalogueFaceShown < (Unsigned32)CATALOGUE_FACE_LIMIT)
                 {
                     char *face = catalogueFaceDumps[catalogueFaceShown];
@@ -2495,7 +2508,7 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                the first time this ran. */
             if (catalogueRead % 150U == 0U)
             {
-                reportCatalogueSlots();
+                reportCatalogueSlots(BOOLEAN_FALSE);
             }
 
             /* What the sidecar step will need once this entry's bytes are
@@ -3567,7 +3580,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                    has scrolled out of any console anyone would copy. Three logs
                    in a row came back without it. Repeating it here costs
                    nothing and puts the answer where the log ends. */
-                reportCatalogueSlots();
+                reportCatalogueSlots(BOOLEAN_TRUE);
             }
             else
             {
