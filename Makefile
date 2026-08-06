@@ -42,6 +42,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/propertySet.c \
                   engine/source/resourceKeyList.c \
                   engine/source/wardrobe.c \
+                  engine/source/debugMenu.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -245,6 +246,7 @@ PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
 ARCHIVE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyArchive
 PROPERTY_SET_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPropertySet
 WARDROBE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyWardrobe
+DEBUG_MENU_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDebugMenu
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
@@ -252,7 +254,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
-		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER)
+		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -272,6 +274,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(ARCHIVE_VERIFIER)
 	@$(PROPERTY_SET_VERIFIER)
 	@$(WARDROBE_VERIFIER)
+	@$(DEBUG_MENU_VERIFIER)
 
 # The web checks, which need the module built and a node to run it under rather
 # than a compiler. Kept out of `verify` so a machine without either still gets
@@ -402,6 +405,12 @@ $(WARDROBE_VERIFIER): tests/verifyWardrobe.c engine/source/wardrobe.c utils/stri
 		$(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyWardrobe.c engine/source/wardrobe.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(DEBUG_MENU_VERIFIER): tests/verifyDebugMenu.c engine/source/debugMenu.c utils/strings.c \
+		$(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDebugMenu.c engine/source/debugMenu.c \
 		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \

@@ -17,6 +17,7 @@
 #include "victoria/programReader.h"
 #include "victoria/textureDecode.h"
 #include "victoria/wardrobe.h"
+#include "victoria/debugMenu.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
    and nothing reads it faster than a human can. */
@@ -414,6 +415,20 @@ static Real32 poseTick = 0.0f;
  * Sim — and why 1578 of 1884 catalogue entries were refused for being authored
  * for somebody else. The disc is full of other people. */
 static char simArchetype[WARDROBE_ARCHETYPE_LIMIT] = "am";
+
+/* The menu, and the rows it offers.
+ *
+ * Every one of these was a command-line flag, which means every question costs
+ * a restart and a four-minute disc load — so in practice each was asked once
+ * and the answer taken on faith. The rows live in the arena rather than in
+ * statics because the animation list is eleven thousand names. */
+static DebugMenu debugMenu;
+#define MENU_BODY_CAPACITY 32U
+static char menuBodyRows[MENU_BODY_CAPACITY][DEBUG_MENU_NAME_LIMIT];
+/* What each row of the body page means, kept beside it and indexed by the same
+   row number: the menu holds text and the engine holds meaning. */
+static char menuBodyArchetypes[MENU_BODY_CAPACITY][WARDROBE_ARCHETYPE_LIMIT];
+static char menuText[2048];
 /* The four names, built rather than written down.
  *
  * Case does not matter to any of them: resourceIndexFindNamed hashes a name
@@ -1453,6 +1468,54 @@ static void reportDeformationReach(const GeometryMesh *mesh)
 }
 
 /* Decodes whatever level is in hand and gives it to the part, then moves on. */
+/* Everything the assembly decided, forgotten, so it can decide it again.
+ *
+ * The load was a one-shot: it ran to DONE during initialisation and nothing
+ * ever asked it a second question. Choosing a different Sim means asking it
+ * again, and the only honest way to do that is to put every piece of state the
+ * assembly wrote back where it started rather than to patch the parts that
+ * seemed to matter — a half-reset assembly draws the last Sim's arms.
+ *
+ * The index is NOT rebuilt. It is the expensive thing, it is a property of the
+ * disc rather than of the Sim, and it is what makes changing your mind cost a
+ * second instead of four minutes. */
+static void restartTheAssembly(void)
+{
+    Unsigned32 index;
+
+    simHop = SIM_HOP_TREE;
+    simHopPart = 0U;
+    simHopEntry = NULL_POINTER;
+    simJoinCount = 0U;
+    simRangeCount = 0U;
+    for (index = 0U; index < (Unsigned32)SIM_PART_COUNT_DRAWN; index++)
+    {
+        simPartLoaded[index] = BOOLEAN_FALSE;
+    }
+    for (index = 0U; index < (Unsigned32)WARDROBE_PART_COUNT; index++)
+    {
+        simWardrobeShapes[index] = NULL_POINTER;
+        simWardrobeOverrideCount[index] = 0U;
+    }
+    simWardrobeWorn = BOOLEAN_FALSE;
+    simWardrobePart = 0U;
+    simWardrobeStage = WARDROBE_STAGE_SHAPE;
+    simWardrobeEntry = NULL_POINTER;
+    simWardrobeDressed = 0U;
+    simIsAssembled = BOOLEAN_FALSE;
+    simPartCursor = 0U;
+    simPartsFound = 0U;
+    simDrawnPartsFound = 0U;
+    saidWhatTheDiscHas = BOOLEAN_FALSE;
+    /* Re-derived rather than carried over: the tone is read off the texture the
+       body ends up wearing, and this is a different body. */
+    simSkinTone[0] = '\0';
+    poseIsAnimated = BOOLEAN_FALSE;
+
+    discPhase = DISC_PHASE_SEEK_SIM;
+    discLoadStatus = ENGINE_DISC_WORKING;
+}
+
 /* Which Sims this disc can build, asked of the index rather than assumed.
  *
  * Costs no reads at all — the index is already in memory and a name is a hash —
@@ -1464,6 +1527,8 @@ static void reportDeformationReach(const GeometryMesh *mesh)
  * Both halves are reported, because they fail differently: a body that is not
  * there means this age and gender is not on the disc, and a skeleton that is
  * not there means nothing of that age can be posed at all. */
+static Unsigned32 menuArchetypeCount = 0U;
+
 static void reportArchetypesOnThisDisc(void)
 {
     /* Every age the game has, against every gender. Unisex is included because
@@ -1473,6 +1538,11 @@ static void reportArchetypesOnThisDisc(void)
     static const char *const genders[] = { "m", "f", "u" };
     char message[512];
     Unsigned32 age;
+
+    /* Rebuilt rather than appended to, because this runs again whenever the
+       index does and a page that grew every time would list every Sim twice. */
+    debugMenuClearPage(&debugMenu, DEBUG_MENU_PAGE_BODY);
+    menuArchetypeCount = 0U;
 
     for (age = 0U; age < VICTORIA_ARRAY_LENGTH(ages); age++)
     {
@@ -1521,6 +1591,30 @@ static void reportArchetypesOnThisDisc(void)
             }
             if (present > 0U)
             {
+                /* A row per archetype the disc can actually build, filled from
+                   the same lookups that report them — so the menu cannot offer
+                   a Sim the log says is not there. */
+                if (menuArchetypeCount < (Unsigned32)MENU_BODY_CAPACITY)
+                {
+                    char label[DEBUG_MENU_NAME_LIMIT];
+
+                    label[0] = '\0';
+                    stringAppend(label, sizeof(label), ages[age]);
+                    stringAppend(label, sizeof(label), genders[gender]);
+                    menuBodyArchetypes[menuArchetypeCount][0] = '\0';
+                    stringAppend(menuBodyArchetypes[menuArchetypeCount],
+                                 WARDROBE_ARCHETYPE_LIMIT, label);
+                    stringAppend(label, sizeof(label), "  ");
+                    stringAppend(label, sizeof(label), had);
+                    if (stringEqualsIgnoringCase(menuBodyArchetypes[menuArchetypeCount],
+                                                 simArchetype))
+                    {
+                        debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_BODY,
+                                             menuArchetypeCount);
+                    }
+                    (void)debugMenuAddRow(&debugMenu, DEBUG_MENU_PAGE_BODY, label);
+                    menuArchetypeCount++;
+                }
                 found++;
                 stringAppend(message, sizeof(message), " ");
                 stringAppend(message, sizeof(message), ages[age]);
@@ -6338,6 +6432,8 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         simArchetype[0] = '\0';
         stringAppend(simArchetype, sizeof(simArchetype), configuration->simArchetype);
     }
+    debugMenuInitialize(&debugMenu);
+    debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_BODY, menuBodyRows, MENU_BODY_CAPACITY);
     composeTheArchetype();
     {
         char message[256];
@@ -6561,6 +6657,62 @@ static void advanceThePose(Real32 elapsedSeconds)
         renderUpdateMeshVertices(&discSearch.mesh, globalArena);
     }
     VICTORIA_PROFILE_ZONE_END();
+}
+
+const char *engineGetMenuText(void)
+{
+    debugMenuWriteText(&debugMenu, menuText, sizeof(menuText));
+    return menuText;
+}
+
+Boolean engineHandleMenuKey(char key)
+{
+    DebugMenuResult result;
+
+    if (engineIsRunning == BOOLEAN_FALSE)
+    {
+        return BOOLEAN_FALSE;
+    }
+    result = debugMenuHandleKey(&debugMenu, key);
+    if (result == DEBUG_MENU_IGNORED)
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (result == DEBUG_MENU_CHOSE)
+    {
+        Unsigned32 row = debugMenuGetCursor(&debugMenu, debugMenuGetPage(&debugMenu));
+
+        switch (debugMenuGetPage(&debugMenu))
+        {
+        case DEBUG_MENU_PAGE_BODY:
+            if (row < menuArchetypeCount &&
+                !stringEqualsIgnoringCase(menuBodyArchetypes[row], simArchetype))
+            {
+                char message[256];
+
+                simArchetype[0] = '\0';
+                stringAppend(simArchetype, sizeof(simArchetype), menuBodyArchetypes[row]);
+                composeTheArchetype();
+                debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_BODY, row);
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: building a ");
+                stringAppend(message, sizeof(message), simArchetype);
+                stringAppend(message, sizeof(message), " Sim instead");
+                platformLogMessage(message);
+                restartTheAssembly();
+                /* The skeleton name is composed and may not be on this disc —
+                   an elder has none — so it is settled again against the index
+                   that is already built rather than left to fail silently. */
+                settleTheSkeleton();
+            }
+            break;
+
+        default:
+            /* Clothing and animations are lists the load has not built yet. */
+            break;
+        }
+    }
+    return BOOLEAN_TRUE;
 }
 
 void engineRenderFrame(Real32 elapsedSeconds)

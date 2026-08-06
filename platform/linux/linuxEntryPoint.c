@@ -160,6 +160,23 @@ static void pumpWindowEvents(void)
             {
                 windowState.shouldQuit = BOOLEAN_TRUE;
             }
+            else
+            {
+                /* The character rather than the keycode: the engine's menu is
+                   driven by letters precisely so that a terminal and a browser
+                   can agree without either learning the other's key names. */
+                char typed[8];
+                int written = XLookupString(&event.xkey, typed, (int)sizeof(typed) - 1,
+                                            NULL, NULL);
+
+                if (written > 0 && engineHandleMenuKey(typed[0]) == BOOLEAN_TRUE)
+                {
+                    /* Printed on change and not every frame. The menu shares the
+                       terminal with the load's own log, so reprinting it
+                       continuously would bury everything the engine says. */
+                    platformLogMessage(engineGetMenuText());
+                }
+            }
             break;
 
         case ClientMessage:
@@ -477,6 +494,10 @@ int main(int argumentCount, char **argumentValues)
         return 1;
     }
 
+    /* Said once the load has had its say, so it is the last thing on the
+       terminal rather than the first. */
+    platformLogMessage(engineGetMenuText());
+
     while (windowState.shouldQuit == BOOLEAN_FALSE)
     {
         engineBeginFrame();
@@ -484,6 +505,16 @@ int main(int argumentCount, char **argumentValues)
         VICTORIA_PROFILE_ZONE_BEGIN("platformPumpEvents");
         pumpWindowEvents();
         VICTORIA_PROFILE_ZONE_END();
+
+        /* Kept stepping after the load has finished, because the menu can ask
+           it a second question — a different Sim restarts the assembly, and
+           this is what drives it. Once there is nothing to do this returns
+           immediately, so an idle frame pays a comparison. */
+        if (engineStepDiscLoad() == ENGINE_DISC_WORKING)
+        {
+            /* Native reads never pend, so a step always does real work and a
+               rebuild is a handful of frames rather than a stall. */
+        }
 
         engineRenderFrame(readMonotonicSeconds());
 

@@ -120,6 +120,23 @@ EngineDiscLoadStatus engineStepDiscLoad(void);
    to ask on its own. */
 void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
 
+/* The debug menu, displayed the way the profiler report is: the engine formats
+ * plain text and the platform shows it — printed on Linux, put in an element on
+ * the web. Nothing is drawn on screen, which is what makes it work on the
+ * backend at the floor of the device ladder that has no shaders at all.
+ *
+ * Never null. Says how to open the menu even while it is shut, because a debug
+ * feature nobody can discover is a debug feature nobody has. */
+const char *engineGetMenuText(void);
+
+/* One keystroke. Returns whether anything changed, so a platform knows whether
+ * to redraw rather than reprinting a menu on every key that did nothing.
+ *
+ * Choosing a different Sim restarts the assembly, which the platform drives by
+ * going on calling engineStepDiscLoad — the index is kept, so it costs a second
+ * rather than another walk of the disc. */
+Boolean engineHandleMenuKey(char key);
+
 MemoryArena *engineGetGlobalArena(void);
 
 #endif
