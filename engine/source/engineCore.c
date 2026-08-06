@@ -1471,8 +1471,12 @@ static SlotTally catalogueByCategory;
    a top from a pair of shoes, and reading `category` for it was a mistake the
    disc corrected: an earlier note here called category the body slot. */
 static SlotTally catalogueByOutfit;
-/* How many uncategorised entries have been dumped in full. Four is enough to
-   see what they are and few enough not to drown the log. */
+/* The uncategorised entries, in full, kept as well as printed. Four is enough
+   to see what they are and few enough not to drown the log — and they are kept
+   because they are printed early in the longest phase of the load and would
+   otherwise be gone from a console by the time it finishes. */
+#define CATALOGUE_DUMP_LIMIT 4U
+static char catalogueUncategorisedDumps[CATALOGUE_DUMP_LIMIT][512];
 static Unsigned32 catalogueUncategorisedShown = 0U;
 /* Where in each tally the entry waiting on its key list sits, so that when the
    list resolves the answer lands against the right row. CATALOGUE_CATEGORY_LIMIT
@@ -1637,6 +1641,12 @@ static void reportOneTally(const SlotTally *tally, const char *what, const char 
  * of a Sim it dresses, and it is counted here rather than assumed. */
 static void reportCatalogueSlots(void)
 {
+    Unsigned32 which;
+
+    for (which = 0U; which < catalogueUncategorisedShown; which++)
+    {
+        platformLogMessage(catalogueUncategorisedDumps[which]);
+    }
     reportOneTally(&catalogueByCategory, "category",
                    "which outfit categories a thing belongs to, not which part it dresses");
     reportOneTally(&catalogueByOutfit, "outfit", "which part of a Sim it dresses");
@@ -2210,28 +2220,29 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                    from here, and equally what a misread property would. Only
                    the whole record can tell those apart. */
                 if (category != NULL_POINTER && category->kind == PROPERTY_VALUE_INTEGER &&
-                    category->integerValue == 0U && catalogueUncategorisedShown < 4U)
+                    category->integerValue == 0U &&
+                    catalogueUncategorisedShown < (Unsigned32)CATALOGUE_DUMP_LIMIT)
                 {
-                    char dump[512];
+                    char *dump = catalogueUncategorisedDumps[catalogueUncategorisedShown];
                     Unsigned32 which;
 
                     catalogueUncategorisedShown++;
                     dump[0] = '\0';
-                    stringAppend(dump, sizeof(dump), "engine:   uncategorised entry —");
+                    stringAppend(dump, 512UL, "engine:   uncategorised entry —");
                     for (which = 0U; which < set.storedPropertyCount; which++)
                     {
-                        stringAppend(dump, sizeof(dump), " ");
-                        stringAppend(dump, sizeof(dump), properties[which].name);
-                        stringAppend(dump, sizeof(dump), "=");
+                        stringAppend(dump, 512UL, " ");
+                        stringAppend(dump, 512UL, properties[which].name);
+                        stringAppend(dump, 512UL, "=");
                         if (properties[which].kind == PROPERTY_VALUE_STRING)
                         {
-                            stringAppend(dump, sizeof(dump), properties[which].stringValue);
+                            stringAppend(dump, 512UL, properties[which].stringValue);
                         }
                         else
                         {
-                            appendHexadecimal(dump, sizeof(dump), properties[which].integerValue);
+                            appendHexadecimal(dump, 512UL, properties[which].integerValue);
                         }
-                        stringAppend(dump, sizeof(dump), ";");
+                        stringAppend(dump, 512UL, ";");
                     }
                     platformLogMessage(dump);
                 }
@@ -3304,6 +3315,16 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 poseIsAnimated = BOOLEAN_TRUE;
                 platformLogMessage("engine: playing it from here, re-skinned each frame on the "
                                    "processor from the bind pose kept aside");
+                /* And last of all, what the catalogue said a Sim can be made
+                   of.
+                 *
+                   It is read long before this, but the animation search prints
+                   a line per candidate and there are eleven thousand of them to
+                   pick through — so by the time a load finishes, the catalogue
+                   has scrolled out of any console anyone would copy. Three logs
+                   in a row came back without it. Repeating it here costs
+                   nothing and puts the answer where the log ends. */
+                reportCatalogueSlots();
             }
             else
             {
