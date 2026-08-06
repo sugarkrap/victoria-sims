@@ -1492,6 +1492,11 @@ static Unsigned32 catalogueUncategorisedShown = 0U;
    means the entry declared no such property. */
 static Unsigned32 catalogueEntryCategorySlot = CATALOGUE_CATEGORY_LIMIT;
 static Unsigned32 catalogueEntryOutfitSlot = CATALOGUE_CATEGORY_LIMIT;
+/* The outfit value itself, not its row. 0x02 is the face, and what is in that
+   slot is the question this was all built to answer. */
+static Unsigned32 catalogueEntryOutfit = 0U;
+#define CATALOGUE_OUTFIT_FACE 0x02U
+static Unsigned32 catalogueFaceShown = 0U;
 
 /* Records one entry against a value, and answers which row that was. */
 /* What a resource type identifier is called.
@@ -1945,6 +1950,45 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     }
                     platformLogMessage(keyMessage);
                 }
+                /* Everything in the face slot, named and said plainly.
+                 *
+                   Two hundred and eighty seven entries dress the face; a
+                   hundred and fifty one of them paint it and twenty one carry
+                   geometry. Which is which is the whole question — a brow is
+                   paint on a face already drawn, an eye may be a mesh of its
+                   own, and the two want completely different work. The counts
+                   say the split exists; only the names say where it falls. */
+                if (catalogueEntryOutfit == (Unsigned32)CATALOGUE_OUTFIT_FACE &&
+                    catalogueFaceShown < 16U)
+                {
+                    char face[384];
+                    const char *keyTypeName = resourceTypeGetName(key->typeIdentifier);
+
+                    catalogueFaceShown++;
+                    face[0] = '\0';
+                    stringAppend(face, sizeof(face), "engine:   face slot — ");
+                    stringAppend(face, sizeof(face), (catalogueEntryName[0] != '\0')
+                                                         ? catalogueEntryName
+                                                         : "(unnamed)");
+                    stringAppend(face, sizeof(face), ", key ");
+                    appendCount(face, sizeof(face), catalogueShapeIndex);
+                    stringAppend(face, sizeof(face), " of ");
+                    appendCount(face, sizeof(face), list.storedKeyCount);
+                    stringAppend(face, sizeof(face), " is a ");
+                    if (keyTypeName != NULL_POINTER)
+                    {
+                        stringAppend(face, sizeof(face), keyTypeName);
+                    }
+                    else
+                    {
+                        appendHexadecimal(face, sizeof(face), key->typeIdentifier);
+                    }
+                    stringAppend(face, sizeof(face),
+                                 (shape != NULL_POINTER) ? ", found on this disc"
+                                                         : ", which the index does not hold");
+                    platformLogMessage(face);
+                }
+
                 /* A NAMED entry whose key is not a shape, in full with every
                    key it holds.
                  *
@@ -2324,6 +2368,7 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
 
                 catalogueEntryCategorySlot = (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
                 catalogueEntryOutfitSlot = (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
+                catalogueEntryOutfit = 0U;
                 if (category != NULL_POINTER && category->kind == PROPERTY_VALUE_INTEGER)
                 {
                     catalogueEntryCategorySlot =
@@ -2333,6 +2378,7 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                 {
                     catalogueEntryOutfitSlot =
                         rememberSlot(&catalogueByOutfit, outfit->integerValue, entryName);
+                    catalogueEntryOutfit = outfit->integerValue;
                 }
 
                 /* In full, for the entries that belong to no outfit category at

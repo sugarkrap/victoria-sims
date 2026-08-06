@@ -229,8 +229,29 @@ species; type=skin
 ```
 
 `type=skin` covers everything selectable — outfits, hair, brows, eyes — and
-**`category` is NOT the body slot**, though this document said it was for a
-while and a probe was written against it. It is the set of outfit categories a
+**`outfit` is the body slot, and `category` is not** — this document said
+category was, a probe was written against it, and then outfit was ruled out too
+on a sample of a hundred and fifty entries that happened to be all one kind.
+Widening the sample to two thousand settled it:
+
+```
+0x01 — 1123 entr(ies), 1118 reaching a mesh — afhairpagepunk_brown        hair
+0x02 —  287 entr(ies),   21 reaching a mesh, 151 painting — CASIE_tmface_s3  face
+0x04 —  155 entr(ies),  155 reaching a mesh — amtopjackettshirthang_grey  top
+0x08 —  343 entr(ies),  343 reaching a mesh — efbodynightgown_floralpink  whole body
+0x10 —   89 entr(ies),   89 reaching a mesh — embottomnaked_CASmannequin  bottom
+0x18 —    3 entr(ies) — a bottom and a body at once
+```
+
+**The face slot is 0x02, and it is mostly paint but not only paint**: 151 of its
+entries reach no mesh and 21 do. Brows and lips and tones are painted onto a
+face that is already drawn; whatever the twenty-one are, they are geometry.
+
+The lesson to carry, since it cost three wrong answers in a row: a homogeneous
+sample of a clustered catalogue says where the walk started, not what the disc
+holds. Widen before concluding.
+
+ It is the set of outfit categories a
 thing belongs to — everyday, formal, swimwear — and the disc says so plainly:
 
 ```
