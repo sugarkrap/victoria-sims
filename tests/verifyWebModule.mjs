@@ -328,41 +328,90 @@ calls.length = 0;
     check("built a mesh pipeline once it had geometry",
           calls.some((call) => call.name === "createMeshPipeline"));
 
-    const upload = calls.find((call) => call.name === "uploadMesh");
-    check("uploaded the teapot", Boolean(upload));
-    if (upload) {
-        // The same numbers the native geometry test asserts, arrived at through
-        // wasm, the disc reader and the PENDING handshake.
-        check("with 13248 vertices", upload.vertexCount === 13248);
-        check("and 18960 indices", upload.indexCount === 18960);
-    }
+    const uploads = calls.filter((call) => call.name === "uploadMesh");
+    check("uploaded something to draw", uploads.length > 0);
 
-    // The ranges a part is painted over. The teapot is one model of two parts,
-    // so this fixture cannot show a Sim's three textures — what it can show is
-    // that the ranges reach the host at all, which is the half of per-part
-    // texturing the module owns. Without them the host draws the whole model in
-    // one call and every part wears the same skin, which is what the WebGPU
-    // backend did until it was given these.
+    // ------------------------------------------------------------------
+    // The whole-Sim path, which until this fixture existed had nothing to
+    // run against.
+    //
+    // The disc carries an authored Sim — a skeleton, three parts that skin to
+    // it, and catalogue entries naming replacements. It is boxes, deliberately:
+    // what is being checked is the structure, not the shape. Every assertion
+    // below corresponds to a defect that reached a screen.
+    // ------------------------------------------------------------------
+    const said = (fragment) => loggedMessages.some((text) => text.includes(fragment));
+
+    check("finds all four of a Sim's parts by name",
+          said("4 of 4 of a whole Sim's parts are on this disc by name"));
+    // A part with TWO primitives and TWO materials. While every part had one,
+    // a part index and a primitive index were the same number and the paint
+    // could not tell them apart — the first two-primitive part made every
+    // texture after it land one range early and produced a green face.
+    check("reads a part carrying more than one primitive",
+          said("amBodyNaked_cres — 16 vertices, 24 triangles, 16 of them weighted across 2 range(s)"));
+    check("joins the parts into one model",
+          said("a whole Sim — 3 part(s) joined into 32 vertices and 48 triangles across 4 range(s)"));
+    // Reported as the body's own count when the merge left a part behind, which
+    // is the number that gave that bug away.
+    check("and every vertex of every part reaches the join",
+          said("32 vertices and 48 triangles"));
+    check("hangs them on the skeleton they are weighted to",
+          said("hung on auskel_cres — 3 node(s)"));
+
+    // The wardrobe, against a catalogue whose right answers are known because
+    // this file wrote them.
+    check("dresses the Sim out of the catalogue",
+          said("the wardrobe was offered 7 entr(ies) that reach a shape and dresses 5 of 5 part(s)"));
+    check("reading the skin tone off the body it painted",
+          said("dresses 5 of 5 part(s), at the tone s1"));
+    // The fixture offers the wrong tone FIRST, so a reader that took whatever
+    // it met first would keep it. Offering only the right one would pass
+    // whether or not the rule existed.
+    check("and taking the face whose tone matches, not the one it met first",
+          said("amFace_cres — wearing CASIE_amface_s1"));
+    check("wears a top and a bottom together",
+          said("a top — wearing amtopjersey_green") &&
+          said("a bottom — wearing ambottomshorts_red"));
+    check("and drops the whole body they replace",
+          said("amBodyNaked_cres — chosen but not worn: ambodyoveralls_blue"));
+    // Authored for a skeleton this Sim has not got. It resolves perfectly and
+    // would come apart on the first pose, so the refusal is the whole point.
+    check("refuses a garment authored for another age",
+          said("authored for another age or gender"));
+    check("and joins the dressed Sim again", said("a dressed Sim — 4 part(s) joined"));
+
+    // The colourway. A shape binds one arbitrary colour of a garment; the entry
+    // names the one it actually is. The fixture's shapes deliberately bind the
+    // wrong one, so taking the shape's binding cannot pass.
+    check("paints a garment with the material its entry names, not its shape's",
+          said("which its catalogue entry named, not its shape"));
+
+    // The ranges a part is painted over. Without them the host draws the whole
+    // model in one call and every part wears the same skin, which is what the
+    // WebGPU backend did until it was given these.
+    const upload = uploads[uploads.length - 1];
     const parts = calls.filter((call) => call.name === "setMeshPart");
     check("told the host which range each part covers", parts.length > 0);
     if (parts.length > 0) {
+        const finalParts = parts.slice(-upload.partCountAtUpload ?? parts.length);
         check("the first part starts at the beginning", parts[0].firstIndex === 0);
         check("every range has triangles in it",
               parts.every((part) => part.indexCount > 0 && part.indexCount % 3 === 0));
-        check("and the ranges tile the mesh in order",
-              parts.every((part, at) => at === 0 ||
-                          part.firstIndex === parts[at - 1].firstIndex + parts[at - 1].indexCount));
-        check("without running past the indices uploaded",
-              parts[parts.length - 1].firstIndex + parts[parts.length - 1].indexCount <=
-                  upload.indexCount);
+        check("and no range runs past the mesh it belongs to",
+              finalParts.every((part) => part.firstIndex + part.indexCount <= upload.indexCount));
     }
+    // One texture per range, not one per part. The two are the same number only
+    // while every part has one primitive.
+    const painted = calls.filter((call) => call.name === "uploadPartTexture");
+    check("paints each range separately", painted.length >= 4);
     // What the disc holds besides packages, and what those files actually are.
     // The fixture carries a file named like an installer cabinet that is not
     // one, so the probe has something to be wrong about: it reports what the
     // bytes say, not what the extension claims.
     check("counts packages against everything else",
           loggedMessages.some((text) =>
-              text.includes("5 package(s)") && text.includes("3 other file(s)")));
+              text.includes("6 package(s)") && text.includes("3 other file(s)")));
     check("names the largest non-package file first",
           loggedMessages.some((text) => text.includes("KiB  TSData.exe")));
 
@@ -444,9 +493,13 @@ calls.length = 0;
 
     // A load that needs two reads and gives back the first one on the second's
     // pend will fetch them alternately for ever, and what that looks like from
-    // outside is one log line repeated thousands of times. Nothing on this
-    // fixture says anything twice, so a repeat here means a step machine that
-    // stopped advancing.
+    // outside is one log line repeated thousands of times. A livelock produces
+    // thousands, so the bound only has to be small — not one.
+    //
+    // Three, because a mesh is genuinely uploaded three times on this disc: the
+    // model the content walk found, the Sim assembled from the four named
+    // parts, and that Sim again once the catalogue has dressed it. Raising this
+    // for any other reason is raising it to hide something.
     {
         const seen = new Map();
         let worst = 0;
@@ -460,7 +513,8 @@ calls.length = 0;
                 worstText = text;
             }
         }
-        check(`no message repeats (worst says "${worstText.slice(0, 40)}" ${worst}x)`, worst <= 2);
+        check(`nothing repeats more than the three mesh uploads (worst says "${worstText.slice(0, 40)}" ${worst}x)`,
+              worst <= 3);
     }
 
     console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);

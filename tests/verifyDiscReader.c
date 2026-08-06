@@ -167,7 +167,11 @@ int main(void)
 
     checkThat(&failureCount, "reads the volume identifier", stringEquals(reader.volumeIdentifier, "VICTORIA_TEST"));
     checkThat(&failureCount, "prefers the Joliet name tree", reader.usesJoliet == BOOLEAN_TRUE);
-    checkThat(&failureCount, "finds every file", fileSystem.entryCount == 8U);
+    /* Nine: four upstream fixture packages, the authored Sim, a decoy named
+       like a package that is not one, the installer, its cabinet and the
+       autorun file. A count and not "more than none", because a walk that
+       stopped early would still find some. */
+    checkThat(&failureCount, "finds every file", fileSystem.entryCount == 9U);
 
     checkThat(&failureCount, "finds a nested package", catalogueHas(&fileSystem, "TSData/Res/Sims3D/teapot_model.package"));
     checkThat(&failureCount, "finds the material definition",
@@ -252,7 +256,7 @@ int main(void)
 
         checkThat(&failureCount, "the walk completes even so", status == DISC_READ_COMPLETE);
         checkThat(&failureCount, "it really did have to wait", stutteringStore.pendingCount > 0U);
-        checkThat(&failureCount, "finds exactly the same files", secondFileSystem.entryCount == 8U);
+            checkThat(&failureCount, "finds exactly the same files", secondFileSystem.entryCount == 9U);
         checkThat(&failureCount, "and the same nested package",
               catalogueHas(&secondFileSystem, "TSData/Res/Sims3D/teapot_model.package"));
         checkThat(&failureCount, "reads no more than it did before", stutteringStore.bytesRead == walkBytes);

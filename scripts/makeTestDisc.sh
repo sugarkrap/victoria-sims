@@ -26,6 +26,15 @@ cp "$scenegraph/animation.package" "$buildRoot/TSData/Res/Sims3D/animation.packa
 cp "$scenegraph/textures.package" "$buildRoot/TSData/Res/Materials/textures.package"
 cp "$scenegraph/material_definition.package" "$buildRoot/TSData/Res/Materials/material_definition.package"
 
+# A whole Sim, authored rather than taken from anywhere: a skeleton, three parts
+# that skin to it, and catalogue entries naming replacements for them. The
+# teapot is one rigid model, so without this the assembly, the wardrobe and
+# everything that indexes a part by its primitives had no fixture at all — and
+# three defects reached a screen through that gap. scripts/makeSimFixture.py
+# writes it and is the only description of those seven formats in one place.
+python3 "$repositoryRoot/scripts/makeSimFixture.py"
+cp "$scenegraph/sim_fixture.package" "$buildRoot/TSData/Res/Sims3D/sim_fixture.package"
+
 # A file named like a package that is not one, so detection is forced to read
 # the magic rather than trust the extension.
 printf 'this is not a package at all, despite the name\n' \
