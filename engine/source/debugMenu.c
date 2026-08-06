@@ -14,6 +14,8 @@
 #define KEY_DOWN 'j'
 #define KEY_PAGE_UP 'u'
 #define KEY_PAGE_DOWN 'i'
+#define KEY_LEFT 'h'
+#define KEY_RIGHT 'l'
 #define KEY_CHOOSE '\r'
 
 static const char *const pageNames[DEBUG_MENU_PAGE_COUNT] = { "body", "clothing", "animation" };
@@ -32,7 +34,50 @@ void debugMenuInitialize(DebugMenu *menu)
         menu->lists[page].cursor = 0U;
         menu->lists[page].inEffect = (Unsigned32)DEBUG_MENU_NONE;
         menu->lists[page].beyondRoom = 0U;
+        /* One column and a text window: the arrangement there was before
+           anything was drawn, so a page nobody has laid out behaves exactly as
+           it always did. */
+        menu->lists[page].columns = 1U;
+        menu->lists[page].perPage = (Unsigned32)DEBUG_MENU_WINDOW;
     }
+}
+
+void debugMenuSetGrid(DebugMenu *menu, DebugMenuPage page, Unsigned32 columns,
+                      Unsigned32 perPage)
+{
+    if ((Unsigned32)page >= DEBUG_MENU_PAGE_COUNT)
+    {
+        return;
+    }
+    menu->lists[page].columns = (columns == 0U) ? 1U : columns;
+    menu->lists[page].perPage = (perPage == 0U) ? 1U : perPage;
+}
+
+Unsigned32 debugMenuGetColumns(const DebugMenu *menu, DebugMenuPage page)
+{
+    return ((Unsigned32)page < DEBUG_MENU_PAGE_COUNT) ? menu->lists[page].columns : 1U;
+}
+
+Unsigned32 debugMenuGetPerPage(const DebugMenu *menu, DebugMenuPage page)
+{
+    return ((Unsigned32)page < DEBUG_MENU_PAGE_COUNT) ? menu->lists[page].perPage : 1U;
+}
+
+/* Which page of tiles the cursor is on, expressed as the row it starts at.
+ *
+ * Derived from the cursor rather than stored beside it, so the two cannot
+ * disagree — a stored page and a cursor that moved off it is a grid showing one
+ * set of tiles with the highlight on none of them. */
+Unsigned32 debugMenuGetPageStart(const DebugMenu *menu, DebugMenuPage page)
+{
+    const DebugMenuList *list;
+
+    if ((Unsigned32)page >= DEBUG_MENU_PAGE_COUNT)
+    {
+        return 0U;
+    }
+    list = &menu->lists[page];
+    return (list->cursor / list->perPage) * list->perPage;
 }
 
 void debugMenuBindPage(DebugMenu *menu, DebugMenuPage page,
@@ -80,6 +125,38 @@ void debugMenuClearPage(DebugMenu *menu, DebugMenuPage page)
     menu->lists[page].cursor = 0U;
     menu->lists[page].inEffect = (Unsigned32)DEBUG_MENU_NONE;
     menu->lists[page].beyondRoom = 0U;
+}
+
+Boolean debugMenuSetCursor(DebugMenu *menu, DebugMenuPage page, Unsigned32 row)
+{
+    DebugMenuList *list;
+
+    if ((Unsigned32)page >= DEBUG_MENU_PAGE_COUNT)
+    {
+        return BOOLEAN_FALSE;
+    }
+    list = &menu->lists[page];
+    if (row >= list->count || row == list->cursor)
+    {
+        return BOOLEAN_FALSE;
+    }
+    list->cursor = row;
+    return BOOLEAN_TRUE;
+}
+
+Boolean debugMenuSetPage(DebugMenu *menu, DebugMenuPage page)
+{
+    if ((Unsigned32)page >= DEBUG_MENU_PAGE_COUNT || menu->page == page)
+    {
+        return BOOLEAN_FALSE;
+    }
+    menu->page = page;
+    return BOOLEAN_TRUE;
+}
+
+void debugMenuSetOpen(DebugMenu *menu, Boolean isOpen)
+{
+    menu->isOpen = isOpen;
 }
 
 void debugMenuSetInEffect(DebugMenu *menu, DebugMenuPage page, Unsigned32 row)
@@ -187,23 +264,35 @@ DebugMenuResult debugMenuHandleKey(DebugMenu *menu, char key)
     }
 
     list = &menu->lists[menu->page];
+    /* Up and down move by a whole row of however the page is arranged, so on a
+       grid of four columns down is four tiles on. On a plain list the column
+       count is one and this is the single step it always was. */
     if (folded == KEY_UP)
+    {
+        return moveCursor(list, -(Integer32)list->columns) ? DEBUG_MENU_MOVED
+                                                           : DEBUG_MENU_IGNORED;
+    }
+    if (folded == KEY_DOWN)
+    {
+        return moveCursor(list, (Integer32)list->columns) ? DEBUG_MENU_MOVED : DEBUG_MENU_IGNORED;
+    }
+    if (folded == KEY_LEFT)
     {
         return moveCursor(list, -1) ? DEBUG_MENU_MOVED : DEBUG_MENU_IGNORED;
     }
-    if (folded == KEY_DOWN)
+    if (folded == KEY_RIGHT)
     {
         return moveCursor(list, 1) ? DEBUG_MENU_MOVED : DEBUG_MENU_IGNORED;
     }
     if (folded == KEY_PAGE_UP)
     {
-        return moveCursor(list, -(Integer32)DEBUG_MENU_WINDOW) ? DEBUG_MENU_MOVED
-                                                               : DEBUG_MENU_IGNORED;
+        return moveCursor(list, -(Integer32)list->perPage) ? DEBUG_MENU_MOVED
+                                                           : DEBUG_MENU_IGNORED;
     }
     if (folded == KEY_PAGE_DOWN)
     {
-        return moveCursor(list, (Integer32)DEBUG_MENU_WINDOW) ? DEBUG_MENU_MOVED
-                                                              : DEBUG_MENU_IGNORED;
+        return moveCursor(list, (Integer32)list->perPage) ? DEBUG_MENU_MOVED
+                                                          : DEBUG_MENU_IGNORED;
     }
     if (key == KEY_CHOOSE || key == '\n' || key == ' ')
     {
@@ -262,7 +351,8 @@ void debugMenuWriteText(const DebugMenu *menu, char *destination, MemorySize cap
         stringAppend(destination, capacity, pageNames[page]);
         stringAppend(destination, capacity, (page == (Unsigned32)menu->page) ? "]" : " ");
     }
-    stringAppend(destination, capacity, "   j/k move  u/i page  enter choose  q close\n");
+    stringAppend(destination, capacity,
+                 "   h/l j/k move  u/i page  enter choose  q close\n");
 
     list = &menu->lists[menu->page];
     if (list->count == 0U)
@@ -297,4 +387,41 @@ void debugMenuWriteText(const DebugMenu *menu, char *destination, MemorySize cap
         stringAppend(destination, capacity, " more than there is room to list");
     }
     stringAppend(destination, capacity, "\n");
+}
+
+/* A whole page forwards or backwards, which is what the pager buttons under the
+ * grid do.
+ *
+ * Landing on the first tile of the new page rather than keeping the position
+ * within it. Keeping the offset reads better in theory and worse in practice:
+ * the pager is used to sweep through eleven thousand animations looking for
+ * one, and a highlight that stays in the middle of the grid while the tiles
+ * change under it is a highlight nobody is looking at. */
+Boolean debugMenuStepPage(DebugMenu *menu, Integer32 direction)
+{
+    DebugMenuList *list = &menu->lists[menu->page];
+    Unsigned32 start = debugMenuGetPageStart(menu, menu->page);
+    Unsigned32 wanted;
+
+    if (list->count == 0U)
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (direction < 0)
+    {
+        if (start == 0U)
+        {
+            return BOOLEAN_FALSE;
+        }
+        wanted = (start >= list->perPage) ? (start - list->perPage) : 0U;
+    }
+    else
+    {
+        wanted = start + list->perPage;
+        if (wanted >= list->count)
+        {
+            return BOOLEAN_FALSE;
+        }
+    }
+    return debugMenuSetCursor(menu, menu->page, wanted);
 }

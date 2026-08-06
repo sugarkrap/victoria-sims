@@ -76,6 +76,16 @@ typedef struct EngineConfiguration
      * is the difference between reaching a fifth of the catalogue and reaching
      * the rest of it. */
     const char *simArchetype;
+
+    /* Opens the debug menu straight away instead of waiting for somebody to
+     * press m.
+     *
+     * Which is a smaller thing than it sounds: a menu is the one part of an
+     * engine that cannot be judged from a log, and a machine with no way to
+     * synthesise a keystroke — a headless capture, a continuous integration
+     * runner, this one — otherwise has no way to see it at all. `--menu` is how
+     * to ask from the command line. */
+    Boolean menuIsOpen;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);
@@ -136,6 +146,28 @@ const char *engineGetMenuText(void);
  * going on calling engineStepDiscLoad — the index is kept, so it costs a second
  * rather than another walk of the disc. */
 Boolean engineHandleMenuKey(char key);
+
+/* What a pointer did. Three actions rather than a position and a button flag:
+ * a click is not a move that happens to have a button held, and a pointer that
+ * has left the window is not a pointer at (0, 0) — which is a corner of the
+ * menu, and would light a button up every time somebody moved the mouse off the
+ * window. */
+typedef enum EnginePointerAction
+{
+    ENGINE_POINTER_MOVED = 0,
+    ENGINE_POINTER_PRESSED,
+    ENGINE_POINTER_LEFT
+} EnginePointerAction;
+
+/* One pointer event, in window pixels from the top left. Returns whether
+ * anything changed, so a platform knows whether to redraw.
+ *
+ * The engine decides whether the point is over anything, so a platform never
+ * has to know where the menu is — which is what keeps the same interface
+ * working on a backend with shaders and one without. A press that lands on
+ * nothing is answered as nothing rather than passed on to the world behind,
+ * because there is nothing behind it to pass to yet. */
+Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y);
 
 MemoryArena *engineGetGlobalArena(void);
 

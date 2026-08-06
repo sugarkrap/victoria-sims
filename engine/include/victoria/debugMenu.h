@@ -11,19 +11,19 @@
  * a few hundred garments per slot and eleven thousand animations, and a
  * question you can only ask once per load is a question nobody asks.
  *
- * It draws NOTHING. The engine formats it as plain text and the platform
- * displays it, exactly as the profiler report already works — printed to the
- * terminal on Linux, put in an element on the web. That is not a shortcut: the
- * floor of the device ladder has no programmable shading, so anything drawn on
- * screen would need a bitmap font and a 2D path in three backends, one of which
- * has no shaders to draw it with. Reusing the report path costs none of that
- * and works everywhere for free.
+ * It draws NOTHING, and it never did. What has changed is who does: this used
+ * to be shown as plain text, printed to a terminal on Linux and put in an
+ * element on the web, because drawing it meant a font and a 2D path in three
+ * backends and one of those has no shaders at all. All three of those now
+ * exist — see fontReader.h, interfaceSurface.h — so the same state below is
+ * laid out and drawn by interfaceMenu.c, and debugMenuWriteText survives for
+ * the terminal and for the checks.
  *
- * This module is the state: which page, where the cursor is, what the rows say
- * and which keys do what. It holds no resources and reads nothing — what a row
- * MEANS is the engine's business, kept in arrays beside these and indexed by
- * the same row number. So the part with the fiddly rules in it can be checked
- * against a claim rather than against a disc. */
+ * This module is the state and only the state: which page, where the cursor is,
+ * what the rows say, and which keys and clicks move it. It holds no resources
+ * and reads nothing — what a row MEANS is the engine's business, kept in arrays
+ * beside these and indexed by the same row number. So the part with the fiddly
+ * rules in it can be checked against a claim rather than against a disc. */
 
 #define DEBUG_MENU_PAGE_COUNT 3U
 #define DEBUG_MENU_NAME_LIMIT 64U
@@ -57,6 +57,16 @@ typedef struct DebugMenuList
        silence — a list that stops at its capacity and says nothing looks
        exactly like a disc that holds no more. */
     Unsigned32 beyondRoom;
+
+    /* How the rows are arranged where they are shown, so the keys agree with
+     * what the eye sees. In a grid of four columns, down is four rows on and
+     * not one — a cursor that walked the list in reading order while the tiles
+     * were laid out in a grid would move diagonally.
+     *
+     * Both default to one and to the text window, which is exactly the
+     * behaviour there was before grids existed. */
+    Unsigned32 columns;
+    Unsigned32 perPage;
 } DebugMenuList;
 
 #define DEBUG_MENU_NONE 0xFFFFFFFFUL
@@ -98,7 +108,31 @@ void debugMenuClearPage(DebugMenu *menu, DebugMenuPage page);
    is. DEBUG_MENU_NONE for none. */
 void debugMenuSetInEffect(DebugMenu *menu, DebugMenuPage page, Unsigned32 row);
 
+/* How this page is laid out where it is drawn. Columns of nought or one both
+   mean a plain list. */
+void debugMenuSetGrid(DebugMenu *menu, DebugMenuPage page, Unsigned32 columns,
+                      Unsigned32 perPage);
+
 DebugMenuResult debugMenuHandleKey(DebugMenu *menu, char key);
+
+/* Puts the cursor on a row, for a pointer that landed on one. Answers whether
+   anything moved, so a caller knows whether to redraw. */
+Boolean debugMenuSetCursor(DebugMenu *menu, DebugMenuPage page, Unsigned32 row);
+
+/* Which page is shown. Answers whether it changed. */
+Boolean debugMenuSetPage(DebugMenu *menu, DebugMenuPage page);
+
+void debugMenuSetOpen(DebugMenu *menu, Boolean isOpen);
+
+/* Moves the cursor a whole page forwards or backwards, which is what the pager
+   buttons at the foot of the grid do. */
+Boolean debugMenuStepPage(DebugMenu *menu, Integer32 direction);
+
+/* The first row shown on the page the cursor is on. The grid draws from here,
+   and the pager counts from it. */
+Unsigned32 debugMenuGetPageStart(const DebugMenu *menu, DebugMenuPage page);
+Unsigned32 debugMenuGetPerPage(const DebugMenu *menu, DebugMenuPage page);
+Unsigned32 debugMenuGetColumns(const DebugMenu *menu, DebugMenuPage page);
 
 Unsigned32 debugMenuGetCursor(const DebugMenu *menu, DebugMenuPage page);
 Unsigned32 debugMenuGetCount(const DebugMenu *menu, DebugMenuPage page);

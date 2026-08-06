@@ -80,6 +80,10 @@ const imports = {
             calls.push({ name: "uploadTexture", width, height });
             return 1;
         },
+        uploadOverlay: (pixelPointer, width, height) => {
+            calls.push({ name: "uploadOverlay", width, height });
+            return 1;
+        },
         setMeshUniforms: () => calls.push({ name: "setMeshUniforms" }),
         submitFrame: () => {
             calls.push({ name: "submitFrame" });
@@ -248,6 +252,7 @@ const refusalImports = {
         updateMeshVertices: () => 1,
         uploadPartTexture: () => 1,
         uploadTexture: () => 1,
+        uploadOverlay: () => 1,
         setMeshUniforms: () => {},
         submitFrame: () => {},
         queryGraphicsMemoryKibibytes: () => reportedGraphicsKibibytes,

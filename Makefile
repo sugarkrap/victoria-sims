@@ -44,6 +44,12 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/wardrobe.c \
                   engine/source/debugMenu.c \
                   engine/source/resourceCache.c \
+                  engine/source/fontReader.c \
+                  engine/source/glyphRaster.c \
+                  engine/source/builtinFont.c \
+                  engine/source/fontAtlas.c \
+                  engine/source/interfaceSurface.c \
+                  engine/source/interfaceMenu.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -103,7 +109,7 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetBudgetTotalBytes \
                -Wl,--export=victoriaWebGetBudgetUsedBytes \
                -Wl,--export=victoriaWebGetProfilerReportPointer \
-               -Wl,--export=victoriaWebGetProfilerReportLength -Wl,--export=victoriaWebGetMenuTextPointer -Wl,--export=victoriaWebGetMenuTextLength -Wl,--export=victoriaWebHandleMenuKey \
+               -Wl,--export=victoriaWebGetProfilerReportLength -Wl,--export=victoriaWebGetMenuTextPointer -Wl,--export=victoriaWebGetMenuTextLength -Wl,--export=victoriaWebHandleMenuKey -Wl,--export=victoriaWebHandlePointer \
                -Wl,--export=victoriaWebGetFrameMicroseconds \
                -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
@@ -249,6 +255,10 @@ PROPERTY_SET_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPropertySet
 WARDROBE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyWardrobe
 DEBUG_MENU_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDebugMenu
 RESOURCE_CACHE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCache
+FONT_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontReader
+GLYPH_RASTER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGlyphRaster
+FONT_ATLAS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontAtlas
+INTERFACE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInterface
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
@@ -257,7 +267,8 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
 		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
-		$(RESOURCE_CACHE_VERIFIER)
+		$(RESOURCE_CACHE_VERIFIER) $(FONT_READER_VERIFIER) $(GLYPH_RASTER_VERIFIER) \
+		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -279,6 +290,10 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(WARDROBE_VERIFIER)
 	@$(DEBUG_MENU_VERIFIER)
 	@$(RESOURCE_CACHE_VERIFIER)
+	@$(FONT_READER_VERIFIER)
+	@$(GLYPH_RASTER_VERIFIER)
+	@$(FONT_ATLAS_VERIFIER)
+	@$(INTERFACE_VERIFIER)
 
 # The web checks, which need the module built and a node to run it under rather
 # than a compiler. Kept out of `verify` so a machine without either still gets
@@ -422,6 +437,44 @@ $(RESOURCE_CACHE_VERIFIER): tests/verifyResourceCache.c engine/source/resourceCa
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceCache.c engine/source/resourceCache.c \
 		engine/source/memoryArena.c $(VERIFIER_SUPPORT) -o $@
+
+FONT_SOURCES := engine/source/fontReader.c engine/source/glyphRaster.c \
+                engine/source/builtinFont.c engine/source/fontAtlas.c \
+                utils/checksum.c
+
+# The interface needs the font under it and the menu's state beside it.
+INTERFACE_SOURCES := $(FONT_SOURCES) engine/source/interfaceSurface.c \
+                     engine/source/interfaceMenu.c engine/source/debugMenu.c \
+                     utils/strings.c
+
+$(FONT_READER_VERIFIER): tests/verifyFontReader.c engine/source/fontReader.c $(VERIFIER_SUPPORT) \
+		testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFontReader.c engine/source/fontReader.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(GLYPH_RASTER_VERIFIER): tests/verifyGlyphRaster.c engine/source/glyphRaster.c \
+		engine/source/fontReader.c $(VERIFIER_SUPPORT) testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyGlyphRaster.c engine/source/glyphRaster.c \
+		engine/source/fontReader.c $(VERIFIER_SUPPORT) -o $@
+
+$(FONT_ATLAS_VERIFIER): tests/verifyFontAtlas.c $(FONT_SOURCES) utils/strings.c \
+		$(VERIFIER_SUPPORT) testAssets/fonts/fixture.mxf
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyFontAtlas.c $(FONT_SOURCES) utils/strings.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(INTERFACE_VERIFIER): tests/verifyInterface.c $(INTERFACE_SOURCES) $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyInterface.c $(INTERFACE_SOURCES) \
+		$(VERIFIER_SUPPORT) -o $@
+
+# Written by scripts/makeFontFixture.py rather than committed as a blob nobody
+# can check: the reader has to be exercised against a real TrueType file, and
+# the game's own can never be committed.
+testAssets/fonts/fixture.mxf: scripts/makeFontFixture.py
+	python3 scripts/makeFontFixture.py
 
 $(FREESTANDING_VERIFIER): tests/verifyFreestandingRuntime.c engine/source/freestandingRuntime.c \
 		$(VERIFIER_SUPPORT)

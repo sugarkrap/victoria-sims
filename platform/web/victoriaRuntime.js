@@ -29,6 +29,16 @@ const runtimeState = {
     meshPartTextures: [],
     meshPartBindGroups: [],
     depthTexture: null,
+    // The engine's text, drawn into the canvas over everything else. Named for
+    // what it is rather than "overlay", because the profiler report in the page
+    // beside the canvas is also an overlay and the two are nothing alike.
+    textOverlayPipeline: null,
+    textOverlayTexture: null,
+    textOverlayBindGroup: null,
+    textOverlaySampler: null,
+    textOverlayUniformBuffer: null,
+    textOverlayWidth: 0,
+    textOverlayHeight: 0,
     bindGroup: null,
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
     startTimestamp: 0,
@@ -40,6 +50,82 @@ const runtimeState = {
 // work without telling anyone anything new.
 const OVERLAY_INTERVAL_MILLISECONDS = 250;
 const SPARKLINE_SAMPLE_COUNT = 120;
+
+// The pipeline the engine's text is drawn with.
+//
+// The quad has no vertex buffer: four corners generated from the vertex index
+// and scaled by a uniform, which is a whole buffer and its lifetime not to
+// have. The overlay is always in the top left at one texel a pixel, so the only
+// thing that ever varies is how much of the canvas it covers.
+//
+// The blend below is out = source + scene * (1 - sourceAlpha), which is what
+// compositing premultiplied pixels means — so a panel, a button on it and a
+// letter on that all come out right in one pass.
+const textOverlayShaderSource = `
+struct OverlayUniforms { scale: vec2f, padding: vec2f };
+@group(0) @binding(0) var overlaySampler: sampler;
+@group(0) @binding(1) var overlayTexture: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> overlay: OverlayUniforms;
+
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) coordinate: vec2f
+};
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
+    var corners = array<vec2f, 4>(vec2f(0.0, 0.0), vec2f(0.0, 1.0),
+                                  vec2f(1.0, 0.0), vec2f(1.0, 1.0));
+    let corner = corners[index];
+    var output: VertexOutput;
+    output.position = vec4f(-1.0 + (corner.x * 2.0 * overlay.scale.x),
+                             1.0 - (corner.y * 2.0 * overlay.scale.y), 0.0, 1.0);
+    output.coordinate = corner;
+    return output;
+}
+
+@fragment
+fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
+    // Straight through: the module hands over premultiplied pixels and the
+    // blend below does the compositing.
+    return textureSample(overlayTexture, overlaySampler, input.coordinate);
+}
+`;
+
+function createTextOverlayPipeline() {
+    if (!runtimeState.device || !runtimeState.canvasFormat) {
+        return false;
+    }
+    const shaderModule = runtimeState.device.createShaderModule({ code: textOverlayShaderSource });
+
+    runtimeState.textOverlayPipeline = runtimeState.device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module: shaderModule, entryPoint: "vertexMain" },
+        fragment: {
+            module: shaderModule,
+            entryPoint: "fragmentMain",
+            targets: [{
+                format: runtimeState.canvasFormat,
+                blend: {
+                    color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
+                    alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" }
+                }
+            }]
+        },
+        primitive: { topology: "triangle-strip" }
+    });
+    // Nearest, deliberately: the overlay is drawn at exactly one texel a pixel
+    // and filtering that is a blur with nothing to gain by it.
+    runtimeState.textOverlaySampler = runtimeState.device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest"
+    });
+    runtimeState.textOverlayUniformBuffer = runtimeState.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    return true;
+}
 
 // Creates the device texture and copies the pixels in. WebGPU wants each row of
 // a write to start on a 256 byte boundary, so a row that is not a multiple of
@@ -299,6 +385,64 @@ const importObject = {
             return rebuildPartBindGroup(partIndex) ? 1 : 0;
         },
 
+        // The engine's interface, as one premultiplied image over the scene.
+        //
+        // Everything about fonts, buttons and thumbnails happens in the module
+        // — see interfaceSurface.h — and what arrives here is finished pixels
+        // with the colour already multiplied by the alpha beside it. The
+        // pipeline is built the first time one turns up, so a session that
+        // never opens the menu never pays for it.
+        uploadOverlay(pixelPointer, width, height) {
+            if (width === 0 || height === 0) {
+                runtimeState.textOverlayWidth = 0;
+                runtimeState.textOverlayHeight = 0;
+                return 1;
+            }
+            const memory = runtimeState.instance.exports.memory.buffer;
+            const byteCount = width * height * 4;
+
+            if (pixelPointer + byteCount > memory.byteLength) {
+                return 0;
+            }
+            if (!runtimeState.textOverlayPipeline && !createTextOverlayPipeline()) {
+                return 0;
+            }
+
+            const pixels = new Uint8Array(memory, pixelPointer, byteCount);
+            // WebGPU wants every row of a write to start on a 256-byte
+            // boundary, and four bytes a pixel obliges only by luck.
+            const bytesPerRow = (width * 4 + 255) & ~255;
+            const staging = new Uint8Array(bytesPerRow * height);
+
+            for (let row = 0; row < height; row += 1) {
+                staging.set(pixels.subarray(row * width * 4, (row + 1) * width * 4),
+                            row * bytesPerRow);
+            }
+            if (runtimeState.textOverlayTexture) {
+                runtimeState.textOverlayTexture.destroy();
+            }
+            runtimeState.textOverlayTexture = runtimeState.device.createTexture({
+                size: { width, height },
+                format: "rgba8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+            });
+            runtimeState.device.queue.writeTexture(
+                { texture: runtimeState.textOverlayTexture }, staging,
+                { bytesPerRow, rowsPerImage: height }, { width, height });
+
+            runtimeState.textOverlayBindGroup = runtimeState.device.createBindGroup({
+                layout: runtimeState.textOverlayPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: runtimeState.textOverlaySampler },
+                    { binding: 1, resource: runtimeState.textOverlayTexture.createView() },
+                    { binding: 2, resource: { buffer: runtimeState.textOverlayUniformBuffer } }
+                ]
+            });
+            runtimeState.textOverlayWidth = width;
+            runtimeState.textOverlayHeight = height;
+            return 1;
+        },
+
         uploadTexture(pixelPointer, width, height) {
             const memory = runtimeState.instance.exports.memory.buffer;
             const byteCount = width * height * 4;
@@ -397,9 +541,12 @@ const importObject = {
         submitFrame() {
             const drawingMesh = runtimeState.meshIndexCount > 0;
             const encoder = runtimeState.device.createCommandEncoder();
+            // Taken once and used by both passes. Asking the context for the
+            // current texture twice in one frame is not the same view twice.
+            const canvasView = runtimeState.context.getCurrentTexture().createView();
             const descriptor = {
                 colorAttachments: [{
-                    view: runtimeState.context.getCurrentTexture().createView(),
+                    view: canvasView,
                     clearValue: runtimeState.clearColor,
                     loadOp: "clear",
                     storeOp: "store"
@@ -446,6 +593,37 @@ const importObject = {
                 pass.draw(3, 1, 0, 0);
             }
             pass.end();
+
+            // The text goes in a pass of its own, loading what the first one
+            // left rather than clearing it.
+            //
+            // A second pass rather than a second draw in the first: WebGPU
+            // requires every pipeline used in a pass to agree with that pass
+            // about whether there is a depth attachment, and there is one only
+            // when a mesh is being drawn. A pass with no depth at all sidesteps
+            // the whole question, and costs one more command in the encoder.
+            if (runtimeState.textOverlayWidth > 0 && runtimeState.textOverlayBindGroup) {
+                runtimeState.device.queue.writeBuffer(
+                    runtimeState.textOverlayUniformBuffer, 0,
+                    new Float32Array([
+                        Math.min(1, runtimeState.textOverlayWidth / runtimeState.canvas.width),
+                        Math.min(1, runtimeState.textOverlayHeight / runtimeState.canvas.height),
+                        0, 0
+                    ]));
+
+                const textPass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: canvasView,
+                        loadOp: "load",
+                        storeOp: "store"
+                    }]
+                });
+                textPass.setPipeline(runtimeState.textOverlayPipeline);
+                textPass.setBindGroup(0, runtimeState.textOverlayBindGroup);
+                textPass.draw(4, 1, 0, 0);
+                textPass.end();
+            }
+
             runtimeState.device.queue.submit([encoder.finish()]);
         },
 
@@ -558,6 +736,52 @@ function connectMenuKeys() {
             event.preventDefault();
         }
     });
+}
+
+// The pointer, in canvas pixels.
+//
+// The canvas is very often displayed at a size other than the one it renders
+// at — the page lays it out in CSS pixels and the module draws in device ones —
+// so a click has to be scaled by the ratio between the two. Without that the
+// menu is hit accurately in the top left corner and further out the further
+// down the page you go, which reads as a menu that ignores clicks rather than
+// as arithmetic.
+function connectPointer() {
+    const canvas = document.getElementById("victoriaCanvas");
+
+    if (!canvas) {
+        return;
+    }
+    const send = (action, event) => {
+        const exports = runtimeState.instance && runtimeState.instance.exports;
+
+        if (!exports || !exports.victoriaWebHandlePointer) {
+            return;
+        }
+        let x = 0;
+        let y = 0;
+
+        if (event) {
+            const box = canvas.getBoundingClientRect();
+
+            x = Math.round((event.clientX - box.left) * (canvas.width / box.width));
+            y = Math.round((event.clientY - box.top) * (canvas.height / box.height));
+        }
+        if (exports.victoriaWebHandlePointer(action, x, y) === 1) {
+            updateMenuOverlay();
+        }
+    };
+
+    canvas.addEventListener("mousemove", (event) => send(0, event));
+    canvas.addEventListener("mousedown", (event) => {
+        // Button zero only, and the page keeps the others: two and three are a
+        // paste and a context menu here and mean nothing to the engine.
+        if (event.button === 0) {
+            send(1, event);
+            event.preventDefault();
+        }
+    });
+    canvas.addEventListener("mouseleave", () => send(2, null));
 }
 
 function drawFrameSparkline() {
@@ -781,6 +1005,7 @@ function connectDiscPicker() {
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", connectDiscPicker);
     document.addEventListener("DOMContentLoaded", connectMenuKeys);
+    document.addEventListener("DOMContentLoaded", connectPointer);
 } else {
     connectDiscPicker();
 }

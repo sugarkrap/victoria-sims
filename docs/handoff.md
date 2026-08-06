@@ -51,6 +51,7 @@ The Linux binary takes:
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
 | `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
 | `--sim=CODE` | Which Sim to build: an age and a gender as the catalogue spells them — `am`, `af`, `cu`, `tf`, `em`. Every one of the four names is composed from it, and the run reports which archetypes the disc actually carries. Defaults to `am`. |
+| `--menu` | Opens the debug menu at start rather than waiting for an `m`. A menu is the one part of an engine that cannot be judged from a log, and a machine with no way to synthesise a keystroke has no other way to see it. |
 | `--wear=NAME` | Dresses the Sim in the catalogue entry whose name holds NAME. A preference, not a filter: parts nothing matching was offered for still wear whatever the catalogue offered them. The run names eight alternatives per part, so the next run's argument comes out of the last one's output. |
 
 Use both together whenever anything is being judged by eye across frames. An
@@ -900,3 +901,65 @@ only "not enough arena space", which costs a run of the disc per guess — it no
 reports the bytes it wanted, and that number named the array immediately.
 
 The logs are verbose on purpose. That is the method, not clutter.
+
+
+## Text, and the interface drawn with it
+
+The engine draws its own words now, in the game's own font, read off the disc
+the way its meshes and textures are.
+
+**The font.** `TSData/Res/UI/Fonts/*.mxf` is a TrueType font behind a very thin
+door: the magic `MXFN`, five bytes nobody here claims to understand, and then
+the whole sfnt with every byte exclusive-ored against one constant. The padding
+gave the key away — a fixed-length container pads with zeroes, and this one pads
+with `0x9d`, so a constant applied to a constant is a constant.
+
+Nothing hardcodes that. A TrueType file begins `00 01 00 00`, so both the key
+and where the payload starts fall out of looking for those four bytes under a
+single-byte mask, over the first few dozen offsets, with the table directory
+behind each candidate as the arbiter. A disc that obfuscates differently — or
+not at all — reads without anybody editing a constant, and `verifyFontReader`
+proves it by handing the same font over unmasked.
+
+**The rasterizer.** `glyphRaster.c` turns outlines into coverage in integers all
+the way down: 24.8 coordinates, four sample rows a pixel with exact horizontal
+coverage, non-zero winding so an `o` keeps its hole. There is no floating point
+and there will not be — the floor of the ladder has no unit for it. Hinting is
+not run; unhinted-and-smoothed is how every renderer written in the last fifteen
+years draws text.
+
+**Paid once.** `fontAtlas.c` rasterizes printable ASCII into one sheet and can
+store the whole thing — metrics and pixels — as a block of bytes. Natively that
+block goes to `~/.cache/victoriaSims/glyphs<mark>` through two new platform
+calls, and the next run reads it back without opening the font file at all. On
+the web there is no disk, so the sheet lives in an arena for the session, which
+is the one lifetime an arena expresses perfectly. The mark is the font's path,
+its length and the size drawn — not a checksum of its bytes, because reading
+those is most of the cost being avoided.
+
+**A fallback.** `builtinFont.c` is five by seven, ninety-five characters, drawn
+as pictures rather than encoded as hex, and authored here. It is what draws
+before a disc is open and on a disc with no font on it — including the message
+saying so.
+
+**The interface.** `interfaceSurface.c` is one RGBA premultiplied image with
+fill, border, text and image on it; `interfaceMenu.c` lays the debug menu out as
+a sidebar of pages and a grid of tiles with a pager, and answers what is under
+the pointer. Layout and hit testing are one file on purpose: a button drawn
+somewhere the pointer is not tested is a button that does not work, and the bug
+is invisible in both the code and the picture.
+
+Backends get exactly one call — `renderSetOverlay` — and composite with
+`out = source + destination * (1 - sourceAlpha)`. That is a blend mode on
+hardware older than this project's floor, so the software rasterizer does the
+same arithmetic itself in integers and the menu looks identical on all three.
+
+Mouse and keys both. X11 motion, button and leave events natively; canvas events
+on the web, scaled by the ratio between the canvas's layout size and its render
+size — without which the menu is hit accurately in one corner and nowhere else.
+
+**Still to do.** The clothing page is a list the load does not build yet, so its
+tiles are empty. Thumbnails are stand-ins everywhere: `thumbnailForRow` in
+engineCore is the hook, and the answer for clothing is already in the engine —
+the garment textures are read to paint the Sim, and a thumbnail is one of them
+scaled down.

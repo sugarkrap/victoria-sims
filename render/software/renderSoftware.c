@@ -425,6 +425,89 @@ static void drawMesh(Real32 elapsedSeconds)
     }
 }
 
+/* The overlay, kept by pointer. It lives in an arena and outlives the frame, so
+   there is nothing to copy and nothing to upload — which is the one place this
+   backend has an easier job than the two that talk to a device. */
+static const Unsigned8 *overlayPixels = NULL_POINTER;
+static Unsigned32 overlayWidth = 0U;
+static Unsigned32 overlayHeight = 0U;
+
+void renderSetOverlay(const Unsigned8 *pixels, Unsigned32 widthInPixels,
+                      Unsigned32 heightInPixels)
+{
+    if (pixels == NULL_POINTER || widthInPixels == 0U || heightInPixels == 0U)
+    {
+        overlayPixels = NULL_POINTER;
+        overlayWidth = 0U;
+        overlayHeight = 0U;
+        return;
+    }
+    overlayPixels = pixels;
+    overlayWidth = widthInPixels;
+    overlayHeight = heightInPixels;
+}
+
+/* value * alpha / 255, without the divide.
+ *
+ * Dividing by 255 costs more than everything else in this loop put together on
+ * the hardware this backend exists for. Adding the top byte back before
+ * shifting is the standard way round it, and is exact for every one of the
+ * 65536 pairs rather than approximately right. */
+static Unsigned32 scaleByAlpha(Unsigned32 value, Unsigned32 alpha)
+{
+    Unsigned32 product = (value * alpha) + 128U;
+
+    return (product + (product >> 8)) >> 8;
+}
+
+/* The overlay over the scene, premultiplied: out = source + scene * (1 - a).
+ *
+ * The same arithmetic the two shader backends get from a blend mode, written
+ * out. One pass over the pixels, because a walk of the framebuffer is the
+ * expensive thing here and doing it twice would double the only cost. */
+static void drawOverlay(void)
+{
+    Unsigned32 rows = (overlayHeight < surface.heightInPixels) ? overlayHeight
+                                                              : surface.heightInPixels;
+    Unsigned32 columns = (overlayWidth < surface.widthInPixels) ? overlayWidth
+                                                                : surface.widthInPixels;
+    Unsigned32 row;
+
+    for (row = 0U; row < rows; row++)
+    {
+        const Unsigned8 *source = &overlayPixels[(MemorySize)row * overlayWidth * 4UL];
+        Unsigned32 *destination = &surface.pixels[(MemorySize)row * surface.pitchInPixels];
+        Unsigned32 column;
+
+        for (column = 0U; column < columns; column++)
+        {
+            const Unsigned8 *pixel = &source[column * 4U];
+            Unsigned32 alpha = pixel[3];
+            Unsigned32 behind;
+            Unsigned32 keep;
+
+            /* Nothing here at all: the common case by a long way, since an
+               interface is mostly the space around it. */
+            if (alpha == 0U)
+            {
+                continue;
+            }
+            if (alpha == 255U)
+            {
+                destination[column] = ((Unsigned32)pixel[0] << 16) |
+                                      ((Unsigned32)pixel[1] << 8) | (Unsigned32)pixel[2];
+                continue;
+            }
+            behind = destination[column];
+            keep = 255U - alpha;
+            destination[column] =
+                ((pixel[0] + scaleByAlpha((behind >> 16) & 0xFFU, keep)) << 16) |
+                ((pixel[1] + scaleByAlpha((behind >> 8) & 0xFFU, keep)) << 8) |
+                (pixel[2] + scaleByAlpha(behind & 0xFFU, keep));
+        }
+    }
+}
+
 void renderDrawFrame(Real32 elapsedSeconds)
 {
     Real32 colorPulse = 0.65f + (0.35f * mathSine(elapsedSeconds * 1.5f));
@@ -450,6 +533,13 @@ void renderDrawFrame(Real32 elapsedSeconds)
     {
         VICTORIA_PROFILE_ZONE_BEGIN("rasterizerDrawTriangle");
         rasterizerDrawTriangle(&surface, triangleVertices, colorPulse);
+        VICTORIA_PROFILE_ZONE_END();
+    }
+
+    if (overlayPixels != NULL_POINTER)
+    {
+        VICTORIA_PROFILE_ZONE_BEGIN("drawOverlay");
+        drawOverlay();
         VICTORIA_PROFILE_ZONE_END();
     }
 

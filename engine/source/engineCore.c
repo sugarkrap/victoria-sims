@@ -19,6 +19,10 @@
 #include "victoria/wardrobe.h"
 #include "victoria/debugMenu.h"
 #include "victoria/resourceCache.h"
+#include "victoria/fontAtlas.h"
+#include "victoria/interfaceMenu.h"
+#include "victoria/interfaceSurface.h"
+#include "utils/checksum.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
    and nothing reads it faster than a human can. */
@@ -4594,6 +4598,436 @@ static EngineDiscLoadStatus stepTheAnimationList(void)
     return ENGINE_DISC_WORKING;
 }
 
+/* ---- The text on the screen -------------------------------------------
+ *
+ * The debug menu used to be printed to a terminal, which is a fine place for it
+ * right up until somebody runs the game the way a game is run. It is drawn now,
+ * with the game's own font, read off the disc the way its meshes and textures
+ * are.
+ *
+ * The order of preference is the whole of the design here:
+ *
+ *   1. a sheet of glyphs left behind by a previous run, read back from the
+ *      platform's cache. Nothing is rasterized and the font file is not even
+ *      opened. This is the case that matters for the slow end of the device
+ *      ladder, where it turns a second of start-up into nothing at all.
+ *   2. the disc's own font, rasterized once and then written to that cache so
+ *      the next run takes route one.
+ *   3. the font the engine carries with it, five pixels by seven, which is what
+ *      draws before a disc is open and on a disc with no font on it.
+ *
+ * A browser has no cache to write to and says so, which lands it on route two
+ * every session — and the sheet then lives in an arena for as long as the page
+ * does, which is exactly the lifetime an arena is good at. */
+
+#define TEXT_PIXEL_SIZE 14U
+#define TEXT_SHEET_WIDTH 256U
+#define TEXT_SHEET_HEIGHT 256U
+/* Big enough for the menu at its largest and for the one-line hint at its
+   smallest. Four bytes a pixel, so this is a megabyte and a half of the budget
+   — the price of an interface that draws the same on a machine with shaders and
+   one without. */
+#define INTERFACE_LIMIT_WIDTH 768U
+#define INTERFACE_LIMIT_HEIGHT 512U
+
+/* All transient: taken from the arena while a font is being turned into pixels
+   and given straight back. Only the sheet and the surface outlive the build. */
+#define FONT_FILE_CAPACITY (320UL * 1024UL)
+#define FONT_CACHE_CAPACITY (80UL * 1024UL)
+#define FONT_POINT_LIMIT 1024U
+#define FONT_CONTOUR_LIMIT 64U
+#define GLYPH_EDGE_LIMIT 4096U
+#define GLYPH_CROSSING_LIMIT 256U
+
+static FontAtlas textAtlas;
+static InterfaceSurface interfaceSurface;
+static InterfaceMenuLayout menuLayout;
+/* What the pointer is over, and what it was over last time the interface was
+   drawn. A button that lights up under the pointer has to be redrawn when the
+   pointer moves off it as well as onto it. */
+static InterfaceMenuHit menuHovered;
+static Integer32 pointerX = -1;
+static Integer32 pointerY = -1;
+/* Which composition the backend has been given, and what the menu said when it
+   was made. Both compared rather than assumed, so a menu nobody is touching
+   costs one comparison a frame instead of a layout and an upload. */
+static Unsigned32 interfaceRevisionSent = 0U;
+static char menuTextDrawn[2048];
+static InterfaceMenuHit menuHoveredDrawn;
+static Unsigned32 interfaceWindowWidth = 1280U;
+static Unsigned32 interfaceWindowHeight = 720U;
+static Boolean textIsReady = BOOLEAN_FALSE;
+/* Whether the question "is there a font on this disc" has been answered. Asked
+   once; the answer may well be no. */
+static Boolean fontIsSettled = BOOLEAN_FALSE;
+
+/* The font the engine carries with it. Built before anything else so that a
+   failure further down still leaves something able to say so. */
+static void settleTheText(void)
+{
+    Unsigned8 *sheet = (Unsigned8 *)memoryArenaAllocate(
+        globalArena, (MemorySize)TEXT_SHEET_WIDTH * (MemorySize)TEXT_SHEET_HEIGHT, 16UL);
+    Unsigned8 *pixels = (Unsigned8 *)memoryArenaAllocate(
+        globalArena,
+        (MemorySize)INTERFACE_LIMIT_WIDTH * (MemorySize)INTERFACE_LIMIT_HEIGHT *
+            (MemorySize)INTERFACE_BYTES_PER_PIXEL,
+        16UL);
+
+    fontAtlasBind(&textAtlas, sheet, TEXT_SHEET_WIDTH, TEXT_SHEET_HEIGHT);
+    interfaceSurfaceBind(&interfaceSurface, pixels, INTERFACE_LIMIT_WIDTH,
+                         INTERFACE_LIMIT_HEIGHT);
+    menuHovered.target = INTERFACE_MENU_NOTHING;
+    menuHovered.value = 0U;
+    menuHoveredDrawn = menuHovered;
+    if (sheet == NULL_POINTER || pixels == NULL_POINTER)
+    {
+        platformLogMessage("engine: no room for a glyph sheet, so nothing will be drawn in "
+                           "words");
+        return;
+    }
+    if (!fontAtlasBuildFromBuiltin(&textAtlas, 2U))
+    {
+        return;
+    }
+    textIsReady = BOOLEAN_TRUE;
+    menuTextDrawn[0] = '\0';
+}
+
+/* Which file on this disc to read a font out of.
+ *
+ * Preferring the one the game's own FontStyle.ini names as its default, and
+ * falling back to whichever turns up first. Both are guesses about a disc
+ * somebody else laid out, so the name of what was chosen is logged — a wrong
+ * guess should be readable rather than mysterious. */
+static Integer32 findAFontOnThisDisc(void)
+{
+    Integer32 firstFound = -1;
+    Unsigned32 index;
+
+    for (index = 0U; index < discFileSystem->entryCount; index++)
+    {
+        const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, index);
+
+        if (entry == NULL_POINTER || !stringEndsWithIgnoringCase(entry->path, ".mxf") ||
+            entry->sizeInBytes == 0ULL || entry->sizeInBytes > (Unsigned64)FONT_FILE_CAPACITY)
+        {
+            continue;
+        }
+        if (stringContainsIgnoringCase(entry->path, "benguiat"))
+        {
+            return (Integer32)index;
+        }
+        if (firstFound < 0)
+        {
+            firstFound = (Integer32)index;
+        }
+    }
+    return firstFound;
+}
+
+/* What a cached sheet was made from: which file, how long it is, and at what
+ * size it was drawn.
+ *
+ * Not a checksum of the font's bytes, deliberately — that would mean reading a
+ * hundred and eighty kilobytes off the disc before discovering that the answer
+ * was already on hand, which is most of the cost this exists to avoid. A path
+ * and a length identify a file on a pressed disc perfectly well. */
+static Unsigned32 markForFont(const VirtualFileEntry *entry)
+{
+    Unsigned32 mark = checksumCrc32((const Unsigned8 *)entry->path, stringLength(entry->path));
+
+    mark = (mark * 31U) + (Unsigned32)(entry->sizeInBytes & 0xFFFFFFFFULL);
+    mark = (mark * 31U) + (Unsigned32)TEXT_PIXEL_SIZE;
+    /* The sheet's shape too. A build compiled with a different one refuses the
+       block anyway, but refusing it by the mark says why rather than looking
+       like a damaged file. */
+    mark = (mark * 31U) + (Unsigned32)TEXT_SHEET_WIDTH;
+    mark = (mark * 31U) + (Unsigned32)TEXT_SHEET_HEIGHT;
+    /* Nought is what an atlas built from the font we carry ourselves reports,
+       and the two must never be mistaken for each other. */
+    return (mark == 0U) ? 1U : mark;
+}
+
+static void nameTheCache(Unsigned32 mark, char *destination, MemorySize capacity)
+{
+    char digits[24];
+
+    destination[0] = '\0';
+    stringAppend(destination, capacity, "glyphs");
+    (void)stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)mark, 8UL);
+    stringAppend(destination, capacity, digits);
+}
+
+/* Rasterizes the font at the given index and keeps the result. Every array it
+ * needs comes out of the arena and goes back into it before this returns; what
+ * survives is the sheet, which was allocated once at start-up.
+ *
+ * Answers false when the bytes have not arrived yet, which on a browser is the
+ * ordinary case and not a failure. */
+static Boolean buildTheAtlasFromDisc(Unsigned32 fileIndex, Unsigned32 mark)
+{
+    MemorySize marker = memoryArenaGetMarker(globalArena);
+    const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, fileIndex);
+    MemorySize size = (MemorySize)entry->sizeInBytes;
+    Unsigned8 *bytes = (Unsigned8 *)memoryArenaAllocate(globalArena, size, 8UL);
+    GlyphRasterEdge *edges = (GlyphRasterEdge *)memoryArenaAllocate(
+        globalArena, (MemorySize)GLYPH_EDGE_LIMIT * sizeof(GlyphRasterEdge), 8UL);
+    Integer32 *crossingX = (Integer32 *)memoryArenaAllocate(
+        globalArena, (MemorySize)GLYPH_CROSSING_LIMIT * sizeof(Integer32), 4UL);
+    Integer32 *crossingDirection = (Integer32 *)memoryArenaAllocate(
+        globalArena, (MemorySize)GLYPH_CROSSING_LIMIT * sizeof(Integer32), 4UL);
+    Unsigned16 *rowCoverage = (Unsigned16 *)memoryArenaAllocate(
+        globalArena, (MemorySize)TEXT_SHEET_WIDTH * sizeof(Unsigned16), 2UL);
+    Integer32 *pointX = (Integer32 *)memoryArenaAllocate(
+        globalArena, (MemorySize)FONT_POINT_LIMIT * sizeof(Integer32), 4UL);
+    Integer32 *pointY = (Integer32 *)memoryArenaAllocate(
+        globalArena, (MemorySize)FONT_POINT_LIMIT * sizeof(Integer32), 4UL);
+    Unsigned8 *onCurve = (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_POINT_LIMIT, 1UL);
+    Unsigned32 *contourEnds = (Unsigned32 *)memoryArenaAllocate(
+        globalArena, (MemorySize)FONT_CONTOUR_LIMIT * sizeof(Unsigned32), 4UL);
+    FontReader font;
+    FontGlyphOutline outline;
+    GlyphRasterizer rasterizer;
+    VirtualReadResult read;
+    char message[512];
+
+    if (bytes == NULL_POINTER || edges == NULL_POINTER || crossingX == NULL_POINTER ||
+        crossingDirection == NULL_POINTER || rowCoverage == NULL_POINTER ||
+        pointX == NULL_POINTER || pointY == NULL_POINTER || onCurve == NULL_POINTER ||
+        contourEnds == NULL_POINTER)
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        platformLogMessage("engine: no room to rasterize a font, keeping the built-in one");
+        return BOOLEAN_TRUE;
+    }
+
+    read = virtualFileSystemReadFile(discFileSystem, fileIndex, 0ULL, size, bytes);
+    if (read == VIRTUAL_READ_PENDING)
+    {
+        /* Given back and asked for again next step. The arena is a stack, and
+           leaving this allocated across a pend would strand it. */
+        memoryArenaRewindToMarker(globalArena, marker);
+        return BOOLEAN_FALSE;
+    }
+    if (read != VIRTUAL_READ_OK || !fontReaderOpen(&font, bytes, size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        platformLogMessage("engine: that font would not read, keeping the built-in one");
+        return BOOLEAN_TRUE;
+    }
+
+    glyphRasterizerBind(&rasterizer, edges, GLYPH_EDGE_LIMIT, crossingX, crossingDirection,
+                        GLYPH_CROSSING_LIMIT, rowCoverage, TEXT_SHEET_WIDTH);
+    fontOutlineBind(&outline, pointX, pointY, onCurve, contourEnds, FONT_POINT_LIMIT,
+                    FONT_CONTOUR_LIMIT);
+
+    if (!fontAtlasBuildFromFont(&textAtlas, &font, &rasterizer, &outline, TEXT_PIXEL_SIZE, mark))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        (void)fontAtlasBuildFromBuiltin(&textAtlas, 2U);
+        platformLogMessage("engine: that font would not rasterize, keeping the built-in one");
+        return BOOLEAN_TRUE;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: reading text from ");
+    stringAppend(message, sizeof(message), entry->path);
+    stringAppend(message, sizeof(message), " — ");
+    appendCount(message, sizeof(message), font.glyphCount);
+    stringAppend(message, sizeof(message), " glyphs in the file, ");
+    appendCount(message, sizeof(message), (Unsigned32)FONT_ATLAS_CHARACTER_COUNT -
+                                              textAtlas.glyphsRefused);
+    stringAppend(message, sizeof(message), " drawn at ");
+    appendCount(message, sizeof(message), TEXT_PIXEL_SIZE);
+    stringAppend(message, sizeof(message), " pixels");
+    platformLogMessage(message);
+
+    /* Left for the next run. A platform with nowhere to put it says so, and the
+       only consequence is that the next run does this again. */
+    {
+        Unsigned8 *block =
+            (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_CACHE_CAPACITY, 8UL);
+        MemorySize written = 0UL;
+        char name[64];
+
+        if (block != NULL_POINTER)
+        {
+            written = fontAtlasStore(&textAtlas, block, FONT_CACHE_CAPACITY);
+        }
+        nameTheCache(mark, name, sizeof(name));
+        if (written > 0UL && platformCacheStore(name, block, written))
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: kept those glyphs as ");
+            stringAppend(message, sizeof(message), name);
+            stringAppend(message, sizeof(message), ", so the next run draws them without "
+                                                   "rasterizing anything");
+            platformLogMessage(message);
+        }
+        else
+        {
+            platformLogMessage("engine: nowhere to keep the glyphs, so every run will "
+                               "rasterize them again");
+        }
+    }
+
+    memoryArenaRewindToMarker(globalArena, marker);
+    return BOOLEAN_TRUE;
+}
+
+/* One step of finding a font. Answers false while a read is outstanding, which
+ * is what makes it safe to drive from the same loop as everything else on a
+ * store that cannot answer on the spot. */
+static Boolean stepTheFont(void)
+{
+    Integer32 fileIndex;
+    const VirtualFileEntry *entry;
+    Unsigned32 mark;
+    char name[64];
+
+    if (!textIsReady || discFileSystem == NULL_POINTER)
+    {
+        fontIsSettled = BOOLEAN_TRUE;
+        return BOOLEAN_TRUE;
+    }
+    fileIndex = findAFontOnThisDisc();
+    if (fileIndex < 0)
+    {
+        fontIsSettled = BOOLEAN_TRUE;
+        platformLogMessage("engine: no font on this disc, so text is drawn with the one the "
+                           "engine carries");
+        return BOOLEAN_TRUE;
+    }
+
+    entry = virtualFileSystemGetEntry(discFileSystem, (Unsigned32)fileIndex);
+    mark = markForFont(entry);
+    nameTheCache(mark, name, sizeof(name));
+
+    /* Route one: a sheet from a previous run. The font file is never opened. */
+    {
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+        Unsigned8 *block =
+            (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_CACHE_CAPACITY, 8UL);
+        MemorySize read = 0UL;
+
+        if (block != NULL_POINTER)
+        {
+            read = platformCacheLoad(name, block, FONT_CACHE_CAPACITY);
+        }
+        if (read > 0UL && fontAtlasRestore(&textAtlas, block, read, mark))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            fontIsSettled = BOOLEAN_TRUE;
+            menuTextDrawn[0] = '\0';
+            platformLogMessage("engine: read this disc's glyphs back from the cache, so "
+                               "nothing had to be rasterized");
+            return BOOLEAN_TRUE;
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+    }
+
+    if (!buildTheAtlasFromDisc((Unsigned32)fileIndex, mark))
+    {
+        return BOOLEAN_FALSE;
+    }
+    fontIsSettled = BOOLEAN_TRUE;
+    menuTextDrawn[0] = '\0';
+    return BOOLEAN_TRUE;
+}
+
+/* A picture for one tile, if there is one.
+ *
+ * There is not, yet, for any page: body types and animations have nothing that
+ * could be a thumbnail, and the clothing page is a list the load does not build
+ * yet. The hook is here rather than later because it is what decides the shape
+ * of the drawing code, and because the answer for clothing is already sitting
+ * in the engine — the garment textures are read to paint the Sim, and a
+ * thumbnail is one of them scaled down. */
+static Boolean thumbnailForRow(void *context, DebugMenuPage page, Unsigned32 row,
+                               const Unsigned8 **rgbaPixels, Unsigned32 *width,
+                               Unsigned32 *height)
+{
+    (void)context;
+    (void)page;
+    (void)row;
+    (void)rgbaPixels;
+    (void)width;
+    (void)height;
+    return BOOLEAN_FALSE;
+}
+
+/* Redraws the interface when what it would show has changed.
+ *
+ * Three things can change it: what the menu says, what the pointer is over, and
+ * the size of the window. All three are compared rather than tracked by flags —
+ * a flag set in one of the dozen places that can move the menu is a flag that
+ * will one day not be set. */
+static void drawTheInterface(void)
+{
+    const char *wanted;
+    Boolean sameText;
+
+    if (!textIsReady)
+    {
+        return;
+    }
+    wanted = engineGetMenuText();
+    sameText = stringEquals(wanted, menuTextDrawn);
+    if (sameText && menuHovered.target == menuHoveredDrawn.target &&
+        menuHovered.value == menuHoveredDrawn.value)
+    {
+        return;
+    }
+    menuTextDrawn[0] = '\0';
+    (void)stringAppend(menuTextDrawn, sizeof(menuTextDrawn), wanted);
+    menuHoveredDrawn = menuHovered;
+
+    if (!debugMenuIsOpen(&debugMenu))
+    {
+        Unsigned32 width = 0U;
+        Unsigned32 height = 0U;
+
+        /* Shut, and still saying so. A debug feature nobody can discover is a
+           debug feature nobody has. */
+        if (interfaceMenuMeasureHint(&textAtlas, "menu: press m", &width, &height) &&
+            interfaceSurfaceBegin(&interfaceSurface, width, height))
+        {
+            interfaceMenuDrawHint(&interfaceSurface, &textAtlas, "menu: press m");
+        }
+        interfaceSurfaceEnd(&interfaceSurface);
+    }
+    else
+    {
+        interfaceMenuLayout(&menuLayout, interfaceWindowWidth, interfaceWindowHeight);
+        if (menuLayout.width > interfaceSurface.maximumWidth)
+        {
+            menuLayout.width = interfaceSurface.maximumWidth;
+        }
+        if (menuLayout.height > interfaceSurface.maximumHeight)
+        {
+            menuLayout.height = interfaceSurface.maximumHeight;
+        }
+        /* The keys are told how the tiles are arranged, so down is a row of the
+           grid rather than one tile along it — otherwise the cursor walks the
+           list in reading order while the eye follows a grid. */
+        debugMenuSetGrid(&debugMenu, debugMenuGetPage(&debugMenu), menuLayout.columns,
+                         INTERFACE_MENU_PER_PAGE(&menuLayout));
+        if (interfaceSurfaceBegin(&interfaceSurface, menuLayout.width, menuLayout.height))
+        {
+            interfaceMenuDraw(&interfaceSurface, &menuLayout, &debugMenu, &textAtlas, menuHovered,
+                              thumbnailForRow, NULL_POINTER);
+        }
+        interfaceSurfaceEnd(&interfaceSurface);
+    }
+
+    if (interfaceSurface.revision != interfaceRevisionSent)
+    {
+        renderSetOverlay(interfaceSurface.pixels, interfaceSurface.width,
+                         interfaceSurface.height);
+        interfaceRevisionSent = interfaceSurface.revision;
+    }
+}
+
 EngineDiscLoadStatus engineStepDiscLoad(void)
 {
     /* Wide enough for every refusal reason at once. A truncated diagnostic is
@@ -4603,6 +5037,21 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
         return discLoadStatus;
+    }
+
+    /* Before any of the phases, and outside them.
+     *
+     * A font is not part of assembling a Sim and does not belong in the machine
+     * that does it — but it does have to be found by reading a disc that may
+     * answer later, so it needs a turn of the same loop. Taking one step here
+     * and returning gives it exactly that, once, without any phase having to
+     * know it exists. */
+    if (!fontIsSettled && discCatalogueIsBuilt)
+    {
+        if (!stepTheFont())
+        {
+            return ENGINE_DISC_WORKING;
+        }
     }
 
     if (discPhase == DISC_PHASE_LIST_ANIMATIONS)
@@ -6659,13 +7108,23 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         return BOOLEAN_FALSE;
     }
 
+    interfaceWindowWidth = (configuration->widthInPixels > 0U) ? configuration->widthInPixels
+                                                               : 1U;
+    interfaceWindowHeight = (configuration->heightInPixels > 0U) ? configuration->heightInPixels
+                                                                 : 1U;
     simMorphHeldChannel = configuration->heldMorphChannel;
+
     if (configuration->simArchetype != NULL_POINTER && configuration->simArchetype[0] != '\0')
     {
         simArchetype[0] = '\0';
         stringAppend(simArchetype, sizeof(simArchetype), configuration->simArchetype);
     }
     debugMenuInitialize(&debugMenu);
+    debugMenuSetOpen(&debugMenu, configuration->menuIsOpen);
+    /* Early, and before anything that might fail: the font the engine carries
+       with it is what lets a later failure be reported in words on the screen
+       rather than only to a terminal nobody is looking at. */
+    settleTheText();
     {
         Unsigned8 *block = (Unsigned8 *)memoryArenaAllocate(globalArena, ANIMATION_ARENA_BYTES,
                                                            16UL);
@@ -6762,8 +7221,100 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     return BOOLEAN_TRUE;
 }
 
+/* Declared before both of its callers: a keystroke chooses and so does a click,
+   and the two live either side of it. */
+static void applyTheChoice(void);
+
+/* Where the pointer is, translated into the menu's own coordinates.
+ *
+ * The interface is drawn in the top left corner at one pixel to one, so window
+ * coordinates and surface coordinates are the same numbers. That is worth
+ * writing down rather than relying on: the day the interface is drawn anywhere
+ * else, this is the function that has to change and the only one. */
+static InterfaceMenuHit whatIsUnderThePointer(void)
+{
+    InterfaceMenuHit nothing;
+
+    nothing.target = INTERFACE_MENU_NOTHING;
+    nothing.value = 0U;
+    if (!textIsReady || !debugMenuIsOpen(&debugMenu) || pointerX < 0 || pointerY < 0)
+    {
+        return nothing;
+    }
+    return interfaceMenuHitTest(&menuLayout, &debugMenu, pointerX, pointerY);
+}
+
+Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y)
+{
+    InterfaceMenuHit hit;
+
+    if (engineIsRunning == BOOLEAN_FALSE)
+    {
+        return BOOLEAN_FALSE;
+    }
+    if (action == ENGINE_POINTER_LEFT)
+    {
+        Boolean wasOverSomething = (Boolean)(menuHovered.target != INTERFACE_MENU_NOTHING);
+
+        pointerX = -1;
+        pointerY = -1;
+        menuHovered.target = INTERFACE_MENU_NOTHING;
+        menuHovered.value = 0U;
+        return wasOverSomething;
+    }
+
+    pointerX = x;
+    pointerY = y;
+    hit = whatIsUnderThePointer();
+    if (action == ENGINE_POINTER_MOVED)
+    {
+        Boolean changed = (Boolean)(hit.target != menuHovered.target ||
+                                    hit.value != menuHovered.value);
+
+        menuHovered = hit;
+        return changed;
+    }
+
+    /* A press. */
+    menuHovered = hit;
+    switch (hit.target)
+    {
+    case INTERFACE_MENU_CLOSE:
+        debugMenuSetOpen(&debugMenu, BOOLEAN_FALSE);
+        return BOOLEAN_TRUE;
+
+    case INTERFACE_MENU_PAGE:
+        return debugMenuSetPage(&debugMenu, (DebugMenuPage)hit.value);
+
+    case INTERFACE_MENU_PREVIOUS:
+        return debugMenuStepPage(&debugMenu, -1);
+
+    case INTERFACE_MENU_NEXT:
+        return debugMenuStepPage(&debugMenu, 1);
+
+    case INTERFACE_MENU_TILE:
+        /* Moving the cursor and choosing, in that order and both at once. A
+           click that only moved the cursor would need a second click to act,
+           which is not what a tile in a grid means anywhere else. */
+        (void)debugMenuSetCursor(&debugMenu, debugMenuGetPage(&debugMenu), hit.value);
+        applyTheChoice();
+        return BOOLEAN_TRUE;
+
+    default:
+        break;
+    }
+    return BOOLEAN_FALSE;
+}
+
 void engineResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
+    /* Kept because the menu sizes itself against the window: a fraction of it,
+       capped, so a debug menu never fills the screen it is describing. */
+    interfaceWindowWidth = (widthInPixels > 0U) ? widthInPixels : 1U;
+    interfaceWindowHeight = (heightInPixels > 0U) ? heightInPixels : 1U;
+    /* Forces a redraw at the new size. Nothing else would: the menu says the
+       same words in a window of any size. */
+    menuTextDrawn[0] = '\0';
     if (engineIsRunning == BOOLEAN_FALSE)
     {
         return;
@@ -6950,6 +7501,19 @@ Boolean engineHandleMenuKey(char key)
     }
     if (result == DEBUG_MENU_CHOSE)
     {
+        applyTheChoice();
+    }
+    return BOOLEAN_TRUE;
+}
+
+/* Acts on the row the cursor is on.
+ *
+ * Its own function because two things choose now — a keystroke and a click on a
+ * tile — and a menu where clicking and pressing enter do subtly different
+ * things is a menu nobody can describe. */
+static void applyTheChoice(void)
+{
+    {
         Unsigned32 row = debugMenuGetCursor(&debugMenu, debugMenuGetPage(&debugMenu));
 
         switch (debugMenuGetPage(&debugMenu))
@@ -6997,7 +7561,6 @@ Boolean engineHandleMenuKey(char key)
             break;
         }
     }
-    return BOOLEAN_TRUE;
 }
 
 void engineRenderFrame(Real32 elapsedSeconds)
@@ -7009,6 +7572,11 @@ void engineRenderFrame(Real32 elapsedSeconds)
 
     VICTORIA_PROFILE_ZONE_BEGIN("engineRenderFrame");
     advanceThePose(elapsedSeconds);
+    /* Before the frame rather than after: what the menu says can change on any
+       step of the disc load, and composing it afterwards would put it on screen
+       one frame late — which on the frame somebody presses a key is the frame
+       they are looking at. */
+    drawTheInterface();
     renderDrawFrame(elapsedSeconds);
     VICTORIA_PROFILE_ZONE_END();
 }
