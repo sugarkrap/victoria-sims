@@ -399,9 +399,23 @@ void debugMenuWriteText(const DebugMenu *menu, char *destination, MemorySize cap
  * change under it is a highlight nobody is looking at. */
 Boolean debugMenuStepPage(DebugMenu *menu, Integer32 direction)
 {
-    DebugMenuList *list = &menu->lists[menu->page];
-    Unsigned32 start = debugMenuGetPageStart(menu, menu->page);
+    DebugMenuList *list;
+    Unsigned32 start;
     Unsigned32 wanted;
+
+    /* Checked rather than trusted, even though every path that sets the page
+     * goes through debugMenuSetPage, which checks. GCC will not take that on
+     * faith: an enumeration of three named values has a declared range wider
+     * than three, so an index taken straight from one is a subscript the
+     * compiler can prove nothing about. It said so, and it was right to —
+     * everything else in this file that indexes by page checks first, and this
+     * was the one that did not. */
+    if ((Unsigned32)menu->page >= DEBUG_MENU_PAGE_COUNT)
+    {
+        return BOOLEAN_FALSE;
+    }
+    list = &menu->lists[menu->page];
+    start = debugMenuGetPageStart(menu, menu->page);
 
     if (list->count == 0U)
     {

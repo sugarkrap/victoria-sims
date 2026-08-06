@@ -1094,3 +1094,26 @@ it for a page of tiles means a lazy cache (say 64 slots of 48 by 48, about
 590 KB) filled one tile a step for the visible page only, driven by the same
 state machine, because on the web each of those reads is answered a frame later.
 That is a session's work and it is written down here rather than half done.
+
+### Two compilers, not one
+
+A real defect reached CI while every local build was green: `debugMenuStepPage`
+indexed `menu->lists[menu->page]` without checking the page first, and GCC
+refused it — an enumeration of three named values has a declared range wider
+than three, so an index taken straight from one is a subscript the compiler can
+prove nothing about. Every other function in that file that indexes by page
+checks first; this was the one that did not.
+
+Clang does not make that complaint, and every local build here was clang,
+including the two ARM tiers. So: **compile with both before pushing.** The host
+GCC reproduces it exactly, which makes it a one-liner to check —
+
+    for f in engine/source/*.c utils/*.c render/software/*.c; do
+      gcc -std=c99 -pedantic -Wall -Wextra -Wshadow -Wstrict-prototypes \
+          -Wmissing-prototypes -Wpointer-arith -Wcast-qual -Wwrite-strings \
+          -Werror -O2 -Iengine/include -I. -c "$f" -o /dev/null || break
+    done
+
+— and the whole engine is clean under it. The ARM jobs in continuous integration
+use GCC, which is why they were the three that went red while the Linux and
+WebAssembly jobs, both clang, stayed green.
