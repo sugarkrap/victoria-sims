@@ -326,6 +326,7 @@ int main(int argumentCount, char **argumentValues)
     Boolean poseIsHeld = BOOLEAN_FALSE;
     Real32 poseHeldTick = 0.0f;
     Unsigned32 heldMorphChannel = 0U;
+    const char *wornName = NULL_POINTER;
     const char *inspectPath = NULL_POINTER;
     MemorySize graphicsMemoryLimitBytes = 0UL;
     const char *discPath = NULL_POINTER;
@@ -358,6 +359,13 @@ int main(int argumentCount, char **argumentValues)
             /* One deformation channel, held at full. The run's own log lists
                the channels and their numbers. */
             heldMorphChannel = (Unsigned32)stringParseUnsigned(argument + stringLength("--morph="));
+        }
+        else if (stringStartsWith(argument, "--wear=") == BOOLEAN_TRUE)
+        {
+            /* Any part of a catalogue entry's name. The run's own log names
+               every entry the wardrobe was offered, so the next run's argument
+               comes out of the last one's output. */
+            wornName = argument + stringLength("--wear=");
         }
         else if (stringEquals(argument, "--still-pose") == BOOLEAN_TRUE)
         {
@@ -425,6 +433,7 @@ int main(int argumentCount, char **argumentValues)
     configuration.poseIsHeld = poseIsHeld;
     configuration.poseHeldTick = poseHeldTick;
     configuration.heldMorphChannel = heldMorphChannel;
+    configuration.wornName = wornName;
 
     if (discPath != NULL_POINTER)
     {

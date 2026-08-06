@@ -51,6 +51,19 @@ typedef struct EngineConfiguration
      * with the camera and the pose held too, three runs at nought, one and two
      * give three frames that differ in exactly one thing. */
     Unsigned32 heldMorphChannel;
+
+    /* What to dress the Sim in, matched against any part of a catalogue entry's
+     * name, or null for whatever the catalogue walk offers first.
+     *
+     * The walk samples two thousand entries out of thousands and takes the
+     * first of each slot that fits, which is one garment out of hundreds. This
+     * is how a run looks at any of the others — the log names every entry the
+     * wardrobe was offered, so a name to try comes out of the previous run.
+     *
+     * It does not override the rule that a mesh must be authored for the age
+     * and gender the skeleton is: asking for a child's garment on an adult
+     * still refuses, and says which rule refused it. */
+    const char *wornName;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);

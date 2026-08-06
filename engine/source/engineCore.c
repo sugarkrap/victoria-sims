@@ -16,6 +16,7 @@
 #include "victoria/archiveReader.h"
 #include "victoria/programReader.h"
 #include "victoria/textureDecode.h"
+#include "victoria/wardrobe.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
    and nothing reads it faster than a human can. */
@@ -443,26 +444,63 @@ typedef enum SimHop
     /* Reading the catalogue, which is where everything a Sim wears and every
        part beyond the four hardcoded names is described. */
     SIM_HOP_CATALOGUE,
+    /* Putting on what the catalogue chose. Shape, geometry node, container —
+       the same three hops a hardcoded part takes, entered one step further
+       along because a catalogue entry names a shape outright and has no
+       transform tree to be found through. */
+    SIM_HOP_WARDROBE,
     SIM_HOP_FINISHED
 } SimHop;
 
 static SimHop simHop = SIM_HOP_TREE;
 static Unsigned32 simHopPart = 0U;
-static Unsigned32 simGathered = 0U;
 static ResourceNodeDescription simHopTree;
 static ShapeDescription simHopShape;
 static const ResourceIndexEntry *simHopEntry = NULL_POINTER;
 static TextureDescription simHopTexture;
 static char simHopTextureName[RESOURCE_NAME_LIMIT];
 static Boolean simHopOverrode = BOOLEAN_FALSE;
+/* Whether this range is being painted with the material its own catalogue entry
+   named, rather than with the one its shape bound. When it is, the skin-tone
+   stand-in stands aside: it exists to guess at exactly this, and a guess must
+   not overrule the thing it was standing in for. */
+static Boolean simHopWearsItsOwn = BOOLEAN_FALSE;
 
-/* The three that carry geometry. The skeleton names no shape at all — it is
-   what the others hang on — so it is probed for and then not drawn. */
-#define SIM_DRAWN_PART_COUNT 3U
-static const char *const simDrawnPartNames[SIM_DRAWN_PART_COUNT] = { "amBodyNaked_cres",
-                                                                     "amFace_cres",
-                                                                     "amHairBald_cres" };
-static GeometryMesh simParts[SIM_DRAWN_PART_COUNT];
+/* Every part a Sim can be drawn in, whether or not this one has it.
+ *
+ * The first three are the hardcoded base: the skeleton names no shape at all —
+ * it is what the others hang on — so it is probed for and then not drawn. A top
+ * and a bottom have no base name because there is no undressed top; they exist
+ * only when the catalogue puts one there.
+ *
+ * Indexed by IDENTITY, not by the order they happened to load. A part whose
+ * shape is not on the disc leaves its slot empty rather than letting the ones
+ * after it move down, so the texture override, the wardrobe and the range map
+ * all mean the same thing whether three parts loaded or one. Packing them was a
+ * bug waiting to be tripped over and one indirection to keep straight. */
+#define SIM_PART_COUNT_DRAWN 5U
+#define SIM_PART_BODY 0U
+#define SIM_PART_FACE 1U
+#define SIM_PART_HAIR 2U
+#define SIM_PART_TOP 3U
+#define SIM_PART_BOTTOM 4U
+/* How many of them the base assembly looks up by name. The rest are the
+   catalogue's to fill. */
+#define SIM_BASE_PART_COUNT 3U
+static const char *const simDrawnPartNames[SIM_PART_COUNT_DRAWN] = {
+    "amBodyNaked_cres", "amFace_cres", "amHairBald_cres", "a top", "a bottom"
+};
+static GeometryMesh simParts[SIM_PART_COUNT_DRAWN];
+static Boolean simPartLoaded[SIM_PART_COUNT_DRAWN];
+/* The material each of a part's primitives should be painted with, taken from
+   the catalogue entry that put the part there rather than from the shape. Null
+   where the entry said nothing, which is every part of the base Sim. */
+static const ResourceIndexEntry *simPartMaterialEntries[SIM_PART_COUNT_DRAWN][RENDER_PART_LIMIT];
+/* Which parts the joined model was actually built from, in the order it joined
+   them. Not every part that loaded: a Sim wearing a top and a bottom leaves its
+   whole body out, and the two are the same volume of Sim. */
+static Unsigned32 simJoinParts[SIM_PART_COUNT_DRAWN];
+static Unsigned32 simJoinCount = 0U;
 
 /* One weight per deformation channel the joined model declares.
  *
@@ -504,7 +542,81 @@ static Unsigned32 simMorphMoverCount = 0U;
 static Unsigned32 simMorphShowing = 0xFFFFFFFFUL;
 /* One channel, held. Nought sweeps. */
 static Unsigned32 simMorphHeldChannel = 0U;
-static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
+/* The material each primitive of each part binds.
+ *
+ * A primitive and not a part, because a garment is not one piece: a firefighter
+ * carries his suit and the skin at his wrists as two primitives with two
+ * materials, and the hardcoded base Sim carries exactly one apiece. So long as
+ * every part had one, a part index and a primitive index were the same number
+ * and the difference could not show — and the moment a Sim wore anything it did,
+ * as a green face. renderSetPartTexture has always been indexed by primitive;
+ * it was being handed a part. */
+static char simPartMaterials[SIM_PART_COUNT_DRAWN][RENDER_PART_LIMIT][RESOURCE_NAME_LIMIT];
+
+/* The joined model's ranges, flattened in the order the merge concatenates
+   them: every primitive of part nought, then every primitive of part one. */
+static Unsigned32 simRangeCount = 0U;
+static char simRangeMaterials[RENDER_PART_LIMIT][RESOURCE_NAME_LIMIT];
+/* The material a range's catalogue entry named for it, which beats the name its
+   shape bound. Null on every range of a Sim nothing has dressed. */
+static const ResourceIndexEntry *simRangeMaterialEntries[RENDER_PART_LIMIT];
+/* Which of the three names each range came from, for the texture override,
+   which belongs to a part rather than to a range. */
+static Unsigned32 simRangeOfPart[RENDER_PART_LIMIT];
+
+/* What the catalogue chose for this Sim to wear, and the shapes it chose.
+ *
+ * The wardrobe decides on a name and a slot; these are the resources those
+ * decisions landed on. Kept as index entries rather than as bytes because the
+ * decision is made during the catalogue walk and acted on after it, and every
+ * byte read in between has gone back to the arena by then. Index entries do not
+ * move: they live in simIndex, which is never rewound.
+ *
+ * The whole thing runs after the hardcoded Sim is assembled, painted and on
+ * screen, rather than before. Two reasons. The tone a face has to match is not
+ * known until a body has been painted with one — it is read off the texture the
+ * body ended up wearing, not written down anywhere — and there is nothing to
+ * choose a face for until then. And a Sim that appears and then dresses is a
+ * Sim whose two states can be told apart in one run; one that is dressed before
+ * it is ever drawn cannot be checked against anything. */
+/* How many subsets of one garment can be painted separately. Declared here
+   because the wardrobe holds them; what they are is written where they are
+   read, on catalogueOverrideCount below. */
+#define CATALOGUE_OVERRIDE_LIMIT 8U
+
+static Wardrobe simWardrobe;
+static const ResourceIndexEntry *simWardrobeShapes[WARDROBE_PART_COUNT];
+/* And the materials each chosen entry named for its own subsets, which is where
+   a garment's colourway lives. Resolved when the key list is open and applied
+   when the mesh is, which are two different steps and two different reads. */
+static char simWardrobeOverrideSubsets[WARDROBE_PART_COUNT][CATALOGUE_OVERRIDE_LIMIT]
+                                      [PROPERTY_NAME_LIMIT];
+static const ResourceIndexEntry
+    *simWardrobeOverrideMaterials[WARDROBE_PART_COUNT][CATALOGUE_OVERRIDE_LIMIT];
+static Unsigned32 simWardrobeOverrideCount[WARDROBE_PART_COUNT];
+/* What to dress it in, as asked for on the command line. Empty takes whatever
+   the walk meets first, which is one garment out of hundreds — the flag is how
+   a run looks at any of the others. */
+static char simWardrobeWanted[WARDROBE_NAME_LIMIT];
+/* Set once the wardrobe has been put on, which is what stops the assembly
+   walking back into the catalogue and round again. */
+static Boolean simWardrobeWorn = BOOLEAN_FALSE;
+static Unsigned32 simWardrobePart = 0U;
+static const ResourceIndexEntry *simWardrobeEntry = NULL_POINTER;
+static ShapeDescription simWardrobeShape;
+static Unsigned32 simWardrobeDressed = 0U;
+
+/* Where a wardrobe part has got to. The same chain stepTheFollow walks, kept
+   apart from it because that one reads a container to measure it and this one
+   reads a container to wear it. */
+typedef enum WardrobeStage
+{
+    WARDROBE_STAGE_SHAPE = 0,
+    WARDROBE_STAGE_NODE,
+    WARDROBE_STAGE_CONTAINER
+} WardrobeStage;
+
+static WardrobeStage simWardrobeStage = WARDROBE_STAGE_SHAPE;
 
 /* The stem of the texture a part should wear INSTEAD of the one its shape
  * binds, or empty to wear what it binds.
@@ -519,7 +631,8 @@ static char simPartMaterials[SIM_DRAWN_PART_COUNT][RESOURCE_NAME_LIMIT];
  *
  * A stem that resolves to nothing on the disc leaves the part wearing what its
  * shape bound, and says so. */
-static const char *const simPartTextureStems[SIM_DRAWN_PART_COUNT] = { "", "amface", "" };
+static const char *const simPartTextureStems[SIM_PART_COUNT_DRAWN] = { "", "amface", "", "",
+                                                                      "" };
 /* The tone the body turned out to wear — "s1" out of "ambodynaked-nude-s1". */
 static char simSkinTone[RESOURCE_NAME_LIMIT];
 /* Set once the parts are joined and drawn, which stops the animation search
@@ -1327,6 +1440,49 @@ static void reportDeformationReach(const GeometryMesh *mesh)
 }
 
 /* Decodes whatever level is in hand and gives it to the part, then moves on. */
+/* Which material a gathered part wears, taken from the shape that named it.
+ *
+ * A material binds to a primitive BY NAME, not by position. Both names have to
+ * be real, too: an unnamed primitive and an unnamed binding compare equal, which
+ * is two blanks agreeing rather than a match. That warning was already written
+ * in discContent.c before any of this existed, and the rule in it got broken
+ * anyway — a Sim's face came out painted with an eyebrow.
+ *
+ * Shared between the parts the assembly hardcodes and the ones the catalogue
+ * chooses, because a garment binds its material exactly the way a base part
+ * does and two copies of this would only differ once. */
+static void bindPartMaterials(Unsigned32 slot, const ShapeDescription *shape)
+{
+    Unsigned32 primitive;
+    Unsigned32 index;
+
+    for (primitive = 0U; primitive < (Unsigned32)RENDER_PART_LIMIT; primitive++)
+    {
+        simPartMaterials[slot][primitive][0] = '\0';
+        simPartMaterialEntries[slot][primitive] = NULL_POINTER;
+    }
+    for (primitive = 0U; primitive < simParts[slot].storedPrimitiveCount &&
+                        primitive < (Unsigned32)RENDER_PART_LIMIT;
+         primitive++)
+    {
+        for (index = 0U; index < shape->storedMaterialCount; index++)
+        {
+            if (simParts[slot].primitives[primitive].name[0] == '\0' ||
+                shape->materials[index].primitiveName[0] == '\0')
+            {
+                continue;
+            }
+            if (stringEqualsIgnoringCase(shape->materials[index].primitiveName,
+                                         simParts[slot].primitives[primitive].name))
+            {
+                stringAppend(simPartMaterials[slot][primitive], RESOURCE_NAME_LIMIT,
+                             shape->materials[index].materialName);
+                break;
+            }
+        }
+    }
+}
+
 static SimAssembly finishThePart(MemorySize marker)
 {
     char message[256];
@@ -1344,11 +1500,17 @@ static SimAssembly finishThePart(MemorySize marker)
                                           simHopTexture.levelWidth, simHopTexture.levelHeight);
     }
     message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine:   part ");
+    stringAppend(message, sizeof(message), "engine:   range ");
     appendCount(message, sizeof(message), simHopPart);
+    stringAppend(message, sizeof(message), " of ");
+    stringAppend(message, sizeof(message), simDrawnPartNames[simRangeOfPart[simHopPart]]);
     stringAppend(message, sizeof(message), " painted with ");
     stringAppend(message, sizeof(message), simHopTextureName);
-    if (simHopOverrode)
+    if (simHopWearsItsOwn)
+    {
+        stringAppend(message, sizeof(message), " (which its catalogue entry named, not its shape)");
+    }
+    else if (simHopOverrode)
     {
         stringAppend(message, sizeof(message), " (overriding what its shape bound)");
     }
@@ -1500,6 +1662,39 @@ static SlotTally catalogueByOutfit;
 #define CATALOGUE_DUMP_LIMIT 4U
 static char catalogueUncategorisedDumps[CATALOGUE_DUMP_LIMIT][512];
 static Unsigned32 catalogueUncategorisedShown = 0U;
+/* And the named ones, which are the garments. Every entry dumped before these
+   was a grouping, so every property list this engine had ever seen in full was
+   a grouping's — and the three properties that say what colour a garment is
+   are exactly the three a grouping does not carry. */
+static char catalogueNamedDumps[CATALOGUE_DUMP_LIMIT][512];
+static Unsigned32 catalogueNamedShown = 0U;
+
+/* What an entry says its mesh should be painted with, subset by subset.
+ *
+ * A shape binds a material, and for a garment that material is one arbitrary
+ * colourway: one mesh serves every colour of a cowboy shirt, and the shape has
+ * to name something. Which colour THIS entry is, is here —
+ *
+ *   numoverrides=1; override0subset=body; override0resourcekeyidx=2
+ *
+ * — an index into the same key list the shape came out of. Taking the shape's
+ * binding instead drew brownstriped as decogold and blueplaidtannavy as
+ * navywhiteblack, and on a pair of shorts that is the difference between legs
+ * and no legs.
+ *
+ * `subset` is a primitive's name, which is how a material has always bound
+ * here. So this is the same rule as the shape's bindings with a better source,
+ * not a second mechanism. */
+static Unsigned32 catalogueOverrideCount = 0U;
+static char catalogueOverrideSubsets[CATALOGUE_OVERRIDE_LIMIT][PROPERTY_NAME_LIMIT];
+static Unsigned32 catalogueOverrideKeyIndex[CATALOGUE_OVERRIDE_LIMIT];
+/* Entries declaring more than there is room for. Counted and reported: a limit
+   that cannot announce itself is a lie told once per run. */
+static Unsigned32 catalogueOverridesBeyondRoom = 0U;
+/* And what became of them: how many resolved to a material on this disc, and
+   how many named a key that was not one. */
+static Unsigned32 catalogueOverridesResolved = 0U;
+static Unsigned32 catalogueOverridesNotAMaterial = 0U;
 /* Where in each tally the entry waiting on its key list sits, so that when the
    list resolves the answer lands against the right row. CATALOGUE_CATEGORY_LIMIT
    means the entry declared no such property. */
@@ -1826,6 +2021,166 @@ static void reportCatalogue(void)
     }
 }
 
+/* What the walk chose to dress this Sim in, and what it turned down.
+ *
+ * The refusals are the half worth printing. A wardrobe that dresses nothing
+ * looks exactly like a disc carrying nothing to wear, and this catalogue has
+ * already been misread twice on precisely that kind of silence — so every entry
+ * offered is accounted for by name of reason, and a part left undressed says so
+ * against the rule that would have dressed it. */
+static void reportWardrobe(void)
+{
+    char message[512];
+    Unsigned32 part;
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: the wardrobe was offered ");
+    appendCount(message, sizeof(message), simWardrobe.offered);
+    stringAppend(message, sizeof(message), " entr(ies) that reach a shape and dresses ");
+    appendCount(message, sizeof(message), wardrobeGetChosenCount(&simWardrobe));
+    stringAppend(message, sizeof(message), " of ");
+    appendCount(message, sizeof(message), (Unsigned32)WARDROBE_PART_COUNT);
+    stringAppend(message, sizeof(message), " part(s)");
+    if (simWardrobe.wanted[0] != '\0')
+    {
+        stringAppend(message, sizeof(message), ", asked for by the name ");
+        stringAppend(message, sizeof(message), simWardrobe.wanted);
+    }
+    if (simWardrobe.tone[0] != '\0')
+    {
+        stringAppend(message, sizeof(message), ", at the tone ");
+        stringAppend(message, sizeof(message), simWardrobe.tone);
+    }
+    platformLogMessage(message);
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   passed over ");
+    appendCount(message, sizeof(message), simWardrobe.refusedUnnamed);
+    stringAppend(message, sizeof(message), " unnamed, ");
+    appendCount(message, sizeof(message), simWardrobe.refusedBySlot);
+    stringAppend(message, sizeof(message), " dressing a part this Sim has not got, ");
+    appendCount(message, sizeof(message), simWardrobe.refusedByMark);
+    stringAppend(message, sizeof(message), " authored for another age or gender, ");
+    appendCount(message, sizeof(message), simWardrobe.refusedAsWorn);
+    stringAppend(message, sizeof(message), " already worn, and ");
+    appendCount(message, sizeof(message), simWardrobe.refusedAsSettled);
+    stringAppend(message, sizeof(message), " no better than what the part had settled on");
+    if (simWardrobe.wanted[0] != '\0')
+    {
+        stringAppend(message, sizeof(message), "; ");
+        appendCount(message, sizeof(message), simWardrobe.matchedWanted);
+        stringAppend(message, sizeof(message), " were named as asked for");
+    }
+    platformLogMessage(message);
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   the entries it took named ");
+    appendCount(message, sizeof(message), catalogueOverridesResolved);
+    stringAppend(message, sizeof(message),
+                 " material(s) of their own for their subsets, which is where a garment's "
+                 "colourway is and what its shape's binding is not; ");
+    appendCount(message, sizeof(message), catalogueOverridesNotAMaterial);
+    stringAppend(message, sizeof(message), " named something that is not a material");
+    if (catalogueOverridesBeyondRoom > 0U)
+    {
+        stringAppend(message, sizeof(message), "; ");
+        appendCount(message, sizeof(message), catalogueOverridesBeyondRoom);
+        stringAppend(message, sizeof(message), " entr(ies) declared more than there is room for");
+    }
+    platformLogMessage(message);
+
+    /* Which of the two ways a Sim can be covered this one ended up in. Named
+       before the parts, because it is what decides whether the whole body or
+       the top and bottom below are the ones that reach the model. */
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   ");
+    switch (wardrobeGetArrangement(&simWardrobe))
+    {
+    case WARDROBE_ARRANGEMENT_PAIR:
+        stringAppend(message, sizeof(message),
+                     "a top and a bottom, which between them replace the whole body — so the "
+                     "body it was assembled with is not drawn");
+        break;
+    case WARDROBE_ARRANGEMENT_WHOLE:
+        stringAppend(message, sizeof(message), "one whole-body garment, because ");
+        /* Which of the two reasons, and not a form of words that covers both.
+           They are different states of the disc and the run said the wrong one
+           of the two out loud before this told them apart. */
+        if (simWardrobe.nameWanted[WARDROBE_PART_BODY])
+        {
+            stringAppend(message, sizeof(message),
+                         "it is the one asked for by name — a top and a bottom were held and "
+                         "passed over");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message),
+                         "a top and a bottom were not both offered, and half a pair is a Sim in "
+                         "a shirt and nothing else");
+        }
+        break;
+    default:
+        stringAppend(message, sizeof(message),
+                     "nothing that covers a body, so it keeps the one it was assembled with");
+        break;
+    }
+    platformLogMessage(message);
+
+    for (part = 0U; part < (Unsigned32)WARDROBE_PART_COUNT; part++)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[part]);
+        stringAppend(message, sizeof(message), " — ");
+        if (wardrobeIsChosen(&simWardrobe, part))
+        {
+            stringAppend(message, sizeof(message),
+                         wardrobeIsWorn(&simWardrobe, part) ? "wearing " : "chosen but not worn: ");
+            stringAppend(message, sizeof(message), wardrobeGetChosenName(&simWardrobe, part));
+            if (!simWardrobe.toneMatched[part])
+            {
+                stringAppend(message, sizeof(message), ", which is not this Sim's tone");
+            }
+        }
+        else
+        {
+            /* Against the rule, so an empty slot can be told from a rule that
+               could never have matched anything. */
+            stringAppend(message, sizeof(message),
+                         "nothing in the sample was named ");
+            stringAppend(message, sizeof(message), wardrobeGetPartMark(part));
+            stringAppend(message, sizeof(message), " in outfit slot ");
+            appendHexadecimal(message, sizeof(message), wardrobeGetPartOutfit(part));
+            if (wardrobeGetPartWorn(part)[0] != '\0')
+            {
+                stringAppend(message, sizeof(message), " and not already ");
+                stringAppend(message, sizeof(message), wardrobeGetPartWorn(part));
+            }
+        }
+        platformLogMessage(message);
+
+        /* What it could have worn instead, by name. The counts on their own say
+           a hundred and fifty others fitted and name none of them, which leaves
+           --wear with nothing to be pointed at — the whole reason that flag
+           exists is to look at one of these. */
+        if (simWardrobe.alternativeCount[part] > 0U)
+        {
+            Unsigned32 which;
+
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:     or any of —");
+            for (which = 0U; which < simWardrobe.alternativeCount[part]; which++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message),
+                             wardrobeGetAlternative(&simWardrobe, part, which));
+                stringAppend(message, sizeof(message), ";");
+            }
+            platformLogMessage(message);
+        }
+    }
+}
+
 /* The sidecar read: an entry's shape index against the key list beside it.
  *
  * A step of its own because it is a second read, and one read per step is the
@@ -1919,6 +2274,111 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     if (catalogueEntryOutfitSlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
                     {
                         catalogueByOutfit.shapes[catalogueEntryOutfitSlot]++;
+                    }
+                    /* Offered to the wardrobe, which is the only place in the
+                       walk where an entry is looked at as something to wear
+                       rather than something to count. Nothing is read here: the
+                       decision is made on the name and the slot, both already
+                       in hand, and the shape is only remembered. */
+                    {
+                        Unsigned32 dresses = wardrobeOffer(&simWardrobe, catalogueEntryName,
+                                                           catalogueEntryOutfit);
+
+                        if (dresses != (Unsigned32)WARDROBE_NOT_WORN)
+                        {
+                            char worn[512];
+                            Unsigned32 each;
+
+                            simWardrobeShapes[dresses] = shape;
+                            worn[0] = '\0';
+                            stringAppend(worn, sizeof(worn), "engine:   the catalogue offers ");
+                            stringAppend(worn, sizeof(worn), catalogueEntryName);
+                            stringAppend(worn, sizeof(worn), " for ");
+                            stringAppend(worn, sizeof(worn), simDrawnPartNames[dresses]);
+                            if (!simWardrobe.toneMatched[dresses])
+                            {
+                                stringAppend(worn, sizeof(worn),
+                                             ", which is not this Sim's tone — held until "
+                                             "something better turns up");
+                            }
+                            platformLogMessage(worn);
+
+                            /* What this entry says to paint it with, resolved
+                               against the list already open. A whole colourway
+                               of a garment lives in these and nowhere else. */
+                            simWardrobeOverrideCount[dresses] = 0U;
+                            worn[0] = '\0';
+                            stringAppend(worn, sizeof(worn), "engine:     painting");
+                            for (each = 0U; each < catalogueOverrideCount; each++)
+                            {
+                                const ResourceKeyEntry *painted =
+                                    resourceKeyListGet(&list, catalogueOverrideKeyIndex[each]);
+                                const ResourceIndexEntry *material = NULL_POINTER;
+
+                                stringAppend(worn, sizeof(worn), " ");
+                                stringAppend(worn, sizeof(worn),
+                                             catalogueOverrideSubsets[each]);
+                                stringAppend(worn, sizeof(worn), " with ");
+                                if (painted == NULL_POINTER)
+                                {
+                                    stringAppend(worn, sizeof(worn), "a key past the end;");
+                                    continue;
+                                }
+                                if (painted->typeIdentifier != (Unsigned32)PACKAGE_TYPE_TXMT)
+                                {
+                                    /* Said, not assumed. A subset painted with
+                                       something that is not a material is a
+                                       different discovery from one that could
+                                       not be found. */
+                                    const char *typeName =
+                                        resourceTypeGetName(painted->typeIdentifier);
+
+                                    catalogueOverridesNotAMaterial++;
+                                    stringAppend(worn, sizeof(worn), "a ");
+                                    stringAppend(worn, sizeof(worn),
+                                                 (typeName != NULL_POINTER) ? typeName
+                                                                            : "resource of another"
+                                                                              " type");
+                                    stringAppend(worn, sizeof(worn), " and not a material;");
+                                    continue;
+                                }
+                                material =
+                                    resourceIndexFind(&simIndex, painted->typeIdentifier,
+                                                      painted->instanceIdentifier,
+                                                      painted->instanceIdentifierHigh);
+                                if (material == NULL_POINTER)
+                                {
+                                    stringAppend(worn, sizeof(worn),
+                                                 "a material the index does not hold;");
+                                    continue;
+                                }
+                                if (simWardrobeOverrideCount[dresses] <
+                                    (Unsigned32)CATALOGUE_OVERRIDE_LIMIT)
+                                {
+                                    Unsigned32 at = simWardrobeOverrideCount[dresses];
+
+                                    simWardrobeOverrideSubsets[dresses][at][0] = '\0';
+                                    stringAppend(simWardrobeOverrideSubsets[dresses][at],
+                                                 PROPERTY_NAME_LIMIT,
+                                                 catalogueOverrideSubsets[each]);
+                                    simWardrobeOverrideMaterials[dresses][at] = material;
+                                    simWardrobeOverrideCount[dresses]++;
+                                }
+                                catalogueOverridesResolved++;
+                                stringAppend(worn, sizeof(worn), "the material at key ");
+                                appendCount(worn, sizeof(worn),
+                                            catalogueOverrideKeyIndex[each]);
+                                stringAppend(worn, sizeof(worn), ";");
+                            }
+                            if (catalogueOverrideCount == 0U)
+                            {
+                                stringAppend(worn, sizeof(worn),
+                                             " nothing of its own — it wears whatever its shape "
+                                             "binds, which for a garment is one arbitrary "
+                                             "colourway");
+                            }
+                            platformLogMessage(worn);
+                        }
                     }
                     /* Only bodies. A hair or a pair of shoes has nothing to say
                        about where a fat morph lives, and eight reads three deep
@@ -2323,6 +2783,62 @@ static SimAssembly stepTheFollow(MemorySize marker)
     return SIM_ASSEMBLY_PENDING;
 }
 
+/* An override's property name: "override", the number, then what is wanted.
+   They are numbered from nought and there is one set per override, so the name
+   has to be built rather than looked up from a list. */
+static void buildOverridePropertyName(char *destination, MemorySize capacity, Unsigned32 which,
+                                      const char *wanted)
+{
+    char digits[16];
+
+    destination[0] = '\0';
+    stringAppend(destination, capacity, "override");
+    stringWriteUnsigned(digits, sizeof(digits), which);
+    stringAppend(destination, capacity, digits);
+    stringAppend(destination, capacity, wanted);
+}
+
+/* What this entry says its subsets should be painted with, before its bytes go
+   back to the arena. Only the indices: what they point at needs the key list,
+   which is a read of its own and so a step of its own. */
+static void rememberOverrides(const PropertySet *set)
+{
+    const Property *declared = propertySetFind(set, "numoverrides");
+    Unsigned32 total = 0U;
+    Unsigned32 which;
+
+    catalogueOverrideCount = 0U;
+    if (declared != NULL_POINTER && declared->kind == PROPERTY_VALUE_INTEGER)
+    {
+        total = declared->integerValue;
+    }
+    for (which = 0U; which < total && catalogueOverrideCount < (Unsigned32)CATALOGUE_OVERRIDE_LIMIT;
+         which++)
+    {
+        char wanted[PROPERTY_NAME_LIMIT];
+        const Property *keyIndex;
+        const char *subset;
+
+        buildOverridePropertyName(wanted, sizeof(wanted), which, "resourcekeyidx");
+        keyIndex = propertySetFind(set, wanted);
+        buildOverridePropertyName(wanted, sizeof(wanted), which, "subset");
+        subset = propertySetGetString(set, wanted, "");
+        if (keyIndex == NULL_POINTER || keyIndex->kind != PROPERTY_VALUE_INTEGER ||
+            subset[0] == '\0')
+        {
+            continue;
+        }
+        catalogueOverrideSubsets[catalogueOverrideCount][0] = '\0';
+        stringAppend(catalogueOverrideSubsets[catalogueOverrideCount], PROPERTY_NAME_LIMIT, subset);
+        catalogueOverrideKeyIndex[catalogueOverrideCount] = keyIndex->integerValue;
+        catalogueOverrideCount++;
+    }
+    if (total > (Unsigned32)CATALOGUE_OVERRIDE_LIMIT)
+    {
+        catalogueOverridesBeyondRoom++;
+    }
+}
+
 static SimAssembly stepTheCatalogue(MemorySize marker)
 {
     const ResourceIndexEntry *entry = NULL_POINTER;
@@ -2386,6 +2902,16 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
     if (catalogueCursor >= simIndex.count || catalogueRead >= CATALOGUE_SAMPLE_LIMIT)
     {
         reportCatalogue();
+        reportWardrobe();
+        if (wardrobeGetChosenCount(&simWardrobe) > 0U)
+        {
+            simWardrobePart = 0U;
+            simWardrobeStage = WARDROBE_STAGE_SHAPE;
+            simWardrobeEntry = NULL_POINTER;
+            simWardrobeDressed = 0U;
+            simHop = SIM_HOP_WARDROBE;
+            return SIM_ASSEMBLY_PENDING;
+        }
         simHop = SIM_HOP_FINISHED;
         return SIM_ASSEMBLY_DONE;
     }
@@ -2499,6 +3025,44 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                     }
                     platformLogMessage(dump);
                 }
+
+                /* A NAMED entry in full — a real garment rather than a grouping.
+                 *
+                 * Every entry dumped so far has been an unnamed one, and those
+                 * are the groupings: eighteen properties, none of them about a
+                 * garment. A Sim wearing amtopcowboyshirt_brownstriped is
+                 * painted amtopcowboyshirt_decogold, so the colourway is named
+                 * somewhere this has never looked, and a garment's own record is
+                 * where to look first. `numoverrides` is the reason to expect
+                 * more properties than the eighteen that keep turning up. */
+                if (entryName[0] != '\0' &&
+                    catalogueNamedShown < (Unsigned32)CATALOGUE_DUMP_LIMIT)
+                {
+                    char *dump = catalogueNamedDumps[catalogueNamedShown];
+                    Unsigned32 which;
+
+                    catalogueNamedShown++;
+                    dump[0] = '\0';
+                    stringAppend(dump, 512UL, "engine:   named entry — ");
+                    appendCount(dump, 512UL, set.propertyCount);
+                    stringAppend(dump, 512UL, " propert(ies):");
+                    for (which = 0U; which < set.storedPropertyCount; which++)
+                    {
+                        stringAppend(dump, 512UL, " ");
+                        stringAppend(dump, 512UL, properties[which].name);
+                        stringAppend(dump, 512UL, "=");
+                        if (properties[which].kind == PROPERTY_VALUE_STRING)
+                        {
+                            stringAppend(dump, 512UL, properties[which].stringValue);
+                        }
+                        else
+                        {
+                            appendHexadecimal(dump, 512UL, properties[which].integerValue);
+                        }
+                        stringAppend(dump, 512UL, ";");
+                    }
+                    platformLogMessage(dump);
+                }
             }
 
             /* Partway as well as at the end. The walk is six hundred entries at
@@ -2526,6 +3090,10 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                     catalogueEntryName[0] = '\0';
                     stringAppend(catalogueEntryName, PROPERTY_NAME_LIMIT,
                                  propertySetGetString(&set, "name", ""));
+                    /* Read here and resolved there, for the same reason as the
+                       shape index: they index the same list, and the list is a
+                       read this step has already spent. */
+                    rememberOverrides(&set);
                     catalogueWantsKeyList = BOOLEAN_TRUE;
                 }
             }
@@ -2539,6 +3107,249 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
     return SIM_ASSEMBLY_PENDING;
 }
 
+/* Putting on what the catalogue chose: shape, geometry node, container, one
+ * read a step and one part at a time.
+ *
+ * The same three hops the assembly walks for a hardcoded part, entered one
+ * further along — a catalogue entry names a shape outright, so there is no
+ * transform tree to be found through. That is the whole reason a garment costs
+ * three reads and the base Sim's parts cost four.
+ *
+ * The container goes into a mesh of its own and is copied over the part only
+ * once it has read cleanly. A garment that will not open then leaves the Sim in
+ * what it was already wearing, rather than halfway out of it — which is a
+ * distinction that matters here, because the mesh being overwritten is on
+ * screen at the time. */
+static SimAssembly stepTheWardrobe(MemorySize marker)
+{
+    Unsigned8 *bytes;
+    MemorySize size;
+    char message[512];
+    Unsigned32 index;
+
+    /* Forward to the next part with something to put on that the arrangement
+       will actually draw. A top chosen with no bottom beside it is a decision
+       that was made and is not worn, and loading it would cost two reads for a
+       mesh nothing joins. */
+    while (simWardrobePart < (Unsigned32)WARDROBE_PART_COUNT &&
+           (!wardrobeIsWorn(&simWardrobe, simWardrobePart) ||
+            simWardrobeShapes[simWardrobePart] == NULL_POINTER))
+    {
+        simWardrobePart++;
+    }
+
+    if (simWardrobePart >= (Unsigned32)WARDROBE_PART_COUNT)
+    {
+        if (simWardrobeDressed == 0U)
+        {
+            platformLogMessage("engine: nothing the catalogue chose would load, so the Sim is left "
+                               "in what it was assembled in");
+            simHop = SIM_HOP_FINISHED;
+            return SIM_ASSEMBLY_DONE;
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: dressed ");
+        appendCount(message, sizeof(message), simWardrobeDressed);
+        stringAppend(message, sizeof(message),
+                     " part(s) out of the catalogue — joining and painting the Sim again, because "
+                     "the model on screen is the one being replaced");
+        platformLogMessage(message);
+        /* Before the merge, not after: the merge is what sends the paint round
+           again, and the paint is what would otherwise walk back into the
+           catalogue and dress the same Sim for ever. */
+        simWardrobeWorn = BOOLEAN_TRUE;
+        simHopPart = 0U;
+        simHop = SIM_HOP_MERGE;
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    if (simWardrobeEntry == NULL_POINTER)
+    {
+        if (simWardrobeStage != WARDROBE_STAGE_SHAPE)
+        {
+            /* The chain broke a hop short of a mesh. Said out loud, because a
+               garment that resolves to nothing looks exactly like one that was
+               never chosen. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   ");
+            stringAppend(message, sizeof(message),
+                         wardrobeGetChosenName(&simWardrobe, simWardrobePart));
+            stringAppend(message, sizeof(message),
+                         " names a shape this disc holds, but the chain from it to a mesh does not "
+                         "close — that part stays as it was");
+            platformLogMessage(message);
+            simWardrobePart++;
+            simWardrobeStage = WARDROBE_STAGE_SHAPE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        simWardrobeEntry = simWardrobeShapes[simWardrobePart];
+    }
+
+    if (!readIndexedResource(simWardrobeEntry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+    simWardrobeEntry = NULL_POINTER;
+    if (bytes == NULL_POINTER)
+    {
+        /* Answered, and empty. This part is given up on rather than asked
+           again: the entry is where it was, so a second read returns the same
+           nothing and the third does too. A hop that retries what the store has
+           already answered does not pend, it spins. */
+        memoryArenaRewindToMarker(globalArena, marker);
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message),
+                     wardrobeGetChosenName(&simWardrobe, simWardrobePart));
+        stringAppend(message, sizeof(message),
+                     " named a resource the disc would not give up, so that part stays as it was");
+        platformLogMessage(message);
+        simWardrobePart++;
+        simWardrobeStage = WARDROBE_STAGE_SHAPE;
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    if (simWardrobeStage == WARDROBE_STAGE_SHAPE)
+    {
+        if (scenegraphReadShape(&simWardrobeShape, bytes, size) == SCENEGRAPH_READ_OK)
+        {
+            /* A shape does not name a container. It names a geometry node, and
+               that node references the container. */
+            for (index = 0U;
+                 index < simWardrobeShape.storedMeshCount && simWardrobeEntry == NULL_POINTER;
+                 index++)
+            {
+                if (simWardrobeShape.meshNames[index][0] == '\0')
+                {
+                    continue;
+                }
+                simWardrobeEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_GMND,
+                                                          simWardrobeShape.meshNames[index]);
+            }
+        }
+        simWardrobeStage = WARDROBE_STAGE_NODE;
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    if (simWardrobeStage == WARDROBE_STAGE_NODE)
+    {
+        GeometryNodeDescription node;
+
+        if (scenegraphReadGeometryNode(&node, bytes, size) == SCENEGRAPH_READ_OK && node.hasGeometry)
+        {
+            simWardrobeEntry = resourceIndexFind(&simIndex, (Unsigned32)PACKAGE_TYPE_GMDC,
+                                                 node.geometryKey.instanceIdentifier,
+                                                 node.geometryKey.instanceIdentifierHigh);
+        }
+        simWardrobeStage = WARDROBE_STAGE_CONTAINER;
+        memoryArenaRewindToMarker(globalArena, marker);
+        return SIM_ASSEMBLY_PENDING;
+    }
+
+    /* WARDROBE_STAGE_CONTAINER */
+    {
+        static GeometryMesh dressed;
+        Unsigned32 slot = simWardrobePart;
+
+        if (geometryReaderOpen(&dressed, bytes, size, globalArena) != GEOMETRY_READ_OK)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   ");
+            stringAppend(message, sizeof(message),
+                         wardrobeGetChosenName(&simWardrobe, simWardrobePart));
+            stringAppend(message, sizeof(message),
+                         " would not read as a mesh, so that part stays as it was");
+            platformLogMessage(message);
+            simWardrobePart++;
+            simWardrobeStage = WARDROBE_STAGE_SHAPE;
+            return SIM_ASSEMBLY_PENDING;
+        }
+        /* Not rewound past here: the mesh lives in the arena above the bytes it
+           was read from, so giving them back would take it too. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        if (simPartLoaded[slot])
+        {
+            /* A part with a base mesh, replaced. Both counts, because "becomes"
+               is the only line that says the swap happened to the model rather
+               than only to the wardrobe's mind. */
+            stringAppend(message, sizeof(message), simDrawnPartNames[simWardrobePart]);
+            stringAppend(message, sizeof(message), " gives way to ");
+            stringAppend(message, sizeof(message),
+                         wardrobeGetChosenName(&simWardrobe, simWardrobePart));
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), simParts[slot].vertexCount);
+            stringAppend(message, sizeof(message), " vertices become ");
+        }
+        else
+        {
+            /* A top and a bottom have no undressed form to give way from: the
+               assembly never had one, and the catalogue is the only thing that
+               can put one there. */
+            stringAppend(message, sizeof(message),
+                         wardrobeGetChosenName(&simWardrobe, simWardrobePart));
+            stringAppend(message, sizeof(message), " gives this Sim ");
+            stringAppend(message, sizeof(message), simDrawnPartNames[simWardrobePart]);
+            stringAppend(message, sizeof(message), " it did not have — ");
+        }
+        appendCount(message, sizeof(message), dressed.vertexCount);
+        stringAppend(message, sizeof(message), " vertices, ");
+        appendCount(message, sizeof(message), dressed.skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of them weighted");
+        platformLogMessage(message);
+
+        simParts[slot] = dressed;
+        simPartLoaded[slot] = BOOLEAN_TRUE;
+        bindPartMaterials(slot, &simWardrobeShape);
+        /* The entry's own materials over the shape's, by the subset each names.
+           A subset is a primitive's name, so this is the same binding rule with
+           a better source — the shape says what the mesh can be painted, the
+           entry says what THIS one is. */
+        for (index = 0U; index < simWardrobeOverrideCount[simWardrobePart]; index++)
+        {
+            Unsigned32 primitive;
+
+            for (primitive = 0U; primitive < dressed.storedPrimitiveCount &&
+                                 primitive < (Unsigned32)RENDER_PART_LIMIT;
+                 primitive++)
+            {
+                if (dressed.primitives[primitive].name[0] == '\0')
+                {
+                    continue;
+                }
+                if (stringEqualsIgnoringCase(simWardrobeOverrideSubsets[simWardrobePart][index],
+                                             dressed.primitives[primitive].name))
+                {
+                    simPartMaterialEntries[slot][primitive] =
+                        simWardrobeOverrideMaterials[simWardrobePart][index];
+                }
+            }
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:     over ");
+        appendCount(message, sizeof(message), dressed.storedPrimitiveCount);
+        stringAppend(message, sizeof(message), " range(s), wearing —");
+        for (index = 0U;
+             index < dressed.storedPrimitiveCount && index < (Unsigned32)RENDER_PART_LIMIT; index++)
+        {
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message), (simPartMaterials[slot][index][0] != '\0')
+                                                       ? simPartMaterials[slot][index]
+                                                       : "(nothing it names)");
+            stringAppend(message, sizeof(message), ";");
+        }
+        platformLogMessage(message);
+        reportMorphTargets(&simParts[slot]);
+        simWardrobeDressed++;
+    }
+    simWardrobePart++;
+    simWardrobeStage = WARDROBE_STAGE_SHAPE;
+    return SIM_ASSEMBLY_PENDING;
+}
+
 /* The painting hops: a material, then its texture, then the top level that
    texture kept somewhere else. One read each, like everything else here. */
 static SimAssembly stepThePaint(MemorySize marker)
@@ -2547,8 +3358,23 @@ static SimAssembly stepThePaint(MemorySize marker)
     Unsigned8 *bytes;
     MemorySize size;
 
-    if (simHopPart >= simGathered)
+    /* simHopPart counts RANGES here, not parts: the assembly reuses it as its
+       cursor and the paint has one step per range of the joined model. */
+    if (simHopPart >= simRangeCount)
     {
+        /* Second time round. The paint is what sends the assembly into the
+           catalogue, and the catalogue is what sends it back here — so without
+           this the Sim would be dressed, painted, and dressed again for as long
+           as the disc stayed open. */
+        if (simWardrobeWorn)
+        {
+            simHop = SIM_HOP_FINISHED;
+            return SIM_ASSEMBLY_DONE;
+        }
+        /* The tone is known now and not before: it is read off the texture the
+           body ended up wearing, so a face cannot be chosen for it until a body
+           has been painted. */
+        wardrobeBegin(&simWardrobe, simWardrobeWanted, simSkinTone);
         simHop = SIM_HOP_CATALOGUE;
         catalogueCursor = 0U;
         catalogueStride = 0U;
@@ -2560,26 +3386,41 @@ static SimAssembly stepThePaint(MemorySize marker)
         catalogueByOutfit.count = 0U;
         catalogueByOutfit.beyondRoom = 0U;
         catalogueUncategorisedShown = 0U;
+        catalogueNamedShown = 0U;
         catalogueFaceShown = 0U;
         return SIM_ASSEMBLY_PENDING;
     }
 
     if (simHop == SIM_HOP_MATERIAL)
     {
-        if (simPartMaterials[simHopPart][0] == '\0')
+        if (simRangeMaterials[simHopPart][0] == '\0' &&
+            simRangeMaterialEntries[simHopPart] == NULL_POINTER)
         {
             simHopPart++;
             return SIM_ASSEMBLY_PENDING;
         }
         if (simHopEntry == NULL_POINTER)
         {
-            materialBuildResourceName(wanted, sizeof(wanted), simPartMaterials[simHopPart],
-                                      "_txmt");
-            simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT, wanted);
-            if (simHopEntry == NULL_POINTER)
+            /* What the catalogue entry named for this subset, where it named
+               one. A shape's binding is one arbitrary colourway of a garment
+               that has dozens; the entry is the one that says which. */
+            simHopWearsItsOwn = BOOLEAN_FALSE;
+            simHopEntry = simRangeMaterialEntries[simHopPart];
+            if (simHopEntry != NULL_POINTER)
             {
+                simHopWearsItsOwn = BOOLEAN_TRUE;
+            }
+            else
+            {
+                materialBuildResourceName(wanted, sizeof(wanted), simRangeMaterials[simHopPart],
+                                          "_txmt");
                 simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT,
-                                                     simPartMaterials[simHopPart]);
+                                                     wanted);
+                if (simHopEntry == NULL_POINTER)
+                {
+                    simHopEntry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_TXMT,
+                                                         simRangeMaterials[simHopPart]);
+                }
             }
             if (simHopEntry == NULL_POINTER)
             {
@@ -2650,13 +3491,18 @@ static SimAssembly stepThePaint(MemorySize marker)
             simHopPart++;
             return SIM_ASSEMBLY_PENDING;
         }
-        /* The override, when this part has one and the disc carries it. */
-        if (simPartTextureStems[simHopPart][0] != '\0' && simSkinTone[0] != '\0')
+        /* The override, when the part this range belongs to has one and the
+           disc carries it. It belongs to a part and not a range — a face is a
+           face however many pieces it is drawn in — so the range has to say
+           which part it came from. */
+        if (!simHopWearsItsOwn && simPartTextureStems[simRangeOfPart[simHopPart]][0] != '\0' &&
+            simSkinTone[0] != '\0')
         {
             char preferred[RESOURCE_NAME_LIMIT];
 
             preferred[0] = '\0';
-            stringAppend(preferred, sizeof(preferred), simPartTextureStems[simHopPart]);
+            stringAppend(preferred, sizeof(preferred),
+                         simPartTextureStems[simRangeOfPart[simHopPart]]);
             stringAppend(preferred, sizeof(preferred), "-");
             stringAppend(preferred, sizeof(preferred), simSkinTone);
             materialBuildResourceName(wanted, sizeof(wanted), preferred, "_txtr");
@@ -2766,7 +3612,7 @@ static SimAssembly stepTheSim(void)
     switch (simHop)
     {
     case SIM_HOP_TREE:
-        if (simHopPart >= SIM_DRAWN_PART_COUNT)
+        if (simHopPart >= SIM_BASE_PART_COUNT)
         {
             simHop = SIM_HOP_MERGE;
             return SIM_ASSEMBLY_PENDING;
@@ -2891,7 +3737,7 @@ static SimAssembly stepTheSim(void)
         /* Not rewound: the mesh this builds lives in the arena above these
            bytes, so giving them back would take it too. */
         if (bytes == NULL_POINTER ||
-            geometryReaderOpen(&simParts[simGathered], bytes, size, globalArena) !=
+            geometryReaderOpen(&simParts[simHopPart], bytes, size, globalArena) !=
                 GEOMETRY_READ_OK)
         {
             reportSimPart(simHopPart, DISC_MODEL_GEOMETRY_UNREADABLE);
@@ -2899,71 +3745,71 @@ static SimAssembly stepTheSim(void)
             simHop = SIM_HOP_TREE;
             return SIM_ASSEMBLY_PENDING;
         }
-        /* Which material this part wears, matched by the primitive's own name.
-           A shape binds by name and lists more materials than the part has
-           parts — a face shape carries the face, the brows, the eyes and the
-           lips — so taking the first painted a Sim's face with an eyebrow. Both
-           names must be real: two blanks compare equal and that is not a
-           match. */
-        simPartMaterials[simGathered][0] = '\0';
-        if (simParts[simGathered].storedPrimitiveCount > 0U)
-        {
-            for (index = 0U; index < simHopShape.storedMaterialCount; index++)
-            {
-                if (simParts[simGathered].primitives[0].name[0] == '\0' ||
-                    simHopShape.materials[index].primitiveName[0] == '\0')
-                {
-                    continue;
-                }
-                if (stringEqualsIgnoringCase(simHopShape.materials[index].primitiveName,
-                                             simParts[simGathered].primitives[0].name))
-                {
-                    stringAppend(simPartMaterials[simGathered], RESOURCE_NAME_LIMIT,
-                                 simHopShape.materials[index].materialName);
-                    break;
-                }
-            }
-        }
+        bindPartMaterials(simHopPart, &simHopShape);
+        simPartLoaded[simHopPart] = BOOLEAN_TRUE;
         message[0] = '\0';
         stringAppend(message, sizeof(message), "engine:   ");
         stringAppend(message, sizeof(message), simDrawnPartNames[simHopPart]);
         stringAppend(message, sizeof(message), " — ");
-        appendCount(message, sizeof(message), simParts[simGathered].vertexCount);
+        appendCount(message, sizeof(message), simParts[simHopPart].vertexCount);
         stringAppend(message, sizeof(message), " vertices, ");
-        appendCount(message, sizeof(message), simParts[simGathered].indexCount / 3U);
+        appendCount(message, sizeof(message), simParts[simHopPart].indexCount / 3U);
         stringAppend(message, sizeof(message), " triangles, ");
-        appendCount(message, sizeof(message), simParts[simGathered].skinnedVertexCount);
-        stringAppend(message, sizeof(message), " of them weighted, wearing ");
-        stringAppend(message, sizeof(message), (simPartMaterials[simGathered][0] != '\0')
-                                                   ? simPartMaterials[simGathered]
+        appendCount(message, sizeof(message), simParts[simHopPart].skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of them weighted across ");
+        appendCount(message, sizeof(message), simParts[simHopPart].storedPrimitiveCount);
+        stringAppend(message, sizeof(message), " range(s), wearing ");
+        stringAppend(message, sizeof(message), (simPartMaterials[simHopPart][0][0] != '\0')
+                                                   ? simPartMaterials[simHopPart][0]
                                                    : "no material it names");
         platformLogMessage(message);
-        reportMorphTargets(&simParts[simGathered]);
-        simGathered++;
+        reportMorphTargets(&simParts[simHopPart]);
         simHopPart++;
         simHop = SIM_HOP_TREE;
         return SIM_ASSEMBLY_PENDING;
 
     case SIM_HOP_MERGE:
     {
-        const GeometryMesh *parts[SIM_DRAWN_PART_COUNT];
+        const GeometryMesh *parts[SIM_PART_COUNT_DRAWN];
 
-        if (simGathered == 0U)
+        /* Which parts this Sim is actually drawn in.
+         *
+         * Not every part that loaded. A Sim wears either a whole body or a top
+         * and a bottom, and the two describe the same volume: joining both puts
+         * a pair of trousers through a pair of legs that are already there, and
+         * what shows through is decided by whichever triangle the rasterizer
+         * reaches last. The wardrobe settles the arrangement; this obeys it. */
+        simJoinCount = 0U;
+        for (index = 0U; index < (Unsigned32)SIM_PART_COUNT_DRAWN; index++)
+        {
+            if (!simPartLoaded[index])
+            {
+                continue;
+            }
+            if (simWardrobeWorn && (index == (Unsigned32)SIM_PART_BODY ||
+                                    index == (Unsigned32)SIM_PART_TOP ||
+                                    index == (Unsigned32)SIM_PART_BOTTOM) &&
+                !wardrobeIsWorn(&simWardrobe, index))
+            {
+                continue;
+            }
+            parts[simJoinCount] = &simParts[index];
+            simJoinParts[simJoinCount] = index;
+            simJoinCount++;
+        }
+        if (simJoinCount == 0U)
         {
             return SIM_ASSEMBLY_FAILED;
         }
-        for (index = 0U; index < simGathered; index++)
-        {
-            parts[index] = &simParts[index];
-        }
-        if (geometryMeshMerge(&whole, parts, simGathered, globalArena) != GEOMETRY_READ_OK)
+        if (geometryMeshMerge(&whole, parts, simJoinCount, globalArena) != GEOMETRY_READ_OK)
         {
             platformLogMessage("engine: a Sim's parts would not join into one model");
             return SIM_ASSEMBLY_FAILED;
         }
         message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: a whole Sim — ");
-        appendCount(message, sizeof(message), simGathered);
+        stringAppend(message, sizeof(message),
+                     simWardrobeWorn ? "engine: a dressed Sim — " : "engine: a whole Sim — ");
+        appendCount(message, sizeof(message), simJoinCount);
         stringAppend(message, sizeof(message), " part(s) joined into ");
         appendCount(message, sizeof(message), whole.vertexCount);
         stringAppend(message, sizeof(message), " vertices and ");
@@ -2987,6 +3833,47 @@ static SimAssembly stepTheSim(void)
                 simMorphWeights[channel] = 0.0f;
             }
             simMorphShowing = 0xFFFFFFFFUL;
+        }
+
+        /* The parts flattened into the ranges the merge made of them, in the
+         * order it concatenated them: every primitive of part nought, then
+         * every primitive of part one.
+         *
+         * This is what the paint walks. It used to walk parts, which was the
+         * same list only while every part had exactly one primitive — true of
+         * the four hardcoded names and false of the first garment put on one. */
+        simRangeCount = 0U;
+        for (index = 0U; index < simJoinCount; index++)
+        {
+            Unsigned32 part = simJoinParts[index];
+            Unsigned32 primitive;
+
+            for (primitive = 0U; primitive < simParts[part].storedPrimitiveCount &&
+                                 primitive < (Unsigned32)RENDER_PART_LIMIT &&
+                                 simRangeCount < (Unsigned32)RENDER_PART_LIMIT;
+                 primitive++)
+            {
+                simRangeMaterials[simRangeCount][0] = '\0';
+                stringAppend(simRangeMaterials[simRangeCount], RESOURCE_NAME_LIMIT,
+                             simPartMaterials[part][primitive]);
+                simRangeMaterialEntries[simRangeCount] = simPartMaterialEntries[part][primitive];
+                simRangeOfPart[simRangeCount] = part;
+                simRangeCount++;
+            }
+        }
+        /* Said out loud, because a range the backend cannot hold a texture for
+           is drawn under whatever the last one set — which reads as a garment
+           bleeding onto a face, not as a limit being reached. */
+        if (whole.storedPrimitiveCount > simRangeCount)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: this Sim has ");
+            appendCount(message, sizeof(message), whole.storedPrimitiveCount);
+            stringAppend(message, sizeof(message), " range(s) and the backend paints ");
+            appendCount(message, sizeof(message), (Unsigned32)RENDER_PART_LIMIT);
+            stringAppend(message, sizeof(message),
+                         " — the rest are drawn under whatever their neighbour wears");
+            platformLogMessage(message);
         }
 
         discSearch.mesh = whole;
@@ -3051,6 +3938,9 @@ static SimAssembly stepTheSim(void)
 
     case SIM_HOP_CATALOGUE:
         return stepTheCatalogue(marker);
+
+    case SIM_HOP_WARDROBE:
+        return stepTheWardrobe(marker);
 
     default:
         break;
@@ -5226,6 +6116,11 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     }
 
     simMorphHeldChannel = configuration->heldMorphChannel;
+    simWardrobeWanted[0] = '\0';
+    if (configuration->wornName != NULL_POINTER)
+    {
+        stringAppend(simWardrobeWanted, sizeof(simWardrobeWanted), configuration->wornName);
+    }
     poseIsHeldStill = configuration->poseIsHeld;
     poseHeldTick = configuration->poseHeldTick;
     if (poseIsHeldStill == BOOLEAN_TRUE)

@@ -39,12 +39,17 @@ void renderUpdateMeshVertices(const GeometryMesh *mesh, MemoryArena *arena);
 
 /* How many of a model's parts a backend will paint separately.
  *
- * A Sim is three; a piece of furniture is a handful. The cap exists because
- * each part costs a texture name held for the life of the mesh, and a model
- * that exceeds it draws its remaining parts with the last texture rather than
- * not at all — a part painted wrongly is visible and diagnosable, a part
- * missing looks like a hole in the model. */
-#define RENDER_PART_LIMIT 8U
+ * The cap exists because each part costs a texture name held for the life of
+ * the mesh, and a model that exceeds it draws its remaining parts with the last
+ * texture rather than not at all — a part painted wrongly is visible and
+ * diagnosable, a part missing looks like a hole in the model.
+ *
+ * Was eight, which was three times what an undressed Sim needed and not quite
+ * enough for a dressed one. A part is a PRIMITIVE and not a body part: a
+ * firefighter's suit is two, a helmet is three, and a Sim wearing a top, a
+ * bottom, a face and a hair reaches eight on the garments alone. Sixteen has
+ * headroom for that and costs four words a slot in each backend. */
+#define RENDER_PART_LIMIT 16U
 
 /* Gives one of the mesh's parts its own texture.
  *
