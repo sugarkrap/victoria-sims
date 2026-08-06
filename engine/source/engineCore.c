@@ -327,6 +327,12 @@ typedef enum DiscPhase
     DISC_PHASE_SEEK_SKIN,
     DISC_PHASE_SEEK_SIM,
     DISC_PHASE_SEEK_ANIMATION,
+    /* Reading every animation on the disc for its name, so the menu has
+       something to offer. Runs after a Sim is drawn and posed, never before:
+       it is eleven thousand reads and none of them changes what is on screen. */
+    DISC_PHASE_LIST_ANIMATIONS,
+    /* Reading the one animation the menu asked for. */
+    DISC_PHASE_PLAY_CHOSEN,
     DISC_PHASE_DONE
 } DiscPhase;
 
@@ -429,6 +435,23 @@ static char menuBodyRows[MENU_BODY_CAPACITY][DEBUG_MENU_NAME_LIMIT];
    row number: the menu holds text and the engine holds meaning. */
 static char menuBodyArchetypes[MENU_BODY_CAPACITY][WARDROBE_ARCHETYPE_LIMIT];
 static char menuText[2048];
+
+/* The animations the menu can offer, and where each one lives.
+ *
+ * An animation's name is inside the resource — the index holds a hashed key and
+ * nothing legible — so listing them means opening all eleven thousand. That is
+ * seconds natively and minutes in a browser, which is why it happens after the
+ * Sim is on screen rather than before: the list fills while there is something
+ * to look at, and the menu shows what is known so far.
+ *
+ * Bounded, and what does not fit is counted rather than dropped in silence. */
+#define MENU_ANIMATION_CAPACITY 512U
+static const ResourceIndexEntry *menuAnimationEntries[MENU_ANIMATION_CAPACITY];
+static Unsigned32 menuAnimationCount = 0U;
+static Unsigned32 menuAnimationCursor = 0U;
+static Unsigned32 menuAnimationOpened = 0U;
+/* The animation the menu asked for, waiting to be read. */
+static const ResourceIndexEntry *simWardrobeAnimationWanted = NULL_POINTER;
 /* The four names, built rather than written down.
  *
  * Case does not matter to any of them: resourceIndexFindNamed hashes a name
@@ -4375,6 +4398,161 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
     return discLoadStatus;
 }
 
+/* Reads the animation the menu asked for and poses by it.
+ *
+ * The animation's own data stays in the arena — the pose reads it every frame —
+ * so choosing repeatedly costs arena each time. That is the honest trade for a
+ * debug menu: the alternative is a second arena to rewind, and a Sim that
+ * cannot be asked a second question is what this whole page exists to fix. */
+static EngineDiscLoadStatus stepTheChosenAnimation(void)
+{
+    Unsigned8 *bytes;
+    MemorySize size;
+    char message[256];
+
+    if (simWardrobeAnimationWanted == NULL_POINTER)
+    {
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
+        return discLoadStatus;
+    }
+    if (!readIndexedResource(simWardrobeAnimationWanted, &bytes, &size))
+    {
+        return ENGINE_DISC_WORKING;
+    }
+    if (bytes != NULL_POINTER &&
+        animationReaderOpen(&posedAnimation, bytes, size, globalArena) == ANIMATION_READ_OK)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: playing ");
+        stringAppend(message, sizeof(message), posedAnimation.resourceName);
+        stringAppend(message, sizeof(message), " — ");
+        appendCount(message, sizeof(message), posedAnimation.durationTicks);
+        stringAppend(message, sizeof(message), " tick(s) long");
+        platformLogMessage(message);
+        animationUsedRestPose = BOOLEAN_FALSE;
+        poseTick = 0.0f;
+        if (discContentPoseFromAnimation(&discSearch, &posedAnimation, ANIMATION_POSE_TICK,
+                                         globalArena))
+        {
+            poseIsAnimated = BOOLEAN_TRUE;
+            renderUpdateMeshVertices(&discSearch.mesh, globalArena);
+        }
+        else
+        {
+            platformLogMessage("engine: that one reached none of this Sim's bones, so the pose "
+                               "is left as it was");
+        }
+    }
+    simWardrobeAnimationWanted = NULL_POINTER;
+    discPhase = DISC_PHASE_DONE;
+    discLoadStatus = ENGINE_DISC_READY;
+    return discLoadStatus;
+}
+
+/* Starts filling the menu's animation page, once there is a Sim to pose.
+ *
+ * After the search and not instead of it: the search stops at the first
+ * animation that works, which is what puts something on screen quickly, and
+ * this then walks the rest for their names. Nothing here changes the pose. */
+static EngineDiscLoadStatus beginTheAnimationList(void)
+{
+    if (animationIndex.count > 0U && menuAnimationCursor == 0U &&
+        debugMenuGetCount(&debugMenu, DEBUG_MENU_PAGE_ANIMATION) == 0U)
+    {
+        char message[256];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: reading ");
+        appendCount(message, sizeof(message), animationIndex.count);
+        stringAppend(message, sizeof(message),
+                     " animation(s) for their names, so the menu has something to offer — an "
+                     "animation's name is inside the resource and the index holds only a hash");
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_LIST_ANIMATIONS;
+        discLoadStatus = ENGINE_DISC_WORKING;
+        return discLoadStatus;
+    }
+    discPhase = DISC_PHASE_DONE;
+    discLoadStatus = ENGINE_DISC_READY;
+    return discLoadStatus;
+}
+
+/* One animation read, named, and offered to the menu if it could pose this Sim.
+ *
+ * The test is the naming convention and the skeleton tag, not a trial pose:
+ * posing to find out would move the model, and a list must not change what it
+ * is a list of. So it is the same two rules the search itself applies — an
+ * animation authored to an object cannot be placed without the object, and one
+ * authored against another skeleton reaches none of these bones. */
+static EngineDiscLoadStatus stepTheAnimationList(void)
+{
+    const ResourceIndexEntry *entry;
+    MemorySize marker;
+    Unsigned8 *bytes;
+    MemorySize size;
+    static Animation listed;
+
+    if (menuAnimationCursor >= animationIndex.count ||
+        menuAnimationCount >= (Unsigned32)MENU_ANIMATION_CAPACITY)
+    {
+        char message[256];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the menu can offer ");
+        appendCount(message, sizeof(message), menuAnimationCount);
+        stringAppend(message, sizeof(message), " animation(s), out of ");
+        appendCount(message, sizeof(message), menuAnimationOpened);
+        stringAppend(message, sizeof(message), " opened and ");
+        appendCount(message, sizeof(message), animationIndex.count);
+        stringAppend(message, sizeof(message), " on this disc");
+        if (menuAnimationCursor < animationIndex.count)
+        {
+            stringAppend(message, sizeof(message),
+                         " — the list filled before the disc ran out, so there are more");
+        }
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
+        return discLoadStatus;
+    }
+
+    entry = &animationIndex.entries[menuAnimationCursor];
+    marker = memoryArenaGetMarker(globalArena);
+    /* One read per step, like everything else that has to survive a store which
+       answers PENDING. */
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
+    }
+    menuAnimationCursor++;
+    menuAnimationOpened++;
+
+    if (bytes != NULL_POINTER &&
+        animationReaderOpen(&listed, bytes, size, globalArena) == ANIMATION_READ_OK &&
+        !stringContainsIgnoringCase(listed.resourceName, "2o-") &&
+        !stringContainsIgnoringCase(listed.resourceName, "2o_") &&
+        listed.skeletonTag[0] != '\0' &&
+        stringStartsWith(simPartNames[0], listed.skeletonTag))
+    {
+        if (debugMenuAddRow(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, listed.resourceName) !=
+            (Unsigned32)DEBUG_MENU_NONE)
+        {
+            menuAnimationEntries[menuAnimationCount] = entry;
+            if (stringEquals(listed.resourceName, posedAnimation.resourceName))
+            {
+                debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, menuAnimationCount);
+            }
+            menuAnimationCount++;
+        }
+    }
+    /* Given straight back: the list keeps a name and a place, not an animation.
+       Holding eleven thousand of them would be the arena and then some. */
+    memoryArenaRewindToMarker(globalArena, marker);
+    return ENGINE_DISC_WORKING;
+}
+
 EngineDiscLoadStatus engineStepDiscLoad(void)
 {
     /* Wide enough for every refusal reason at once. A truncated diagnostic is
@@ -4384,6 +4562,16 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
         return discLoadStatus;
+    }
+
+    if (discPhase == DISC_PHASE_LIST_ANIMATIONS)
+    {
+        return stepTheAnimationList();
+    }
+
+    if (discPhase == DISC_PHASE_PLAY_CHOSEN)
+    {
+        return stepTheChosenAnimation();
     }
 
     if (discPhase == DISC_PHASE_SEEK_SIM)
@@ -4602,9 +4790,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 stringAppend(message, sizeof(message),
                              " animation(s) and none would pose this mesh");
                 platformLogMessage(message);
-                discPhase = DISC_PHASE_DONE;
-                discLoadStatus = ENGINE_DISC_READY;
-                return discLoadStatus;
+                return beginTheAnimationList();
             }
 
             entry = &animationIndex.entries[animationCursor];
@@ -4850,9 +5036,7 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             return ENGINE_DISC_WORKING;
         }
 
-        discPhase = DISC_PHASE_DONE;
-        discLoadStatus = ENGINE_DISC_READY;
-        return discLoadStatus;
+        return beginTheAnimationList();
     }
 
     if (discPhase == DISC_PHASE_SEEK_SKIN)
@@ -6378,7 +6562,15 @@ static void loadDiscContent(VirtualFileSystem *fileSystem)
         return;
     }
     engineBeginDiscLoad(fileSystem);
-    while (engineStepDiscLoad() == ENGINE_DISC_WORKING && remaining > 0U)
+    /* Stops at the animation listing rather than running through it.
+     *
+     * That phase is thousands of reads and none of them changes what is on
+     * screen — it is names for a menu. Spinning through it here would hold the
+     * window shut while a Sim that is already assembled and posed waits behind
+     * it. The platform goes on stepping the load every frame, so the list fills
+     * with something to look at. */
+    while (engineStepDiscLoad() == ENGINE_DISC_WORKING && remaining > 0U &&
+           discPhase != DISC_PHASE_LIST_ANIMATIONS)
     {
         remaining--;
     }
@@ -6434,6 +6626,20 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     }
     debugMenuInitialize(&debugMenu);
     debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_BODY, menuBodyRows, MENU_BODY_CAPACITY);
+    /* From the arena rather than a static: five hundred names is thirty
+       kilobytes, and this engine counts them. */
+    {
+        char (*rows)[DEBUG_MENU_NAME_LIMIT] = (char (*)[DEBUG_MENU_NAME_LIMIT])
+            memoryArenaAllocate(globalArena,
+                                (MemorySize)MENU_ANIMATION_CAPACITY *
+                                    (MemorySize)DEBUG_MENU_NAME_LIMIT, 1UL);
+
+        if (rows != NULL_POINTER)
+        {
+            debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, rows,
+                              MENU_ANIMATION_CAPACITY);
+        }
+    }
     composeTheArchetype();
     {
         char message[256];
@@ -6707,8 +6913,23 @@ Boolean engineHandleMenuKey(char key)
             }
             break;
 
+        case DEBUG_MENU_PAGE_ANIMATION:
+            if (row < menuAnimationCount && menuAnimationEntries[row] != NULL_POINTER)
+            {
+                simWardrobeAnimationWanted = menuAnimationEntries[row];
+                debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, row);
+                /* Applied by the step machine rather than here: reading it is a
+                   read, and a read is something a browser answers later. */
+                if (discLoadStatus != ENGINE_DISC_WORKING)
+                {
+                    discPhase = DISC_PHASE_PLAY_CHOSEN;
+                    discLoadStatus = ENGINE_DISC_WORKING;
+                }
+            }
+            break;
+
         default:
-            /* Clothing and animations are lists the load has not built yet. */
+            /* Clothing is a list the load does not build yet. */
             break;
         }
     }

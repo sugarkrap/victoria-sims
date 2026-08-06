@@ -507,13 +507,21 @@ int main(int argumentCount, char **argumentValues)
         VICTORIA_PROFILE_ZONE_END();
 
         /* Kept stepping after the load has finished, because the menu can ask
-           it a second question — a different Sim restarts the assembly, and
-           this is what drives it. Once there is nothing to do this returns
-           immediately, so an idle frame pays a comparison. */
-        if (engineStepDiscLoad() == ENGINE_DISC_WORKING)
+           it a second question — a different Sim restarts the assembly, and the
+           animation names are read after the Sim is on screen. Once there is
+           nothing to do the first call returns immediately.
+         *
+           A batch and not one, because a native read never pends: one step a
+           frame would spend five thousand frames on a list that takes a moment,
+           and the whole point of doing it out here is that the window stays
+           alive while it happens. */
         {
-            /* Native reads never pend, so a step always does real work and a
-               rebuild is a handful of frames rather than a stall. */
+            Unsigned32 steps = 0U;
+
+            while (steps < 256U && engineStepDiscLoad() == ENGINE_DISC_WORKING)
+            {
+                steps++;
+            }
         }
 
         engineRenderFrame(readMonotonicSeconds());
