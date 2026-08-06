@@ -1412,6 +1412,19 @@ static SimAssembly finishThePart(MemorySize marker)
 #define CATALOGUE_SAMPLE_LIMIT 2000U
 #define CATALOGUE_KIND_LIMIT 16U
 static Unsigned32 catalogueCursor = 0U;
+/* The catalogue is walked with a stride rather than end to end.
+ *
+ * It is not sorted by what an entry is, but it is heavily clustered: the first
+ * hundred and fifty entries came back identical — unnamed, uncategorised, one
+ * outfit value between them — and that sample was read as evidence about the
+ * disc twice, wrongly, before a wider one contradicted it. Marching from the
+ * front of a clustered list samples the front of the list.
+ *
+ * Striding costs exactly the same number of reads and covers the whole of it.
+ * Zero means the stride has not been worked out yet. */
+static Unsigned32 catalogueStride = 0U;
+static Unsigned32 catalogueSeen = 0U;
+static Unsigned32 catalogueTotalEntries = 0U;
 static Unsigned32 catalogueRead = 0U;
 static Unsigned32 catalogueKindCount = 0U;
 static char catalogueKinds[CATALOGUE_KIND_LIMIT][PROPERTY_NAME_LIMIT];
@@ -2305,10 +2318,49 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
         return stepTheSidecar(marker);
     }
 
-    while (catalogueCursor < simIndex.count &&
-           simIndex.entries[catalogueCursor].typeIdentifier !=
-               (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY)
+    /* How far apart to take them, worked out once. Counting costs no reads —
+       the index is already in memory — and it is the difference between a
+       sample of the disc and a sample of wherever the index happens to start. */
+    if (catalogueStride == 0U)
     {
+        char message[256];
+        Unsigned32 which;
+
+        catalogueTotalEntries = 0U;
+        for (which = 0U; which < simIndex.count; which++)
+        {
+            if (simIndex.entries[which].typeIdentifier == (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY)
+            {
+                catalogueTotalEntries++;
+            }
+        }
+        catalogueStride = (catalogueTotalEntries > (Unsigned32)CATALOGUE_SAMPLE_LIMIT)
+                              ? (catalogueTotalEntries / (Unsigned32)CATALOGUE_SAMPLE_LIMIT)
+                              : 1U;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), catalogueTotalEntries);
+        stringAppend(message, sizeof(message), " catalogue entr(ies) on this disc, taking every ");
+        appendCount(message, sizeof(message), catalogueStride);
+        stringAppend(message, sizeof(message), " of them so the sample spans the lot");
+        platformLogMessage(message);
+    }
+
+    /* Forward to the next one the stride wants. */
+    while (catalogueCursor < simIndex.count)
+    {
+        if (simIndex.entries[catalogueCursor].typeIdentifier !=
+            (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY)
+        {
+            catalogueCursor++;
+            continue;
+        }
+        if ((catalogueSeen % catalogueStride) == 0U)
+        {
+            break;
+        }
+        catalogueSeen++;
         catalogueCursor++;
     }
     if (catalogueCursor >= simIndex.count || catalogueRead >= CATALOGUE_SAMPLE_LIMIT)
@@ -2325,6 +2377,7 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
         return SIM_ASSEMBLY_PENDING;
     }
     catalogueCursor++;
+    catalogueSeen++;
     if (bytes != NULL_POINTER)
     {
         static Property properties[48];
@@ -2478,6 +2531,8 @@ static SimAssembly stepThePaint(MemorySize marker)
     {
         simHop = SIM_HOP_CATALOGUE;
         catalogueCursor = 0U;
+        catalogueStride = 0U;
+        catalogueSeen = 0U;
         catalogueRead = 0U;
         catalogueKindCount = 0U;
         catalogueByCategory.count = 0U;
