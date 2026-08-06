@@ -24,8 +24,18 @@ static const char *const pageNames[DEBUG_MENU_PAGE_COUNT] = { "body", "clothing"
 
 #define MENU_MARGIN 8U
 #define TILE_GAP 8U
-#define LABEL_HEIGHT 18U
+/* Two lines of label under each thumbnail, and a tile wider than the picture
+ * it holds.
+ *
+ * Both are about the names. A catalogue name is thirty characters —
+ * ambodyhoodedsweatshirtpants_green — and a tile sized to its thumbnail fits
+ * nine of them, which turns a page of twenty-four garments into a page of
+ * twenty-four tiles reading "amb..een". The engine strips the part of the name
+ * every tile on the page shares before it gets here; these two make room for
+ * what is left. */
+#define LABEL_HEIGHT 30U
 #define THUMBNAIL_WANTED 56U
+#define TILE_EXTRA_WIDTH 32U
 #define SIDEBAR_WIDTH 104U
 #define HEADER_HEIGHT 26U
 #define PAGER_HEIGHT 26U
@@ -41,7 +51,7 @@ void interfaceMenuLayout(InterfaceMenuLayout *layout, Unsigned32 availableWidth,
     layout->headerHeight = HEADER_HEIGHT;
     layout->pageButtonHeight = 26U;
     layout->thumbnailSize = THUMBNAIL_WANTED;
-    layout->tileWidth = THUMBNAIL_WANTED + (2U * TILE_GAP);
+    layout->tileWidth = THUMBNAIL_WANTED + (2U * TILE_GAP) + TILE_EXTRA_WIDTH;
     layout->tileHeight = THUMBNAIL_WANTED + LABEL_HEIGHT + TILE_GAP;
     layout->pagerHeight = PAGER_HEIGHT;
     layout->columns = 0U;
@@ -51,10 +61,10 @@ void interfaceMenuLayout(InterfaceMenuLayout *layout, Unsigned32 availableWidth,
     /* Two thirds of the window at most, and never more than a comfortable
        reading width. A debug menu that fills the screen is a screen with no
        Sim on it, which is the thing being debugged. */
-    layout->width = (availableWidth * 2U) / 3U;
-    if (layout->width > 620U)
+    layout->width = (availableWidth * 3U) / 4U;
+    if (layout->width > 740U)
     {
-        layout->width = 620U;
+        layout->width = 740U;
     }
     layout->height = (availableHeight * 3U) / 4U;
     if (layout->height > 460U)
@@ -274,60 +284,96 @@ static void drawStandIn(InterfaceSurface *surface, Integer32 left, Integer32 top
     }
 }
 
-/* As much of a name as fits, with the middle taken out rather than the end.
+/* How many characters of a name fit in the room given.
  *
- * A catalogue name is prefix, garment, colourway — amtopcowboyshirt_brownstriped
- * — and the two ends are what tell one from another. Cutting the tail off leaves
- * twenty tiles all reading "amtopcowboysh", which is a grid of identical
- * labels. */
-static void fitLabel(const FontAtlas *atlas, const char *name, Unsigned32 room, char *destination,
-                     MemorySize capacity)
+ * Counted one at a time rather than measured once and divided, because a
+ * proportional font has no single character width to divide by — an 'i' and a
+ * 'W' differ by a factor of four in the face this game ships. */
+static MemorySize charactersThatFit(const FontAtlas *atlas, const char *name, MemorySize from,
+                                    Unsigned32 room)
+{
+    char attempt[DEBUG_MENU_NAME_LIMIT + 4U];
+    MemorySize taken = 0UL;
+
+    attempt[0] = '\0';
+    while (name[from + taken] != '\0' && taken + 1UL < sizeof(attempt))
+    {
+        char one[2];
+
+        one[0] = name[from + taken];
+        one[1] = '\0';
+        (void)stringAppend(attempt, sizeof(attempt), one);
+        if (fontAtlasMeasureLine(atlas, attempt) > room)
+        {
+            return taken;
+        }
+        taken++;
+    }
+    return taken;
+}
+
+/* A name over two lines, with the end kept rather than the middle.
+ *
+ * A catalogue name is garment then colourway — cowboyshirt_brownstriped — and
+ * the colourway is what tells one tile from the six beside it holding the same
+ * garment in another colour. So when even two lines will not hold it, what goes
+ * is the middle: the head says which garment and the tail says which of them. */
+static void fitLabel(const FontAtlas *atlas, const char *name, Unsigned32 room, char *first,
+                     char *second, MemorySize capacity)
 {
     MemorySize length = stringLength(name);
-    MemorySize keepFront;
-    MemorySize keepBack;
+    MemorySize onFirst;
     MemorySize index;
 
-    destination[0] = '\0';
-    if (fontAtlasMeasureLine(atlas, name) <= room || length < 6UL)
+    first[0] = '\0';
+    second[0] = '\0';
+    onFirst = charactersThatFit(atlas, name, 0UL, room);
+    for (index = 0UL; index < onFirst; index++)
     {
-        (void)stringAppend(destination, capacity, name);
+        char one[2];
+
+        one[0] = name[index];
+        one[1] = '\0';
+        (void)stringAppend(first, capacity, one);
+    }
+    if (onFirst >= length)
+    {
         return;
     }
-    /* Trimmed a character at a time rather than measured once and divided: a
-       proportional font has no single character width to divide by. */
-    keepFront = length;
-    while (keepFront > 3UL)
+
     {
-        char attempt[DEBUG_MENU_NAME_LIMIT + 4U];
+        MemorySize remaining = length - onFirst;
+        MemorySize onSecond = charactersThatFit(atlas, name, onFirst, room);
 
-        keepFront--;
-        keepBack = keepFront / 2UL;
-        attempt[0] = '\0';
-        for (index = 0UL; index < keepFront - keepBack && index < sizeof(attempt) - 1UL; index++)
+        if (onSecond >= remaining)
         {
-            attempt[index] = name[index];
-            attempt[index + 1UL] = '\0';
-        }
-        /* Two full stops rather than the one ellipsis character: the atlas
-           carries printable ASCII and nothing else, so a real ellipsis would
-           come out as three missing glyphs. */
-        (void)stringAppend(attempt, sizeof(attempt), "..");
-        for (index = 0UL; index < keepBack; index++)
-        {
-            char one[2];
+            for (index = 0UL; index < remaining; index++)
+            {
+                char one[2];
 
-            one[0] = name[length - keepBack + index];
-            one[1] = '\0';
-            (void)stringAppend(attempt, sizeof(attempt), one);
-        }
-        if (fontAtlasMeasureLine(atlas, attempt) <= room)
-        {
-            (void)stringAppend(destination, capacity, attempt);
+                one[0] = name[onFirst + index];
+                one[1] = '\0';
+                (void)stringAppend(second, capacity, one);
+            }
             return;
         }
+        /* Too long for both lines. Two full stops and then the tail — not one
+           ellipsis character, because the atlas carries printable ASCII and
+           nothing else, so a real one would draw as three missing glyphs. */
+        (void)stringAppend(second, capacity, "..");
+        {
+            MemorySize keep = (onSecond > 2UL) ? (onSecond - 2UL) : 0UL;
+
+            for (index = 0UL; index < keep; index++)
+            {
+                char one[2];
+
+                one[0] = name[length - keep + index];
+                one[1] = '\0';
+                (void)stringAppend(second, capacity, one);
+            }
+        }
     }
-    (void)stringAppend(destination, capacity, name);
 }
 
 static void drawButton(InterfaceSurface *surface, const FontAtlas *atlas, Integer32 left,
@@ -363,6 +409,7 @@ void interfaceMenuDraw(InterfaceSurface *surface, const InterfaceMenuLayout *lay
     Unsigned32 index;
     char number[24];
     char line[DEBUG_MENU_NAME_LIMIT + 8U];
+    char secondLine[DEBUG_MENU_NAME_LIMIT + 8U];
 
     interfaceSurfaceFill(surface, 0, 0, layout->width, layout->height, colorPanel);
     interfaceSurfaceFill(surface, 0, 0, layout->sidebarWidth, layout->height, colorSidebar);
@@ -417,6 +464,7 @@ void interfaceMenuDraw(InterfaceSurface *surface, const InterfaceMenuLayout *lay
         Unsigned32 pictureHeight = 0U;
         Boolean isCursor;
         Unsigned32 textWidth;
+        Integer32 thumbnailLeft;
 
         if (row >= count)
         {
@@ -424,6 +472,12 @@ void interfaceMenuDraw(InterfaceSurface *surface, const InterfaceMenuLayout *lay
         }
         tileBox(layout, index, &left, &top);
         isCursor = (Boolean)(row == cursor);
+        /* The picture is narrower than the tile, because the tile is sized for
+           the name under it. Centred, or every thumbnail sits against its left
+           edge with the label centred under it and the whole grid looks
+           misaligned. */
+        thumbnailLeft = left + (Integer32)(((layout->tileWidth - TILE_GAP) -
+                                            layout->thumbnailSize) / 2U);
 
         interfaceSurfaceFill(surface, left, top, layout->tileWidth - TILE_GAP,
                              layout->tileHeight - TILE_GAP,
@@ -435,13 +489,12 @@ void interfaceMenuDraw(InterfaceSurface *surface, const InterfaceMenuLayout *lay
             thumbnail(thumbnailContext, page, row, &picture, &pictureWidth, &pictureHeight) &&
             picture != NULL_POINTER)
         {
-            interfaceSurfaceImage(surface, left + (Integer32)TILE_GAP / 2, top + 2,
-                                  layout->thumbnailSize, layout->thumbnailSize, picture,
-                                  pictureWidth, pictureHeight);
+            interfaceSurfaceImage(surface, thumbnailLeft, top + 2, layout->thumbnailSize,
+                                  layout->thumbnailSize, picture, pictureWidth, pictureHeight);
         }
         else
         {
-            drawStandIn(surface, left + (Integer32)TILE_GAP / 2, top + 2, layout->thumbnailSize,
+            drawStandIn(surface, thumbnailLeft, top + 2, layout->thumbnailSize,
                         debugMenuGetRow(menu, page, row));
         }
 
@@ -452,24 +505,34 @@ void interfaceMenuDraw(InterfaceSurface *surface, const InterfaceMenuLayout *lay
            exists to prevent. */
         if (menu->lists[page].inEffect == row)
         {
-            interfaceSurfaceBorder(surface, left + (Integer32)TILE_GAP / 2, top + 2,
-                                   layout->thumbnailSize, layout->thumbnailSize, 2U,
-                                   colorInEffect);
+            interfaceSurfaceBorder(surface, thumbnailLeft, top + 2, layout->thumbnailSize,
+                                   layout->thumbnailSize, 2U, colorInEffect);
         }
         interfaceSurfaceBorder(surface, left, top, layout->tileWidth - TILE_GAP,
                                layout->tileHeight - TILE_GAP, isCursor ? 2U : 1U,
                                isCursor ? colorCursor : colorEdge);
 
         fitLabel(atlas, debugMenuGetRow(menu, page, row), layout->tileWidth - TILE_GAP - 4U, line,
-                 sizeof(line));
+                 secondLine, sizeof(line));
         textWidth = fontAtlasMeasureLine(atlas, line);
         (void)interfaceSurfaceText(
             surface, atlas,
             left + (Integer32)(((layout->tileWidth - TILE_GAP) > textWidth)
                                    ? (((layout->tileWidth - TILE_GAP) - textWidth) / 2U)
                                    : 2U),
-            top + (Integer32)(layout->thumbnailSize + LABEL_HEIGHT - 4U), line,
+            top + (Integer32)(layout->thumbnailSize + 14U), line,
             isCursor ? colorLabel : colorLabelDim);
+        if (secondLine[0] != '\0')
+        {
+            textWidth = fontAtlasMeasureLine(atlas, secondLine);
+            (void)interfaceSurfaceText(
+                surface, atlas,
+                left + (Integer32)(((layout->tileWidth - TILE_GAP) > textWidth)
+                                       ? (((layout->tileWidth - TILE_GAP) - textWidth) / 2U)
+                                       : 2U),
+                top + (Integer32)(layout->thumbnailSize + 26U), secondLine,
+                isCursor ? colorLabel : colorLabelDim);
+        }
     }
 
     /* The pager. Both buttons are always drawn, and both are drawn dim when

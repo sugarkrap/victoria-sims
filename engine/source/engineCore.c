@@ -452,6 +452,10 @@ static char menuText[2048];
  * and gender is offered an entirely different wardrobe. */
 #define MENU_CLOTHING_CAPACITY (WARDROBE_PART_COUNT * WARDROBE_ALTERNATIVE_LIMIT)
 static Unsigned8 menuClothingParts[MENU_CLOTHING_CAPACITY];
+/* The name as the catalogue writes it, kept beside the shortened one the tile
+   shows. A row has to be readable and it has to be askable-for, and after the
+   shared prefix comes off it can no longer be both. */
+static char menuClothingNames[MENU_CLOTHING_CAPACITY][WARDROBE_NAME_LIMIT];
 static Unsigned32 menuClothingCount = 0U;
 
 /* The animations the menu can offer, and where each one lives.
@@ -2566,6 +2570,45 @@ static void reportWardrobe(void)
     }
 }
 
+/* A garment's name without the part every tile on the page already says.
+ *
+ * Every entry for a slot begins with the same thing — ambody, amtop, ambottom —
+ * because that is how the catalogue says which Sim and which slot it is for.
+ * On a page where all of that is already known it is eight characters of a
+ * thirty-character name spent saying nothing, and a tile fits about fifteen.
+ * Cutting it is the difference between twenty-four tiles reading
+ * "hoodedsweatshirtpants_green" and twenty-four reading "amb..een".
+ *
+ * Found rather than assumed to be at the front: a good few entries are prefixed
+ * CASIE_ by whoever authored them, and the part is in the middle of those. */
+static const char *shortenGarment(const char *name, const char *mark)
+{
+    MemorySize markLength = stringLength(mark);
+    MemorySize index;
+
+    if (markLength == 0UL)
+    {
+        return name;
+    }
+    for (index = 0UL; name[index] != '\0'; index++)
+    {
+        MemorySize step;
+
+        for (step = 0UL; step < markLength; step++)
+        {
+            if (characterToLowerCase(name[index + step]) != characterToLowerCase(mark[step]))
+            {
+                break;
+            }
+        }
+        if (step == markLength && name[index + markLength] != '\0')
+        {
+            return &name[index + markLength];
+        }
+    }
+    return name;
+}
+
 /* Everything this Sim could wear, as a page.
  *
  * Built from what the wardrobe passed over rather than from a second walk of
@@ -2594,6 +2637,8 @@ static void fillTheClothingPage(void)
         Unsigned32 which;
         Unsigned32 held = wardrobeGetAlternativeCount(&simWardrobe, part);
 
+        const char *mark = wardrobeGetPartMark(&simWardrobe, part);
+
         for (which = 0U; which < held; which++)
         {
             const char *name = wardrobeGetAlternative(&simWardrobe, part, which);
@@ -2603,12 +2648,14 @@ static void fillTheClothingPage(void)
             {
                 continue;
             }
-            row = debugMenuAddRow(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, name);
+            row = debugMenuAddRow(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, shortenGarment(name, mark));
             if (row == (Unsigned32)DEBUG_MENU_NONE)
             {
                 continue;
             }
             menuClothingParts[row] = (Unsigned8)part;
+            menuClothingNames[row][0] = '\0';
+            stringAppend(menuClothingNames[row], (MemorySize)WARDROBE_NAME_LIMIT, name);
             menuClothingCount = row + 1U;
             /* What the part is actually wearing, so the page opens showing the
                Sim on screen rather than showing a list with nothing marked. */
@@ -7312,7 +7359,7 @@ static void applyTheChoice(void)
         case DEBUG_MENU_PAGE_CLOTHING:
             if (row < menuClothingCount)
             {
-                const char *name = debugMenuGetRow(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, row);
+                const char *name = menuClothingNames[row];
                 Unsigned32 part = menuClothingParts[row];
                 char message[256];
 

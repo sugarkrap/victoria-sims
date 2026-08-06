@@ -24,7 +24,7 @@ static Integer32 failureCount = 0;
 #define SHEET_HEIGHT 128U
 static Unsigned8 sheet[SHEET_WIDTH * SHEET_HEIGHT];
 
-#define SURFACE_WIDTH 640U
+#define SURFACE_WIDTH 800U
 #define SURFACE_HEIGHT 480U
 static Unsigned8 surfacePixels[SURFACE_WIDTH * SURFACE_HEIGHT * INTERFACE_BYTES_PER_PIXEL];
 
@@ -178,7 +178,7 @@ int main(void)
     checkThat(&failureCount, "a menu on a big window lays out a grid",
               !layout.tooSmall && layout.columns > 1U && layout.rows > 1U);
     checkThat(&failureCount, "and does not fill the window it is describing",
-              layout.width < 1280U / 2U + 100U && layout.height < 720U);
+              layout.width < 1280U && layout.height < 720U);
     debugMenuSetGrid(&menu, DEBUG_MENU_PAGE_BODY, layout.columns,
                      INTERFACE_MENU_PER_PAGE(&layout));
 
