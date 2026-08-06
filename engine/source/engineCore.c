@@ -1496,6 +1496,14 @@ static Unsigned32 catalogueEntryOutfitSlot = CATALOGUE_CATEGORY_LIMIT;
    slot is the question this was all built to answer. */
 static Unsigned32 catalogueEntryOutfit = 0U;
 #define CATALOGUE_OUTFIT_FACE 0x02U
+/* Kept as well as printed, like the uncategorised dumps beside them. These are
+   written during the catalogue walk, and the animation search that follows
+   prints a line per candidate out of eleven thousand — so anything not repeated
+   at the end has scrolled out of a console long before the run finishes. That
+   was fixed once for the uncategorised entries and not for these, which is why
+   two runs came back without them. */
+#define CATALOGUE_FACE_LIMIT 16U
+static char catalogueFaceDumps[CATALOGUE_FACE_LIMIT][384];
 static Unsigned32 catalogueFaceShown = 0U;
 
 /* Records one entry against a value, and answers which row that was. */
@@ -1700,6 +1708,10 @@ static void reportCatalogueSlots(void)
     for (which = 0U; which < catalogueUncategorisedShown; which++)
     {
         platformLogMessage(catalogueUncategorisedDumps[which]);
+    }
+    for (which = 0U; which < catalogueFaceShown; which++)
+    {
+        platformLogMessage(catalogueFaceDumps[which]);
     }
     reportOneTally(&catalogueByCategory, "category",
                    "which outfit categories a thing belongs to, not which part it dresses");
@@ -1959,31 +1971,31 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                    own, and the two want completely different work. The counts
                    say the split exists; only the names say where it falls. */
                 if (catalogueEntryOutfit == (Unsigned32)CATALOGUE_OUTFIT_FACE &&
-                    catalogueFaceShown < 16U)
+                    catalogueFaceShown < (Unsigned32)CATALOGUE_FACE_LIMIT)
                 {
-                    char face[384];
+                    char *face = catalogueFaceDumps[catalogueFaceShown];
                     const char *keyTypeName = resourceTypeGetName(key->typeIdentifier);
 
                     catalogueFaceShown++;
                     face[0] = '\0';
-                    stringAppend(face, sizeof(face), "engine:   face slot — ");
-                    stringAppend(face, sizeof(face), (catalogueEntryName[0] != '\0')
+                    stringAppend(face, 384UL, "engine:   face slot — ");
+                    stringAppend(face, 384UL, (catalogueEntryName[0] != '\0')
                                                          ? catalogueEntryName
                                                          : "(unnamed)");
-                    stringAppend(face, sizeof(face), ", key ");
-                    appendCount(face, sizeof(face), catalogueShapeIndex);
-                    stringAppend(face, sizeof(face), " of ");
-                    appendCount(face, sizeof(face), list.storedKeyCount);
-                    stringAppend(face, sizeof(face), " is a ");
+                    stringAppend(face, 384UL, ", key ");
+                    appendCount(face, 384UL, catalogueShapeIndex);
+                    stringAppend(face, 384UL, " of ");
+                    appendCount(face, 384UL, list.storedKeyCount);
+                    stringAppend(face, 384UL, " is a ");
                     if (keyTypeName != NULL_POINTER)
                     {
-                        stringAppend(face, sizeof(face), keyTypeName);
+                        stringAppend(face, 384UL, keyTypeName);
                     }
                     else
                     {
-                        appendHexadecimal(face, sizeof(face), key->typeIdentifier);
+                        appendHexadecimal(face, 384UL, key->typeIdentifier);
                     }
-                    stringAppend(face, sizeof(face),
+                    stringAppend(face, 384UL,
                                  (shape != NULL_POINTER) ? ", found on this disc"
                                                          : ", which the index does not hold");
                     platformLogMessage(face);
@@ -2473,6 +2485,7 @@ static SimAssembly stepThePaint(MemorySize marker)
         catalogueByOutfit.count = 0U;
         catalogueByOutfit.beyondRoom = 0U;
         catalogueUncategorisedShown = 0U;
+        catalogueFaceShown = 0U;
         return SIM_ASSEMBLY_PENDING;
     }
 
