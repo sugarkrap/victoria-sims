@@ -1551,6 +1551,65 @@ static void rememberCatalogueKind(const char *kind, const char *name)
     catalogueKindCount++;
 }
 
+/* The slots met so far, with what their entries reach.
+ *
+ * Called both partway through the walk and at the end of it. Partway matters:
+ * the walk is six hundred entries at two reads apiece, and a browser console
+ * that fills up, or a page closed early, otherwise leaves nothing at all — the
+ * first run of this reported the slots only on completion and the log arrived
+ * cut off before them. */
+static void reportCatalogueSlots(void)
+{
+    char message[512];
+    Unsigned32 index;
+
+    /* Every slot the disc actually declares, with what its entries reach.
+     *
+     * This is the list of what can go on a Sim, taken from the disc rather than
+     * from a reference — the base game, an expansion and a stuff pack do not
+     * agree about what a Sim has, and only one of them is in the drive. The two
+     * counts beside each slot are what decides the work: entries reaching a
+     * shape need a mesh loaded and joined, entries stopping at a texture are
+     * painted onto a mesh that is already there. */
+    if (catalogueCategoryCount > 0U)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the slots this disc declares — ");
+        appendCount(message, sizeof(message), catalogueCategoryCount);
+        stringAppend(message, sizeof(message), " of them across the ");
+        appendCount(message, sizeof(message), catalogueRead);
+        /* Said every time, because a slot absent from a sample and a slot
+           absent from the disc are not the same thing and the difference is
+           invisible once this line scrolls away. */
+        stringAppend(message, sizeof(message), " entr(ies) read, which is a sample and not the lot");
+        if (catalogueSlotsBeyondRoom > 0U)
+        {
+            stringAppend(message, sizeof(message), ", and ");
+            appendCount(message, sizeof(message), catalogueSlotsBeyondRoom);
+            stringAppend(message, sizeof(message), " more with no room to record");
+        }
+        platformLogMessage(message);
+
+        for (index = 0U; index < catalogueCategoryCount; index++)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   slot ");
+            appendHexadecimal(message, sizeof(message), catalogueCategoryValues[index]);
+            stringAppend(message, sizeof(message), " — ");
+            appendCount(message, sizeof(message), catalogueCategoryTotals[index]);
+            stringAppend(message, sizeof(message), " entr(ies), ");
+            appendCount(message, sizeof(message), catalogueCategoryShapes[index]);
+            stringAppend(message, sizeof(message), " reaching a mesh, ");
+            appendCount(message, sizeof(message), catalogueCategoryOverlays[index]);
+            stringAppend(message, sizeof(message), " painting one instead, such as ");
+            stringAppend(message, sizeof(message), (catalogueCategoryExamples[index][0] != '\0')
+                                                       ? catalogueCategoryExamples[index]
+                                                       : "(unnamed)");
+            platformLogMessage(message);
+        }
+    }
+}
+
 static void reportCatalogue(void)
 {
     char message[512];
@@ -1613,51 +1672,7 @@ static void reportCatalogue(void)
     stringAppend(message, sizeof(message), " named no mesh at all — an overlay or a tone");
     platformLogMessage(message);
 
-    /* Every slot the disc actually declares, with what its entries reach.
-     *
-     * This is the list of what can go on a Sim, taken from the disc rather than
-     * from a reference — the base game, an expansion and a stuff pack do not
-     * agree about what a Sim has, and only one of them is in the drive. The two
-     * counts beside each slot are what decides the work: entries reaching a
-     * shape need a mesh loaded and joined, entries stopping at a texture are
-     * painted onto a mesh that is already there. */
-    if (catalogueCategoryCount > 0U)
-    {
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: the slots this disc declares — ");
-        appendCount(message, sizeof(message), catalogueCategoryCount);
-        stringAppend(message, sizeof(message), " of them across the ");
-        appendCount(message, sizeof(message), catalogueRead);
-        /* Said every time, because a slot absent from a sample and a slot
-           absent from the disc are not the same thing and the difference is
-           invisible once this line scrolls away. */
-        stringAppend(message, sizeof(message), " entr(ies) read, which is a sample and not the lot");
-        if (catalogueSlotsBeyondRoom > 0U)
-        {
-            stringAppend(message, sizeof(message), ", and ");
-            appendCount(message, sizeof(message), catalogueSlotsBeyondRoom);
-            stringAppend(message, sizeof(message), " more with no room to record");
-        }
-        platformLogMessage(message);
-
-        for (index = 0U; index < catalogueCategoryCount; index++)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine:   slot ");
-            appendHexadecimal(message, sizeof(message), catalogueCategoryValues[index]);
-            stringAppend(message, sizeof(message), " — ");
-            appendCount(message, sizeof(message), catalogueCategoryTotals[index]);
-            stringAppend(message, sizeof(message), " entr(ies), ");
-            appendCount(message, sizeof(message), catalogueCategoryShapes[index]);
-            stringAppend(message, sizeof(message), " reaching a mesh, ");
-            appendCount(message, sizeof(message), catalogueCategoryOverlays[index]);
-            stringAppend(message, sizeof(message), " painting one instead, such as ");
-            stringAppend(message, sizeof(message), (catalogueCategoryExamples[index][0] != '\0')
-                                                       ? catalogueCategoryExamples[index]
-                                                       : "(unnamed)");
-            platformLogMessage(message);
-        }
-    }
+    reportCatalogueSlots();
 
     for (index = 0U; index < catalogueKindCount; index++)
     {
@@ -2139,6 +2154,16 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                     catalogueEntrySlot = rememberCatalogueCategory(
                         category->integerValue, propertySetGetString(&set, "name", ""));
                 }
+            }
+
+            /* Partway as well as at the end. The walk is six hundred entries at
+               two reads apiece and everything else on the disc has already been
+               read by then, so a console that fills or a page closed early
+               otherwise carries away nothing — which is exactly what happened
+               the first time this ran. */
+            if (catalogueRead % 150U == 0U)
+            {
+                reportCatalogueSlots();
             }
 
             /* What the sidecar step will need once this entry's bytes are
