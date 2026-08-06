@@ -2598,11 +2598,50 @@ static SimAssembly stepThePaint(MemorySize marker)
         {
             MaterialDescription material;
 
-            if (bytes != NULL_POINTER && materialRead(&material, bytes, size) == MATERIAL_READ_OK &&
-                material.baseTextureName[0] != '\0')
+            if (bytes != NULL_POINTER && materialRead(&material, bytes, size) == MATERIAL_READ_OK)
             {
-                stringAppend(simHopTextureName, sizeof(simHopTextureName),
-                             material.baseTextureName);
+                /* Everything the material names, not only the one texture that
+                   gets used.
+                 *
+                   A face's material is the place a layered face would show
+                   itself: the reader keeps a list because a material sometimes
+                   holds more than its base texture, and nothing has ever looked
+                   at the list. The base face binds `uuface_browbushy_brown`,
+                   which is named for a brow and painted on a whole face, and
+                   the Sim read out of the tutorial neighbourhood wears one
+                   called `..._cmpm`. If a face texture is composited from
+                   layers, they are named here or nowhere this engine has
+                   looked. */
+                char message[512];
+                Unsigned32 which;
+
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:   material ");
+                stringAppend(message, sizeof(message), material.materialName);
+                stringAppend(message, sizeof(message), " is a ");
+                stringAppend(message, sizeof(message), (material.definitionType[0] != '\0')
+                                                           ? material.definitionType
+                                                           : "(untyped)");
+                stringAppend(message, sizeof(message), " painting with ");
+                stringAppend(message, sizeof(message), (material.baseTextureName[0] != '\0')
+                                                           ? material.baseTextureName
+                                                           : "no base texture");
+                stringAppend(message, sizeof(message), ", and names ");
+                appendCount(message, sizeof(message), material.textureCount);
+                stringAppend(message, sizeof(message), " texture(s) —");
+                for (which = 0U; which < material.storedTextureCount; which++)
+                {
+                    stringAppend(message, sizeof(message), " ");
+                    stringAppend(message, sizeof(message), material.textureNames[which]);
+                    stringAppend(message, sizeof(message), ";");
+                }
+                platformLogMessage(message);
+
+                if (material.baseTextureName[0] != '\0')
+                {
+                    stringAppend(simHopTextureName, sizeof(simHopTextureName),
+                                 material.baseTextureName);
+                }
             }
         }
         memoryArenaRewindToMarker(globalArena, marker);
