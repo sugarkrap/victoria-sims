@@ -9,16 +9,21 @@ Written to be read by someone who has none of the conversation that produced it.
 ```sh
 make            # the Linux build, into build/linux/victoriaSims
 make web        # the WebAssembly build, into build/web/
-make verify     # 18 C suites; all should say "checks passed"
+make verify     # 19 C suites; all should say "checks passed"
 make verifyWeb  # the wasm module and the browser runtime, under node
 make check      # proves no allocator symbol is linked in
 ```
 
 `make verify` does not include `verifyWeb`: that one needs the module built and
 a `node` to run it under, and a machine with neither should still get the rest.
-Run both. The two defects the web checks catch — an odd index count, and a pose
-that stripped a Sim of its skins — each reached a browser because for a while
-nothing ran them at all.
+**Run both.** `verifyWeb` is not only the browser's test — it is the only thing
+that drives a whole disc load, so the Sim assembly, the wardrobe and the paint
+are checked there and nowhere else. The defects it catches reached a browser, or
+a screen, because for a while nothing ran them at all.
+
+Changing `testAssets/` means running `scripts/makeTestDisc.sh` and updating
+`testAssets/manifest.sha256`; `scripts/checkNoGameData.sh` fails otherwise, and
+it consults git rather than the filesystem on purpose.
 
 `make armv5`, `make oabi` and `make armv7` need an `arm-linux-gnueabi-gcc`
 cross compiler. Without one they fail at the first object file with
@@ -45,6 +50,7 @@ The Linux binary takes:
 | `--still-camera[=DEGREES]` | Stops the camera orbiting and holds it at an angle. Half a turn by default, because **nought is a Sim's back**. |
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
 | `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
+| `--wear=NAME` | Dresses the Sim in the catalogue entry whose name holds NAME. A preference, not a filter: parts nothing matching was offered for still wear whatever the catalogue offered them. The run names eight alternatives per part, so the next run's argument comes out of the last one's output. |
 
 Use both together whenever anything is being judged by eye across frames. An
 orbiting camera makes two captures two different views, and the difference gets
@@ -76,7 +82,11 @@ The load then goes, in order:
    LIFO holding its largest mip level.
 6. If what was drawn has a skeleton, **assemble a whole Sim** from the parts the
    game names, painting each part separately.
-7. **Index every package for animations** and play the first that stands on its
+7. **Read the catalogue**, and dress the Sim in what it names — a face, a hair,
+   and either a whole body or a top and a bottom — painting each subset with
+   the material that entry names rather than the one its shape binds. Then join
+   and paint it again.
+8. **Index every package for animations** and play the first that stands on its
    own and targets this skeleton.
 
 Every stage says what it saw. A run's log is meant to be self-describing enough
@@ -84,7 +94,8 @@ that this document is not needed to interpret it.
 
 ## A whole Sim
 
-This is the frontier. A Sim is not one model: it is a skeleton and three things
+The base case, and the thing everything below is built on top of. A Sim is not
+one model: it is a skeleton and three things
 that skin to it, and openTS2's own base case names them — `auskel_cres`,
 `amBodyNaked_cres`, `amFace_cres`, `amHairBald_cres`. All four are on this disc.
 
@@ -95,9 +106,9 @@ engine:   amFace_cres      —  521 vertices,  737 triangles, wearing uuface_bro
 engine:   amHairBald_cres  —  144 vertices,  244 triangles, wearing amhairbald_skin_s1
 engine: a whole Sim — 3 part(s) joined into 1838 vertices and 2749 triangles across 3 range(s)
 engine: hung on auskel_cres — 125 node(s)
-engine:   part 0 painted with ambodynaked-nude-s1 at 1024x1024
-engine:   part 1 painted with amface-s1 (overriding what its shape bound) at 512x512
-engine:   part 2 painted with umhairbald-skin-s1 at 512x512
+engine:   range 0 of amBodyNaked_cres painted with ambodynaked-nude-s1 at 1024x1024
+engine:   range 1 of amFace_cres painted with amface-s1 (overriding what its shape bound) at 512x512
+engine:   range 2 of amHairBald_cres painted with umhairbald-skin-s1 at 512x512
 engine: posed 1838 of 1838 vertices over 63 bone(s); it moved by 0.030 against a model 1.879 across
 engine: that was the rest pose ... so the pose composes the way the game does
 ```
@@ -265,16 +276,17 @@ the count was consistent with the guess.
 **So brows, eyes and lips are not among the catalogue's skin entries at all.**
 Where they are is not yet known. Two leads, both from things the disc has
 already said: the base face binds a material called `uuface_browbushy_brown`, so
-brows exist as materials with a legible naming scheme; and 886 catalogue entries
-are the XML spelling this reader skips, which is where the kinds a binary sample
+brows exist as materials with a legible naming scheme; and better than a fifth of
+the catalogue is the XML spelling this reader skips, which is where the kinds a binary sample
 never showed — `facearchetype`, `facemodifier`, `meshoverlay` — would live.
 
 The lesson to carry, since it cost three wrong answers in a row: a homogeneous
 sample of a clustered catalogue says where the walk started, not what the disc
 holds. Widen before concluding.
 
- It is the set of outfit categories a
-thing belongs to — everyday, formal, swimwear — and the disc says so plainly:
+**`category` is the other one, and it is not a body part at all.** It is the
+set of outfit categories a thing belongs to — everyday, formal, swimwear — and
+the disc says so plainly:
 
 ```
 slot 0x0000037F — 93 entr(ies), 88 reaching a mesh, such as tmhairshortspikey_black
@@ -283,16 +295,17 @@ slot 0x00000020 —  8 entr(ies),  8 reaching a mesh, such as efbodydresslongfor
 
 `0x37F` is nine bits at once, and it is hair — because hair is worn with every
 outfit. The single-bit values are garments available in one category each.
-`outfit` is the property that should say which part of a Sim a thing dresses,
-and it is now tallied beside `category` rather than assumed.
+`outfit` is the property that says which part of a Sim a thing dresses. Both are
+tallied, side by side, because assuming which was which cost three wrong answers
+in a row.
 
 The other half of that run is the more interesting one:
 
 ```
-slot 0x00000000 — 238 entr(ies), 0 reaching a mesh, 134 painting one instead, such as (unnamed)
+slot 0x00000000 — 96 entr(ies), 0 reaching a mesh, 47 painting one instead, such as (unnamed)
 ```
 
-Two hundred and thirty eight of six hundred belong to no outfit category, reach
+Ninety six of two thousand belong to no outfit category, reach
 no mesh, and carry no name. Things belonging to no outfit category are things
 that are not outfits — brows, eyes, lips, skin tones — and **none of them
 reaches a mesh**, which is the first real evidence that the rest of a face is
@@ -305,16 +318,23 @@ The chain to a mesh is:
 skin entry (0xEBCF3E27) → shapekeyidx → key list (0xAC506764) → SHPE → GMND → GMDC
 ```
 
-and the last three of those the engine already walks.
+and the engine now walks all of it — to a shape, and from a shape onto a Sim.
 
 ```
 CASIE_efbodynightgown_floralpink       key 1 of 3 — a shape on this disc
 afhairpagepunk_brown                   key 1 of 5 — a shape on this disc
 embodypajamas_grey                     key 1 of 3 — a shape on this disc
 
-followed 334 of 600 to a shape — 115 indexed past the end of a list,
-151 named no mesh at all (an overlay or a tone)
+7773 catalogue entries on this disc, taking every 3 so the sample spans the lot
+read 2000, 455 of them spelled as XML rather than the binary form
+followed 1884 to a shape — 0 had no key list, 59 indexed past the end of one,
+2 named a shape the index does not hold, 54 named no mesh at all
 ```
+
+Those counts are from the widened sample. An earlier version of this document
+carried the same lines at 600 entries — 334 followed, 115 past the end, 886
+XML — and every one of those numbers was a property of where the walk started.
+**Quote a count with the sample it came from or not at all.**
 
 **The property set has two format traps.** Its strings are prefixed by a flat
 four-byte length, where the scenegraph's carry one to five bytes with a
@@ -336,12 +356,227 @@ and the extra ones are not errors — an entry of kind skin covers overlays and
 tones, which have no mesh to name. Counting those apart from a shape that could
 not be found is the difference between a diagnosis and a tally.
 
-**886 of the entries met are the XML spelling** of the same resource type, which
-this does not read. Counted and reported rather than passed over, because a
-reader silently ignoring a third of the catalogue looks exactly like one that
-had read it all. The kinds the reference names but the binary sample never
+**455 of the 2000 entries met are the XML spelling** of the same resource
+type, which this does not read. Counted and reported rather than passed over,
+because a reader silently ignoring a fifth of the catalogue looks exactly like
+one that had read it all. The kinds the reference names but the binary sample never
 showed — `facearchetype`, `facemodifier`, `meshoverlay` — are the obvious place
 to look for the body's missing fat data.
+
+## Wearing it
+
+A Sim now wears what the catalogue names — a whole body, or a top and a bottom
+together, plus a face and a hair. The chain resolved for a long time before
+anything was ever put on the end of it; this is that step.
+
+```
+engine: the wardrobe was offered 1884 entr(ies) that reach a shape and
+        dresses 3 of 3 part(s), at the tone s1
+engine:   passed over 0 unnamed, 260 dressing a part this Sim has not got,
+          1351 authored for another age or gender, 4 already worn,
+          and 266 no better than what the part had settled on
+engine:   amBodyNaked_cres — wearing ambodyhoodedsweatshirtpants_green
+engine:     or any of — ambodypirate_black; ambodyunderwear_blackbriefs;
+                        ambodyfirefighter_eurostyle; ambodyhiphophood_orange; …
+engine:   amHairBald_cres gives way to amhairshortcenterspike_red
+              — 144 vertices become 453, 453 of them weighted
+engine: a dressed Sim — 3 part(s) joined into 2494 vertices across 5 range(s)
+```
+
+**A Sim wears either a whole body or a top and a bottom, never a mix and never
+half.** They are the same volume of Sim described two ways — joining both puts a
+pair of trousers through a pair of legs that are already there, and what shows
+is decided by whichever triangle the rasterizer reaches last. So the wardrobe
+settles an *arrangement* before anything is loaded:
+
+```
+engine:   a top and a bottom, which between them replace the whole body —
+          so the body it was assembled with is not drawn
+engine:   amBodyNaked_cres — chosen but not worn: ambodyhoodedsweatshirtpants_green
+engine:   a top    — wearing amtopcowboyshirt_brownstriped
+engine:   a bottom — wearing ambottomlongshorts_blueplaidtannavy
+```
+
+The pair wins when both halves turned up, because two garments chosen
+independently say something one cannot. A top with no bottom beside it is
+**chosen and not worn** — half a pair is a Sim in a shirt and nothing else — and
+the report keeps the two words apart, because a choice that was made and not
+drawn is a different state from one that was never available. Naming a
+whole-body garment with `--wear` settles it the other way; without that rule the
+pair wins nearly always and the flag can never be pointed at a whole body.
+
+**A top and a bottom have no undressed form.** The assembly's hardcoded names
+are a skeleton, a naked body, a face and a bald head — there is no
+`amTopNaked_cres` to start from, so those two parts exist only if the catalogue
+puts something there. That is why parts are indexed by **identity** and not by
+the order they loaded: three of five slots have a base mesh and two do not, and
+packing them would make the texture override and the range map mean different
+things on different runs.
+
+**It runs after the Sim is assembled, painted and on screen, not before.** Two
+reasons, and the first is not optional: the tone a face has to match is read off
+the texture the body ended up wearing, so there is nothing to choose a face for
+until a body has been painted. The second is that a Sim that appears and then
+dresses has two states one run can tell apart, and a Sim that was never
+undressed has one.
+
+**The choosing is in `engine/source/wardrobe.c`, on its own, because it is the
+only part of this with judgement in it.** Everything else in the chain is
+arithmetic the disc either agrees with or does not, and a mistake shows up as a
+refusal on the first run. A wrong choice resolves perfectly and draws a Sim
+wearing somebody else's body. There is no refusal to read and the disc cannot be
+asked whether the answer was right, so the rule lives where
+`tests/verifyWardrobe.c` can state a claim and then break it.
+
+Four rules, and each is a way this has been or could be wrong:
+
+**A mesh must be authored for the skeleton it hangs on.** Everything is hung on
+`auskel_cres`, so an entry must be named for an adult male — `ambody`, `amface`,
+`amhair`, `amtop`, `ambottom`. A child's body resolves perfectly and comes apart
+on the first pose, which does not read as wrong clothes. 1578 of 1884 entries
+are refused by this one rule, which is what a catalogue covering every age and
+gender should look like from an adult male's point of view.
+
+**The mark is matched anywhere in the name, not at the front.** Every CAS entry
+on this disc is called `CASIE_amface_s1`, so anchoring finds nothing at all.
+
+**A part will not wear what it already wears.** The base Sim is naked and bald,
+and the catalogue names those very meshes. Taking one closes the whole chain and
+changes nothing on screen, which proves the chain works and is indistinguishable
+from a wardrobe that did nothing.
+
+**The marker for that is `_nude`, and it is emphatically not `naked`.**
+`amtopnaked_babybluetank` is a real garment: `topnaked` is the name of the
+*mesh*, a bare torso, and the tank top is the texture painted on it. Refusing on
+`naked` refuses most of the tops on the disc. `CASIE_amtopnaked_nude_s3` is the
+bare one, and `_nude` is what says so.
+
+**A slot naming two parts at once dresses neither.** `0x18` is a bottom and a
+whole body together and there is no answer to which of the two it is; wearing
+either half of it is worse than not wearing it. Three entries in the sample.
+
+**The tone matters for a face and not for a garment.** A face is not worn over
+skin, it *is* the skin, so one tone off is a head that does not belong to its
+neck — a later entry displaces an earlier one when it matches the tone and the
+earlier did not. A garment's colourway sits in exactly the same position in the
+name (`ambodyswimwear_redbikini`) and means something else entirely. The tone is
+matched as a whole trailing component, `_s1` and not `s1`, or `CASmannequins1`
+matches.
+
+**`--wear` is a preference and not a filter, and it was a filter first.** As a
+filter it read perfectly and did the wrong thing: no hair and no face is named
+after a garment, so asking for one refused both and the Sim came out dressed and
+bald. Nothing is read during the walk — entries are only remembered — so
+preferring costs exactly what refusing did.
+
+### What colour it is
+
+**A shape's material binding is one arbitrary colourway.** One mesh serves every
+colour of a cowboy shirt, and the shape has to name something — so a Sim asked
+for `amtopcowboyshirt_brownstriped` came out painted `amtopcowboyshirt_decogold`,
+and `ambottomlongshorts_blueplaidtannavy` came out `navywhiteblack`. Which colour
+*this* entry is, is in the entry:
+
+```
+numoverrides=0x00000001; override0subset=body;
+override0resourcekeyidx=0x00000002; override0shape=0x00000000
+```
+
+`override<N>resourcekeyidx` indexes the same key list the shape came out of, so
+resolving it costs no read at all — the list is already open. `override<N>subset`
+is a **primitive's name**, which is how a material has bound here since the first
+Sim, so this is the existing rule with a better source rather than a second
+mechanism.
+
+**Every property list this engine had ever printed in full was a grouping's.**
+The unnamed entries carry eighteen properties and were dumped on every run for
+months; a named one carries twenty-one, and the three extra are the whole
+answer. A sample that never included the thing being asked about will describe
+the format perfectly and leave out the part that matters — which is the
+clustered-catalogue lesson again, in a different costume.
+
+**The skin-tone stand-in now stands aside.** `simPartTextureStems` guesses a
+face's texture from the body's tone because nothing better was available; where
+a catalogue entry names its own material, that guess must not overrule the thing
+it was standing in for.
+
+**The report names eight alternatives per part.** Counts alone said a hundred
+and fifty other garments fitted and named none of them, which left the flag with
+nothing to be pointed at.
+
+**`RENDER_PART_LIMIT` went from eight to sixteen.** A part there is a primitive,
+not a body part: a firefighter's suit is two and his helmet is three, so a Sim
+in a top, a bottom, a face and a hair reaches eight on the garments alone. Over
+the cap a range is drawn under whatever its neighbour wears, which reads as a
+garment bleeding onto a face rather than as a limit — the run says so now
+either way.
+
+Not yet chosen for: the sample carries no adult male face at the body's tone, so
+the face is worn at whichever tone turned up and the run says so. A face is
+still overridden to the body's tone texture regardless, so it looks right and is
+not right.
+
+### The bug that was waiting for this
+
+**`renderSetPartTexture` is indexed by PRIMITIVE, and it was being handed a
+PART.** The four hardcoded names carry exactly one primitive apiece, so for as
+long as a Sim wore nothing the two were the same number and the difference could
+not show. The first garment put on one had two primitives — a firefighter's suit
+and the skin at his wrists — every texture after it landed one range early, and
+a Sim came out with a green face.
+
+The header had said "a position in the mesh's primitives array" all along. This
+is the same failure as the component index across a merge and the same failure
+as a shared name not being a shared implementation: **a number that has only
+ever been tested where two meanings coincide has not been tested.** The paint
+walks ranges now, each part contributes as many as it has, and a Sim beyond the
+backend's eight says so rather than drawing the rest under its neighbour's skin.
+
+## The fixture
+
+There is a Sim on the test disc now, and none of it came from anywhere.
+
+`scripts/makeSimFixture.py` writes `testAssets/scenegraph/sim_fixture.package`:
+a skeleton of three bones, three parts weighted to it, and catalogue entries
+naming replacements for them. It is boxes. It is not meant to look like
+anything — it is meant to have the *structure* a Sim has, and `make verifyWeb`
+drives the whole load over it headlessly, through the browser's one-read-per-step
+handshake, in a couple of seconds.
+
+Before this, the disc carried a teapot: one rigid model, no bones, no skeleton,
+no catalogue entry. So the four-names lookup, the merge, the skeleton, the
+wardrobe and the paint had no fixture at all — and three defects reached a
+screen through that gap. Every assertion in the new block corresponds to one of
+them, and each was checked by putting the defect back:
+
+| Break | What fails |
+| --- | --- |
+| the merge drops a part | `joins the parts into one model`, and two more |
+| the paint takes the shape's material | `paints a garment with the material its entry names` |
+| the whole body is drawn under the pair | `and joins the dressed Sim again` |
+| the tone rule stops displacing | `taking the face whose tone matches, not the one it met first` |
+
+**The fixture is built to disagree with the bug.** Its body has **two
+primitives and two materials**, because while every part had one a part index
+and a primitive index were the same number and nothing could tell them apart. Its
+catalogue offers the **wrong tone first**, so a reader that kept whatever it met
+first would keep it. Its garment shapes bind a **deliberately wrong colourway**,
+so taking the shape's binding cannot pass. A fixture that offered only the right
+answers would agree with a reader that had no rules at all.
+
+**Nothing is retail-derived, and the generator is the provenance.** A fixture
+somebody hands you can only be taken on trust; one written by a script committed
+beside it can be re-run and compared, and it reproduces byte for byte. That is
+also why the generator is the file to read: it is the only place the seven
+formats are written down rather than only parsed, and a disagreement with a
+reader now shows up as a fixture that will not load.
+
+**An object reference is three fields, not two.** A present byte, then a kind
+byte, then the index — and the reader's early return on `present == 0` makes it
+look like two from the bottom half of the function. Writing it as two made every
+reference one byte short: a CRES read its first block correctly and then took
+the middle of its second block for a block type. That is what authoring a format
+catches that reading one does not.
 
 ## The skeleton, the bind pose, and posing
 
@@ -479,22 +714,32 @@ the browser to test it.
 - **The slot-is-the-channel rule for bodies is inferred, not read.** Measured
   and flagged, and the checks pin both halves — but no part of the format says
   it, and a body deforming into the wrong shape is where to start if one does.
-- **886 XML catalogue entries are skipped.** Reading them needs an XML property
-  set reader this does not have. `facearchetype`, `facemodifier` and
+- **455 of 2000 catalogue entries are skipped as XML.** Reading them needs an
+  XML property set reader this does not have. `facearchetype`, `facemodifier` and
   `meshoverlay` never appeared in the binary sample and are presumably there.
-- **115 catalogue entries index past the end of their key list.** Unexplained,
-  and worth a measurement rather than a rationalisation: it may be a second
-  sidecar, a different index property, or entries whose shape index means
-  nothing. It is the first thing to look at in the catalogue.
-- **Nothing wears anything yet.** The chain from a catalogue entry to a shape
-  resolves; choosing an entry by `category` and swapping a Sim's part for it is
-  the step not taken.
+- **59 of 2000 catalogue entries index past the end of their key list.**
+  Unexplained, and worth a measurement rather than a rationalisation: it may be
+  a second sidecar, a different index property, or entries whose shape index
+  means nothing. It is the first thing to look at in the catalogue.
+- **A reflection cube is painted as a diffuse texture.** A firefighter's visor
+  wears `outdoordaytime-envcube` and comes out with the sky across it, because
+  the material names it and nothing here knows what an environment cube is for.
+  Every material naming one draws wrong in the same way, and it is visible.
+- **A `SimSkin` material is painted as one flat texture.** A garment's texture
+  covers the garment and leaves the skin around it black — the legs between a
+  pair of shorts and a pair of socks, and the hands past a sleeve. The material
+  type says what is missing: `SimSkin` composites a garment over the Sim's own
+  skin tone, and this draws only the top layer. Every dressed Sim shows it.
+  **It is the next thing to do here.**
+- **Only an adult male can be dressed.** The four names the assembly starts from
+  are his, so the wardrobe's rule is his too. Every other age and gender is on
+  the disc and refused, counted, by name of rule.
+- **No adult male face at the body's tone turned up in the sample**, so the face
+  is worn at whatever tone did and repainted to the body's. It looks right for
+  the wrong reason, which is the kind of thing this project has decided twice
+  that it does not want.
 - **Inverse kinematics are counted and skipped.** Every run says how many; the
   animation currently played carries two.
-- **The find-and-redirect path and the Sim assembly have no fixture.** The test
-  disc holds no skinned mesh and no Sim, so `make verify` cannot catch a
-  regression in either. A skinned container in `scripts/makeTestDisc.sh` would
-  close the first.
 - **The parts' bind poses agree to 0.015, not to nought**, over 195 bones. Small
   enough that nothing rests on it, measured every run rather than assumed.
 - **Two unexplained singletons** in the index, unchanged for many runs:
@@ -533,6 +778,15 @@ first primitive draws from component nought. Joined without shifting them,
 to avoid transforming shared vertices twice, and leaves a Sim's head behind
 while its body lies down — reported as `posed 1173 of 1838`, which is exactly
 the body's count and the number that gave it away.
+
+**A number tested only where two meanings coincide has not been tested.**
+`renderSetPartTexture` takes a primitive index and was handed a part index. Both
+were 0, 1, 2 for as long as every part had one primitive, which was every run
+until a Sim wore its first garment — and then the textures landed one range
+early and the face came out green. The header said "primitives array" the whole
+time. This is the third shape of the same mistake in this document, after the
+component index that meant something only inside one container and the backend
+call that shared a name and not a behaviour.
 
 **A numerical method has a range, and the comment above it is not it.**
 `mathSine` said "accurate to roughly 1e-6" and was off by seven thousandths at
