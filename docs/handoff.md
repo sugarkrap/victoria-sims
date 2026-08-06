@@ -229,7 +229,34 @@ species; type=skin
 ```
 
 `type=skin` covers everything selectable — outfits, hair, brows, eyes — and
-**`category` is the body slot** that tells them apart. The chain to a mesh is:
+**`category` is NOT the body slot**, though this document said it was for a
+while and a probe was written against it. It is the set of outfit categories a
+thing belongs to — everyday, formal, swimwear — and the disc says so plainly:
+
+```
+slot 0x0000037F — 93 entr(ies), 88 reaching a mesh, such as tmhairshortspikey_black
+slot 0x00000020 —  8 entr(ies),  8 reaching a mesh, such as efbodydresslongformal_celadon
+```
+
+`0x37F` is nine bits at once, and it is hair — because hair is worn with every
+outfit. The single-bit values are garments available in one category each.
+`outfit` is the property that should say which part of a Sim a thing dresses,
+and it is now tallied beside `category` rather than assumed.
+
+The other half of that run is the more interesting one:
+
+```
+slot 0x00000000 — 238 entr(ies), 0 reaching a mesh, 134 painting one instead, such as (unnamed)
+```
+
+Two hundred and thirty eight of six hundred belong to no outfit category, reach
+no mesh, and carry no name. Things belonging to no outfit category are things
+that are not outfits — brows, eyes, lips, skin tones — and **none of them
+reaches a mesh**, which is the first real evidence that the rest of a face is
+paint rather than geometry. Four of them are dumped in full on every run, since
+that pattern is equally what a misread property would look like.
+
+The chain to a mesh is:
 
 ```
 skin entry (0xEBCF3E27) → shapekeyidx → key list (0xAC506764) → SHPE → GMND → GMDC

@@ -1448,52 +1448,70 @@ static Unsigned32 catalogueKeysShown = 0U;
  * completely different work. A slot whose entries all end in an overlay needs
  * no mesh loading at all. */
 #define CATALOGUE_CATEGORY_LIMIT 24U
-static Unsigned32 catalogueCategoryValues[CATALOGUE_CATEGORY_LIMIT];
-static Unsigned32 catalogueCategoryTotals[CATALOGUE_CATEGORY_LIMIT];
-static Unsigned32 catalogueCategoryShapes[CATALOGUE_CATEGORY_LIMIT];
-static Unsigned32 catalogueCategoryOverlays[CATALOGUE_CATEGORY_LIMIT];
-static char catalogueCategoryExamples[CATALOGUE_CATEGORY_LIMIT][PROPERTY_NAME_LIMIT];
-static Unsigned32 catalogueCategoryCount = 0U;
-/* Which slot the entry waiting on its key list belongs to, so that when the
-   list resolves the answer lands against the right one. CATALOGUE_CATEGORY_LIMIT
-   means the entry declared no slot. */
-static Unsigned32 catalogueEntrySlot = CATALOGUE_CATEGORY_LIMIT;
-/* Entries met whose slot did not fit the table above. Reported, because a
-   tally that quietly drops slots reads exactly like a disc that has few. */
-static Unsigned32 catalogueSlotsBeyondRoom = 0U;
 
-/* Records one entry against its slot, and answers which slot that was. */
-static Unsigned32 rememberCatalogueCategory(Unsigned32 category, const char *name)
+/* One tally: a value, how many entries carried it, and what those entries
+   reached. Two of these are kept, because the first cut of this counted only
+   `category` and `category` turned out not to be the body part at all. */
+typedef struct SlotTally
+{
+    Unsigned32 values[CATALOGUE_CATEGORY_LIMIT];
+    Unsigned32 totals[CATALOGUE_CATEGORY_LIMIT];
+    Unsigned32 shapes[CATALOGUE_CATEGORY_LIMIT];
+    Unsigned32 overlays[CATALOGUE_CATEGORY_LIMIT];
+    char examples[CATALOGUE_CATEGORY_LIMIT][PROPERTY_NAME_LIMIT];
+    Unsigned32 count;
+    Unsigned32 beyondRoom;
+} SlotTally;
+
+/* What outfit categories an entry belongs to. NOT the body part: hair comes
+   through as 0x37F, which is nine bits at once, because hair is worn with every
+   outfit. The single-bit values are garments available in one category each. */
+static SlotTally catalogueByCategory;
+/* Which part of a Sim an entry dresses. This is the one that tells a hair from
+   a top from a pair of shoes, and reading `category` for it was a mistake the
+   disc corrected: an earlier note here called category the body slot. */
+static SlotTally catalogueByOutfit;
+/* How many uncategorised entries have been dumped in full. Four is enough to
+   see what they are and few enough not to drown the log. */
+static Unsigned32 catalogueUncategorisedShown = 0U;
+/* Where in each tally the entry waiting on its key list sits, so that when the
+   list resolves the answer lands against the right row. CATALOGUE_CATEGORY_LIMIT
+   means the entry declared no such property. */
+static Unsigned32 catalogueEntryCategorySlot = CATALOGUE_CATEGORY_LIMIT;
+static Unsigned32 catalogueEntryOutfitSlot = CATALOGUE_CATEGORY_LIMIT;
+
+/* Records one entry against a value, and answers which row that was. */
+static Unsigned32 rememberSlot(SlotTally *tally, Unsigned32 value, const char *name)
 {
     Unsigned32 index;
 
-    for (index = 0U; index < catalogueCategoryCount; index++)
+    for (index = 0U; index < tally->count; index++)
     {
-        if (catalogueCategoryValues[index] == category)
+        if (tally->values[index] == value)
         {
             break;
         }
     }
-    if (index == catalogueCategoryCount)
+    if (index == tally->count)
     {
-        if (catalogueCategoryCount >= (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
+        if (tally->count >= (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
         {
-            catalogueSlotsBeyondRoom++;
+            tally->beyondRoom++;
             return (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
         }
-        catalogueCategoryValues[index] = category;
-        catalogueCategoryTotals[index] = 0U;
-        catalogueCategoryShapes[index] = 0U;
-        catalogueCategoryOverlays[index] = 0U;
-        catalogueCategoryExamples[index][0] = '\0';
-        catalogueCategoryCount++;
+        tally->values[index] = value;
+        tally->totals[index] = 0U;
+        tally->shapes[index] = 0U;
+        tally->overlays[index] = 0U;
+        tally->examples[index][0] = '\0';
+        tally->count++;
     }
-    catalogueCategoryTotals[index]++;
+    tally->totals[index]++;
     /* The first NAMED entry, not the first: plenty carry no name, and an
-       example of nothing says nothing about what the slot holds. */
-    if (catalogueCategoryExamples[index][0] == '\0' && name[0] != '\0')
+       example of nothing says nothing about what the row holds. */
+    if (tally->examples[index][0] == '\0' && name[0] != '\0')
     {
-        stringAppend(catalogueCategoryExamples[index], PROPERTY_NAME_LIMIT, name);
+        stringAppend(tally->examples[index], PROPERTY_NAME_LIMIT, name);
     }
     return index;
 }
@@ -1558,56 +1576,70 @@ static void rememberCatalogueKind(const char *kind, const char *name)
  * that fills up, or a page closed early, otherwise leaves nothing at all — the
  * first run of this reported the slots only on completion and the log arrived
  * cut off before them. */
-static void reportCatalogueSlots(void)
+/* One tally, said plainly. */
+static void reportOneTally(const SlotTally *tally, const char *what, const char *meaning)
 {
     char message[512];
     Unsigned32 index;
 
-    /* Every slot the disc actually declares, with what its entries reach.
-     *
-     * This is the list of what can go on a Sim, taken from the disc rather than
-     * from a reference — the base game, an expansion and a stuff pack do not
-     * agree about what a Sim has, and only one of them is in the drive. The two
-     * counts beside each slot are what decides the work: entries reaching a
-     * shape need a mesh loaded and joined, entries stopping at a texture are
-     * painted onto a mesh that is already there. */
-    if (catalogueCategoryCount > 0U)
+    if (tally->count == 0U)
+    {
+        return;
+    }
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: by ");
+    stringAppend(message, sizeof(message), what);
+    stringAppend(message, sizeof(message), " — ");
+    appendCount(message, sizeof(message), tally->count);
+    stringAppend(message, sizeof(message), " value(s) across the ");
+    appendCount(message, sizeof(message), catalogueRead);
+    /* Said every time, because a value absent from a sample and a value absent
+       from the disc are not the same thing and the difference is invisible once
+       this line scrolls away. */
+    stringAppend(message, sizeof(message), " entr(ies) read, a sample and not the lot; ");
+    stringAppend(message, sizeof(message), meaning);
+    if (tally->beyondRoom > 0U)
+    {
+        stringAppend(message, sizeof(message), " (");
+        appendCount(message, sizeof(message), tally->beyondRoom);
+        stringAppend(message, sizeof(message), " more with no room to record)");
+    }
+    platformLogMessage(message);
+
+    for (index = 0U; index < tally->count; index++)
     {
         message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: the slots this disc declares — ");
-        appendCount(message, sizeof(message), catalogueCategoryCount);
-        stringAppend(message, sizeof(message), " of them across the ");
-        appendCount(message, sizeof(message), catalogueRead);
-        /* Said every time, because a slot absent from a sample and a slot
-           absent from the disc are not the same thing and the difference is
-           invisible once this line scrolls away. */
-        stringAppend(message, sizeof(message), " entr(ies) read, which is a sample and not the lot");
-        if (catalogueSlotsBeyondRoom > 0U)
-        {
-            stringAppend(message, sizeof(message), ", and ");
-            appendCount(message, sizeof(message), catalogueSlotsBeyondRoom);
-            stringAppend(message, sizeof(message), " more with no room to record");
-        }
+        stringAppend(message, sizeof(message), "engine:   ");
+        appendHexadecimal(message, sizeof(message), tally->values[index]);
+        stringAppend(message, sizeof(message), " — ");
+        appendCount(message, sizeof(message), tally->totals[index]);
+        stringAppend(message, sizeof(message), " entr(ies), ");
+        appendCount(message, sizeof(message), tally->shapes[index]);
+        stringAppend(message, sizeof(message), " reaching a mesh, ");
+        appendCount(message, sizeof(message), tally->overlays[index]);
+        stringAppend(message, sizeof(message), " painting one instead, such as ");
+        stringAppend(message, sizeof(message),
+                     (tally->examples[index][0] != '\0') ? tally->examples[index] : "(unnamed)");
         platformLogMessage(message);
-
-        for (index = 0U; index < catalogueCategoryCount; index++)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine:   slot ");
-            appendHexadecimal(message, sizeof(message), catalogueCategoryValues[index]);
-            stringAppend(message, sizeof(message), " — ");
-            appendCount(message, sizeof(message), catalogueCategoryTotals[index]);
-            stringAppend(message, sizeof(message), " entr(ies), ");
-            appendCount(message, sizeof(message), catalogueCategoryShapes[index]);
-            stringAppend(message, sizeof(message), " reaching a mesh, ");
-            appendCount(message, sizeof(message), catalogueCategoryOverlays[index]);
-            stringAppend(message, sizeof(message), " painting one instead, such as ");
-            stringAppend(message, sizeof(message), (catalogueCategoryExamples[index][0] != '\0')
-                                                       ? catalogueCategoryExamples[index]
-                                                       : "(unnamed)");
-            platformLogMessage(message);
-        }
     }
+}
+
+/* What the catalogue says a Sim can be made of, counted two ways.
+ *
+ * Called partway through the walk as well as at the end: the walk is six
+ * hundred entries at two reads apiece, and a console that fills up or a page
+ * closed early otherwise leaves nothing at all.
+ *
+ * Two tallies because the first cut of this had one and it was the wrong one.
+ * `category` looked like the body slot until hair arrived carrying 0x37F — nine
+ * bits at once, because hair is worn with every outfit. It is the set of outfit
+ * categories a thing belongs to. `outfit` is the one that should say which part
+ * of a Sim it dresses, and it is counted here rather than assumed. */
+static void reportCatalogueSlots(void)
+{
+    reportOneTally(&catalogueByCategory, "category",
+                   "which outfit categories a thing belongs to, not which part it dresses");
+    reportOneTally(&catalogueByOutfit, "outfit", "which part of a Sim it dresses");
 }
 
 static void reportCatalogue(void)
@@ -1744,9 +1776,13 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                 /* Against its slot as well as the total. A slot where every
                    entry ends here is painted onto a mesh that is already
                    drawn, and wants no mesh loading at all. */
-                if (catalogueEntrySlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
+                if (catalogueEntryCategorySlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
                 {
-                    catalogueCategoryOverlays[catalogueEntrySlot]++;
+                    catalogueByCategory.overlays[catalogueEntryCategorySlot]++;
+                }
+                if (catalogueEntryOutfitSlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
+                {
+                    catalogueByOutfit.overlays[catalogueEntryOutfitSlot]++;
                 }
             }
 
@@ -1773,9 +1809,13 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                 else
                 {
                     catalogueResolved++;
-                    if (catalogueEntrySlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
+                    if (catalogueEntryCategorySlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
                     {
-                        catalogueCategoryShapes[catalogueEntrySlot]++;
+                        catalogueByCategory.shapes[catalogueEntryCategorySlot]++;
+                    }
+                    if (catalogueEntryOutfitSlot < (Unsigned32)CATALOGUE_CATEGORY_LIMIT)
+                    {
+                        catalogueByOutfit.shapes[catalogueEntryOutfitSlot]++;
                     }
                     /* Only bodies. A hair or a pair of shoes has nothing to say
                        about where a fat morph lives, and eight reads three deep
@@ -2147,12 +2187,53 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
                nought, and reading them as the same would invent a slot. */
             {
                 const Property *category = propertySetFind(&set, "category");
+                const Property *outfit = propertySetFind(&set, "outfit");
+                const char *entryName = propertySetGetString(&set, "name", "");
 
-                catalogueEntrySlot = (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
+                catalogueEntryCategorySlot = (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
+                catalogueEntryOutfitSlot = (Unsigned32)CATALOGUE_CATEGORY_LIMIT;
                 if (category != NULL_POINTER && category->kind == PROPERTY_VALUE_INTEGER)
                 {
-                    catalogueEntrySlot = rememberCatalogueCategory(
-                        category->integerValue, propertySetGetString(&set, "name", ""));
+                    catalogueEntryCategorySlot =
+                        rememberSlot(&catalogueByCategory, category->integerValue, entryName);
+                }
+                if (outfit != NULL_POINTER && outfit->kind == PROPERTY_VALUE_INTEGER)
+                {
+                    catalogueEntryOutfitSlot =
+                        rememberSlot(&catalogueByOutfit, outfit->integerValue, entryName);
+                }
+
+                /* In full, for the entries that belong to no outfit category at
+                   all. Two hundred and thirty eight of six hundred are like
+                   that, none of them reaches a mesh, and none carries a name —
+                   which is what a brow, an eye or a skin tone would look like
+                   from here, and equally what a misread property would. Only
+                   the whole record can tell those apart. */
+                if (category != NULL_POINTER && category->kind == PROPERTY_VALUE_INTEGER &&
+                    category->integerValue == 0U && catalogueUncategorisedShown < 4U)
+                {
+                    char dump[512];
+                    Unsigned32 which;
+
+                    catalogueUncategorisedShown++;
+                    dump[0] = '\0';
+                    stringAppend(dump, sizeof(dump), "engine:   uncategorised entry —");
+                    for (which = 0U; which < set.storedPropertyCount; which++)
+                    {
+                        stringAppend(dump, sizeof(dump), " ");
+                        stringAppend(dump, sizeof(dump), properties[which].name);
+                        stringAppend(dump, sizeof(dump), "=");
+                        if (properties[which].kind == PROPERTY_VALUE_STRING)
+                        {
+                            stringAppend(dump, sizeof(dump), properties[which].stringValue);
+                        }
+                        else
+                        {
+                            appendHexadecimal(dump, sizeof(dump), properties[which].integerValue);
+                        }
+                        stringAppend(dump, sizeof(dump), ";");
+                    }
+                    platformLogMessage(dump);
                 }
             }
 
@@ -2208,8 +2289,11 @@ static SimAssembly stepThePaint(MemorySize marker)
         catalogueCursor = 0U;
         catalogueRead = 0U;
         catalogueKindCount = 0U;
-        catalogueCategoryCount = 0U;
-        catalogueSlotsBeyondRoom = 0U;
+        catalogueByCategory.count = 0U;
+        catalogueByCategory.beyondRoom = 0U;
+        catalogueByOutfit.count = 0U;
+        catalogueByOutfit.beyondRoom = 0U;
+        catalogueUncategorisedShown = 0U;
         return SIM_ASSEMBLY_PENDING;
     }
 
