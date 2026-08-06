@@ -1485,6 +1485,46 @@ static Unsigned32 catalogueEntryCategorySlot = CATALOGUE_CATEGORY_LIMIT;
 static Unsigned32 catalogueEntryOutfitSlot = CATALOGUE_CATEGORY_LIMIT;
 
 /* Records one entry against a value, and answers which row that was. */
+/* What a resource type identifier is called.
+ *
+ * For saying what a catalogue key points at. "A resource of another type" is
+ * true and useless — a material and a mesh overlay want completely different
+ * work, and the number alone sends the next reader to a table. */
+static const char *resourceTypeGetName(Unsigned32 typeIdentifier)
+{
+    switch (typeIdentifier)
+    {
+    case (Unsigned32)PACKAGE_TYPE_CRES:
+        return "transform tree";
+    case (Unsigned32)PACKAGE_TYPE_SHPE:
+        return "shape";
+    case (Unsigned32)PACKAGE_TYPE_GMND:
+        return "geometry node";
+    case (Unsigned32)PACKAGE_TYPE_GMDC:
+        return "geometry container";
+    case (Unsigned32)PACKAGE_TYPE_TXMT:
+        return "material";
+    case (Unsigned32)PACKAGE_TYPE_TXTR:
+        return "texture";
+    case (Unsigned32)PACKAGE_TYPE_LIFO:
+        return "mip level";
+    case (Unsigned32)PACKAGE_TYPE_ANIM:
+        return "animation";
+    case 0xEBCF3E27UL:
+        return "catalogue entry";
+    case (Unsigned32)0xAC506764UL:
+        return "key list";
+    case 0x4D51F042UL:
+        return "face modifier";
+    case 0xCCCEF852UL:
+        return "face lighting";
+    case 0x8C1580B5UL:
+        return "hair tone";
+    default:
+        return NULL_POINTER;
+    }
+}
+
 static Unsigned32 rememberSlot(SlotTally *tally, Unsigned32 value, const char *name)
 {
     Unsigned32 index;
@@ -1846,8 +1886,14 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                  * every body container on this disc declares fatbot over an
                  * all-zero map, so the deltas are somewhere this has not
                  * looked. The rest of the list is the nearest place. */
-                if (stringContainsIgnoringCase(catalogueEntryName, "body") &&
-                    catalogueKeysShown < 3U)
+                /* Bodies, and the unnamed entries beside them. The unnamed
+                   ones are the question now: two in three of the catalogue is
+                   unnamed, meshless and uncategorised, and every one of them
+                   carries a key list of ten to sixteen keys. What is in those
+                   lists is what a face is made of, or is not. */
+                if ((stringContainsIgnoringCase(catalogueEntryName, "body") ||
+                     catalogueEntryName[0] == '\0') &&
+                    catalogueKeysShown < 6U)
                 {
                     char keyMessage[512];
                     Unsigned32 at;
@@ -1855,7 +1901,9 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     catalogueKeysShown++;
                     keyMessage[0] = '\0';
                     stringAppend(keyMessage, sizeof(keyMessage), "engine:   ");
-                    stringAppend(keyMessage, sizeof(keyMessage), catalogueEntryName);
+                    stringAppend(keyMessage, sizeof(keyMessage),
+                                 (catalogueEntryName[0] != '\0') ? catalogueEntryName
+                                                                 : "(unnamed)");
                     stringAppend(keyMessage, sizeof(keyMessage), " keys —");
                     for (at = 0U; at < list.storedKeyCount; at++)
                     {
@@ -1864,7 +1912,19 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                         stringAppend(keyMessage, sizeof(keyMessage), " ");
                         appendCount(keyMessage, sizeof(keyMessage), at);
                         stringAppend(keyMessage, sizeof(keyMessage), ":");
-                        appendHexadecimal(keyMessage, sizeof(keyMessage), each->typeIdentifier);
+                        {
+                            const char *typeName = resourceTypeGetName(each->typeIdentifier);
+
+                            if (typeName != NULL_POINTER)
+                            {
+                                stringAppend(keyMessage, sizeof(keyMessage), typeName);
+                            }
+                            else
+                            {
+                                appendHexadecimal(keyMessage, sizeof(keyMessage),
+                                                  each->typeIdentifier);
+                            }
+                        }
                         stringAppend(keyMessage, sizeof(keyMessage),
                                      (resourceIndexFind(&simIndex, each->typeIdentifier,
                                                         each->instanceIdentifier,
@@ -1895,10 +1955,20 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     stringAppend(message, sizeof(message), " in a version ");
                     appendCount(message, sizeof(message), list.version);
                     stringAppend(message, sizeof(message), " list is a ");
-                    stringAppend(message, sizeof(message),
-                                 (key->typeIdentifier == (Unsigned32)PACKAGE_TYPE_SHPE)
-                                     ? "shape"
-                                     : "resource of another type");
+                    {
+                        /* By name where there is one. Saying only "a resource
+                           of another type" is true and useless: a material and
+                           a mesh overlay want completely different work, and
+                           this line is the one that decides which. */
+                        const char *typeName = resourceTypeGetName(key->typeIdentifier);
+
+                        if (typeName != NULL_POINTER)
+                        {
+                            stringAppend(message, sizeof(message), typeName);
+                            stringAppend(message, sizeof(message), " ");
+                        }
+                        appendHexadecimal(message, sizeof(message), key->typeIdentifier);
+                    }
                     stringAppend(message, sizeof(message),
                                  (shape != NULL_POINTER) ? ", which is on this disc"
                                                          : ", which the index does not hold");
