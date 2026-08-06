@@ -1718,6 +1718,16 @@ static void reportCatalogueSlots(void)
 {
     Unsigned32 which;
 
+    reportOneTally(&catalogueByCategory, "category",
+                   "which outfit categories a thing belongs to, not which part it dresses");
+    reportOneTally(&catalogueByOutfit, "outfit", "which part of a Sim it dresses");
+
+    /* Last, and after the tallies on purpose.
+     *
+       The tallies run to twenty-odd lines, and anything printed before them is
+       off the top of a copied tail. That has now happened to these dumps three
+       times: first because they were not repeated at all, then because they
+       were repeated in the wrong order. What is most specific goes last. */
     for (which = 0U; which < catalogueUncategorisedShown; which++)
     {
         platformLogMessage(catalogueUncategorisedDumps[which]);
@@ -1726,9 +1736,6 @@ static void reportCatalogueSlots(void)
     {
         platformLogMessage(catalogueFaceDumps[which]);
     }
-    reportOneTally(&catalogueByCategory, "category",
-                   "which outfit categories a thing belongs to, not which part it dresses");
-    reportOneTally(&catalogueByOutfit, "outfit", "which part of a Sim it dresses");
 }
 
 static void reportCatalogue(void)
