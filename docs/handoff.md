@@ -50,6 +50,7 @@ The Linux binary takes:
 | `--still-camera[=DEGREES]` | Stops the camera orbiting and holds it at an angle. Half a turn by default, because **nought is a Sim's back**. |
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
 | `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
+| `--sim=CODE` | Which Sim to build: an age and a gender as the catalogue spells them — `am`, `af`, `cu`, `tf`, `em`. Every one of the four names is composed from it, and the run reports which archetypes the disc actually carries. Defaults to `am`. |
 | `--wear=NAME` | Dresses the Sim in the catalogue entry whose name holds NAME. A preference, not a filter: parts nothing matching was offered for still wear whatever the catalogue offered them. The run names eight alternatives per part, so the next run's argument comes out of the last one's output. |
 
 Use both together whenever anything is being judged by eye across frames. An
@@ -430,12 +431,12 @@ asked whether the answer was right, so the rule lives where
 
 Four rules, and each is a way this has been or could be wrong:
 
-**A mesh must be authored for the skeleton it hangs on.** Everything is hung on
-`auskel_cres`, so an entry must be named for an adult male — `ambody`, `amface`,
-`amhair`, `amtop`, `ambottom`. A child's body resolves perfectly and comes apart
-on the first pose, which does not read as wrong clothes. 1578 of 1884 entries
-are refused by this one rule, which is what a catalogue covering every age and
-gender should look like from an adult male's point of view.
+**A mesh must be authored for the skeleton it hangs on.** An entry's name must
+begin with this Sim's own age and gender — `ambody`, `cfhair`, `tftop`. A
+child's body resolves perfectly and comes apart on the first pose, which does
+not read as wrong clothes. Around 1500 of 1884 entries are refused by this one
+rule whoever the Sim is, which is what a catalogue covering every age and gender
+should look like from any one person's point of view.
 
 **The mark is matched anywhere in the name, not at the front.** Every CAS entry
 on this disc is called `CASIE_amface_s1`, so anchoring finds nothing at all.
@@ -577,6 +578,69 @@ look like two from the bottom half of the function. Writing it as two made every
 reference one byte short: a CRES read its first block correctly and then took
 the middle of its second block for a block type. That is what authoring a format
 catches that reading one does not.
+
+## Who the Sim is
+
+`--sim=am` is an adult male, `af` an adult female, `cu` a child, `tf` a teen
+girl, `ef` an elder woman. All of it is composed from those two characters:
+
+```
+engine: building a ef Sim — euskel_cres and efBodyNaked_cres, efFace_cres,
+        efHairBald_cres
+```
+
+The four names were four string literals, which is four places for one decision
+and is why the engine could draw exactly one person. A part is the age and
+gender followed by what it is; the skeleton is the age followed by `uskel`,
+because one skeleton serves both genders — which is what `auskel` being unisex
+means.
+
+**The disc is asked which of them it has, and it costs nothing to ask.** The
+index is already in memory and a name is a hash, so this is free, and which ages
+an install carries is a question about that install:
+
+```
+engine:   buskel_cres — on this disc, wearing bu(bfh);
+engine:   puskel_cres — on this disc, wearing pu(bfh);
+engine:   cuskel_cres — on this disc, wearing cu(bfh);
+engine:   tuskel_cres — on this disc, wearing tm(bfh); tf(bfh);
+engine:   yuskel_cres — NOT on this disc; wearing nothing
+engine:   auskel_cres — on this disc, wearing am(bfh); af(bfh);
+engine:   euskel_cres — NOT on this disc; wearing em(bf); ef(bf);
+```
+
+It contradicted the rule twice in one line, which is the usual result here.
+
+**An elder has no skeleton of its own.** There is no `euskel_cres` and there are
+`emBodyNaked_cres` and `efBodyNaked_cres`, so an elder is an adult skeletally
+and differs only in the meshes hung on it. The fallback is on what the index
+holds rather than on a list of ages known to be special, and it says so out
+loud — a Sim posed by the wrong skeleton does not read as a wrong pose so much
+as a body coming apart, so a silent substitution would be worse than none.
+
+**An elder has no bald scalp either**, and the assembly used to demand all four
+names. That cost a whole age to save a bald head, on a Sim the catalogue is
+about to put hair on anyway. The gate is now "at least one thing to draw": every
+hop already skips a part whose name is not on the disc, and the skeleton hop
+already reports its own absence.
+
+**The youngest ages are unisex and only spelled that way.** A baby is `bu` and
+there is no `bm`, so a probe that only tried `m` and `f` would report the disc
+as carrying no babies at all.
+
+**A face carrying no tone is never worn.** `tfface_alien` and
+`CASIE_tfface_CASmannequin` are the only two teen-female faces the sample
+reaches, and both sit in the face slot beside every real face. A rule that only
+asked "is this the right tone" ranked them level with a real face of the wrong
+one, so a teenager came out **green** while the face she already had was
+correct. The part already has a face and the stand-in paints it in her own tone,
+so the wardrobe's job here is to improve on that — which is the face's version
+of a body not wearing `_nude` and a scalp not wearing `hairbald`. What a part
+already wears is the floor, and something that cannot beat it is not an
+improvement.
+
+Three steps and not two, because *wrong colour* and *not a person* are different
+answers: the right tone beats another real tone beats no tone at all.
 
 ## The skeleton, the bind pose, and posing
 
@@ -731,9 +795,6 @@ the browser to test it.
   type says what is missing: `SimSkin` composites a garment over the Sim's own
   skin tone, and this draws only the top layer. Every dressed Sim shows it.
   **It is the next thing to do here.**
-- **Only an adult male can be dressed.** The four names the assembly starts from
-  are his, so the wardrobe's rule is his too. Every other age and gender is on
-  the disc and refused, counted, by name of rule.
 - **No adult male face at the body's tone turned up in the sample**, so the face
   is worn at whatever tone did and repainted to the body's. It looks right for
   the wrong reason, which is the kind of thing this project has decided twice
