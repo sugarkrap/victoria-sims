@@ -466,6 +466,7 @@ int main(int argumentCount, char **argumentValues)
     Boolean runHeadlessCheck = BOOLEAN_FALSE;
     Boolean cameraIsStill = BOOLEAN_FALSE;
     Boolean menuIsOpen = BOOLEAN_FALSE;
+    Unsigned32 menuPage = 0U;
     /* Half a turn, which is a Sim's front. Nought is its back. */
     Real32 cameraAngleDegrees = 180.0f;
     Boolean poseIsHeld = BOOLEAN_FALSE;
@@ -505,6 +506,18 @@ int main(int argumentCount, char **argumentValues)
             /* One deformation channel, held at full. The run's own log lists
                the channels and their numbers. */
             heldMorphChannel = (Unsigned32)stringParseUnsigned(argument + stringLength("--morph="));
+        }
+        else if (stringStartsWith(argument, "--menu=") == BOOLEAN_TRUE)
+        {
+            /* Which page to open on, for the same reason --menu exists at all:
+               a page nobody can click their way to is a page nobody can
+               capture. */
+            const char *page = argument + stringLength("--menu=");
+
+            menuIsOpen = BOOLEAN_TRUE;
+            menuPage = stringEqualsIgnoringCase(page, "clothing")
+                           ? 1U
+                           : (stringEqualsIgnoringCase(page, "animation") ? 2U : 0U);
         }
         else if (stringEquals(argument, "--menu") == BOOLEAN_TRUE)
         {
@@ -599,6 +612,7 @@ int main(int argumentCount, char **argumentValues)
     configuration.wornName = wornName;
     configuration.simArchetype = simArchetype;
     configuration.menuIsOpen = menuIsOpen;
+    configuration.menuPage = menuPage;
 
     if (discPath != NULL_POINTER)
     {

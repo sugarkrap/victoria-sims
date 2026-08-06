@@ -105,6 +105,7 @@ Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPi
     configuration.wornName = NULL_POINTER;
     configuration.simArchetype = NULL_POINTER;
     configuration.menuIsOpen = BOOLEAN_FALSE;
+    configuration.menuPage = 0U;
 
     return (Unsigned32)engineInitialize(&configuration);
 }

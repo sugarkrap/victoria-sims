@@ -86,6 +86,9 @@ typedef struct EngineConfiguration
      * runner, this one — otherwise has no way to see it at all. `--menu` is how
      * to ask from the command line. */
     Boolean menuIsOpen;
+    /* Which page it opens on: 0 body, 1 clothing, 2 animation. Only read when
+       menuIsOpen, and `--menu=clothing` is how to ask. */
+    Unsigned32 menuPage;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);

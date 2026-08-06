@@ -51,7 +51,7 @@ The Linux binary takes:
 | `--still-pose[=TICK]` | Holds the animation on one frame instead of playing it. |
 | `--morph=N` | Holds deformation channel N at full strength instead of sweeping. The run's log lists the channels and their numbers. |
 | `--sim=CODE` | Which Sim to build: an age and a gender as the catalogue spells them — `am`, `af`, `cu`, `tf`, `em`. Every one of the four names is composed from it, and the run reports which archetypes the disc actually carries. Defaults to `am`. |
-| `--menu` | Opens the debug menu at start rather than waiting for an `m`. A menu is the one part of an engine that cannot be judged from a log, and a machine with no way to synthesise a keystroke has no other way to see it. |
+| `--menu[=PAGE]` | Opens the debug menu at start rather than waiting for an `m`, optionally on `body`, `clothing` or `animation`. A menu is the one part of an engine that cannot be judged from a log, and a machine with no way to synthesise a keystroke has no other way to see it — nor to reach a page that is not the first. |
 | `--wear=NAME` | Dresses the Sim in the catalogue entry whose name holds NAME. A preference, not a filter: parts nothing matching was offered for still wear whatever the catalogue offered them. The run names eight alternatives per part, so the next run's argument comes out of the last one's output. |
 
 Use both together whenever anything is being judged by eye across frames. An
@@ -958,11 +958,9 @@ Mouse and keys both. X11 motion, button and leave events natively; canvas events
 on the web, scaled by the ratio between the canvas's layout size and its render
 size — without which the menu is hit accurately in one corner and nowhere else.
 
-**Still to do.** The clothing page is a list the load does not build yet, so its
-tiles are empty. Thumbnails are stand-ins everywhere: `thumbnailForRow` in
-engineCore is the hook, and the answer for clothing is already in the engine —
-the garment textures are read to paint the Sim, and a thumbnail is one of them
-scaled down.
+**Still to do.** Thumbnails are stand-ins everywhere. `thumbnailForRow` in
+engineCore is the hook and returns false for every row; see below for what a
+real one costs.
 
 
 ## engineCore, and what is still in it
@@ -1052,3 +1050,47 @@ soft-float library in the objects. It was confirmed to work by putting a float
 in `glyphRaster.c` and watching it fail on `__aeabi_fmul`. All six are clean.
 `renderSoftware.c` has nine such calls and is not checked — it projects a camera
 and shades a triangle, which is floating point on purpose.
+
+
+## The clothing page
+
+It lists every garment this Sim could wear — 227 of them on the tested ISO for
+an adult male — and choosing one puts it on.
+
+**Where the list comes from.** Not a second walk of the catalogue. The wardrobe
+already makes this decision for every entry during the walk it does: right age,
+right gender, right slot, not the thing the part already wears. It kept the
+ones it passed over so a run could name them in its log, eight per part, which
+is exactly the right number to print and the wrong number to keep. The store
+behind that line is now 128 a part and the log still stops at eight, saying how
+many more the menu has. `fillTheClothingPage` reads them straight out.
+
+Making that decision twice would have been two answers to one question, and the
+second one would eventually have disagreed with the first.
+
+**How a choice sticks.** `wardrobeWant(wardrobe, part, name)` — a garment asked
+for by name, for one part, exactly. The single `wanted` the wardrobe already had
+is a substring matched against every part, which is right for `--wear=cowboy`
+typed at a shell and wrong for a menu: a top and a bottom get chosen one after
+the other and both have to stay on. One preference between them would make the
+second choice forget the first.
+
+The ranking is now asked-for-by-name (8) over asked-for-by-fragment (4) over the
+right skin tone (2 or 1), so a name taken off a list of what the disc actually
+carries beats a guess, and nothing met later in the walk displaces either.
+
+Choosing restarts the assembly, which is what the body page already did — the
+wardrobe is decided during the catalogue walk and nowhere else, so a different
+garment means walking it again. The index is kept, so it costs about a second.
+The page is rebuilt from that walk and the cursor is put back where it was,
+because losing your place in a list of 227 on the very action that comes of
+finding something is not a menu anybody can use.
+
+**What is not done: real thumbnails.** Every tile is still a checkerboard
+stand-in. The honest reason is that a garment's picture is four reads away from
+its name — entry, key list, material, texture — and then a decode, which is the
+same chain `stepThePaint` walks for the handful of garments actually worn. Doing
+it for a page of tiles means a lazy cache (say 64 slots of 48 by 48, about
+590 KB) filled one tile a step for the visible page only, driven by the same
+state machine, because on the web each of those reads is answered a frame later.
+That is a session's work and it is written down here rather than half done.

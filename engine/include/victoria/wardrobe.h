@@ -42,7 +42,16 @@
  * The counts alone say a hundred and fifty other garments fitted and name none
  * of them, which leaves a run steered by --wear with nothing to steer at. Eight
  * a part is enough to pick from and few enough not to bury the report. */
-#define WARDROBE_ALTERNATIVE_LIMIT 8U
+/* How many candidates a part remembers passing over.
+ *
+ * Was eight, which is the right number to LOG — a run naming eight alternatives
+ * per part gives the next run's `--wear=` argument without burying the console.
+ * It is the wrong number to keep, because the same list is what the menu's
+ * clothing page offers, and a page of eight garments out of the several hundred
+ * a disc carries for each slot is not a wardrobe, it is a sample. The log still
+ * stops at eight; this is the store behind it. */
+#define WARDROBE_ALTERNATIVE_LIMIT 128U
+#define WARDROBE_ALTERNATIVES_WORTH_LOGGING 8U
 /* An age and a gender, as the catalogue spells them: "am" is an adult male,
    "cf" a child female, "tu" a teen of neither. Two characters and a
    terminator, with room over. */
@@ -65,6 +74,7 @@ typedef struct Wardrobe
     /* Whether the held choice is one the caller asked for by name. It outranks
        the tone, and nothing outranks it. */
     Boolean nameWanted[WARDROBE_PART_COUNT];
+    Boolean askedForByName[WARDROBE_PART_COUNT];
     char names[WARDROBE_PART_COUNT][WARDROBE_NAME_LIMIT];
 
     /* Who this Sim is, and what each part's name must therefore contain.
@@ -105,6 +115,22 @@ typedef struct Wardrobe
        counted, because a name here is what the next run's --wear takes. */
     char alternatives[WARDROBE_PART_COUNT][WARDROBE_ALTERNATIVE_LIMIT][WARDROBE_NAME_LIMIT];
     Unsigned32 alternativeCount[WARDROBE_PART_COUNT];
+    /* Candidates a part passed over after its store was full. Counted, because
+       a clothing page that stops at a hundred and twenty-eight and says nothing
+       looks exactly like a disc that carries no more. */
+    Unsigned32 alternativesBeyondRoom[WARDROBE_PART_COUNT];
+
+    /* A garment asked for by name for ONE part.
+     *
+     * The single `wanted` above is a substring matched against every part, which
+     * is right for a command-line argument — somebody types `cowboy` and means
+     * whatever that turns out to be. It is wrong for a menu, where a top and a
+     * bottom are chosen one after the other and both have to stick: a single
+     * preference would have the second choice forget the first.
+     *
+     * Exact, and outranking the substring, so choosing a garment from a list of
+     * real names beats a guess typed at a shell. */
+    char wantedPerPart[WARDROBE_PART_COUNT][WARDROBE_NAME_LIMIT];
 } Wardrobe;
 
 /* Empties it and records what to look for.
@@ -116,6 +142,12 @@ typedef struct Wardrobe
  * tone may be null or empty. */
 void wardrobeBegin(Wardrobe *wardrobe, const char *archetype, const char *wanted,
                    const char *tone);
+
+/* Asks for one named garment for one part, exactly. Call after wardrobeBegin,
+   which clears these. An empty name asks for nothing, which is how a choice is
+   taken back. */
+void wardrobeWant(Wardrobe *wardrobe, Unsigned32 part, const char *entryName);
+const char *wardrobeGetWanted(const Wardrobe *wardrobe, Unsigned32 part);
 
 /* Offers one catalogue entry. Returns the part it should dress — in which case
    the caller records whatever it holds for that part, replacing what it held
@@ -130,6 +162,8 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
    log, and for a check to read the rule out of the same place it is applied
    from. The mark depends on who the Sim is; the slot does not. */
 const char *wardrobeGetPartMark(const Wardrobe *wardrobe, Unsigned32 part);
+/* What a part is called, in words — "body", "face", "hair", "top", "bottom". */
+const char *wardrobeGetPartName(Unsigned32 part);
 Unsigned32 wardrobeGetPartOutfit(Unsigned32 part);
 /* What the part will not wear whatever else recommends it. */
 const char *wardrobeGetPartWorn(Unsigned32 part);
@@ -160,5 +194,7 @@ const char *wardrobeGetChosenName(const Wardrobe *wardrobe, Unsigned32 part);
 Unsigned32 wardrobeGetChosenCount(const Wardrobe *wardrobe);
 /* One of the entries this part could have worn instead. Empty past the end. */
 const char *wardrobeGetAlternative(const Wardrobe *wardrobe, Unsigned32 part, Unsigned32 which);
+Unsigned32 wardrobeGetAlternativeCount(const Wardrobe *wardrobe, Unsigned32 part);
+Unsigned32 wardrobeGetAlternativesBeyondRoom(const Wardrobe *wardrobe, Unsigned32 part);
 
 #endif

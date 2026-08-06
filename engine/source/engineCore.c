@@ -440,6 +440,20 @@ static char menuBodyRows[MENU_BODY_CAPACITY][DEBUG_MENU_NAME_LIMIT];
 static char menuBodyArchetypes[MENU_BODY_CAPACITY][WARDROBE_ARCHETYPE_LIMIT];
 static char menuText[2048];
 
+/* The clothing page, and what each of its rows means.
+ *
+ * The wardrobe already remembers every entry it could have worn — that is what
+ * a run's "or any of —" line is made of, and what `--wear=` exists to be
+ * pointed at. This is the same list, all of it, laid out as a page: five slots'
+ * worth of garments one after another, each row knowing which part it dresses
+ * so that choosing one asks for it in the right place.
+ *
+ * Rebuilt whenever the catalogue is walked, because a Sim of a different age
+ * and gender is offered an entirely different wardrobe. */
+#define MENU_CLOTHING_CAPACITY (WARDROBE_PART_COUNT * WARDROBE_ALTERNATIVE_LIMIT)
+static Unsigned8 menuClothingParts[MENU_CLOTHING_CAPACITY];
+static Unsigned32 menuClothingCount = 0U;
+
 /* The animations the menu can offer, and where each one lives.
  *
  * An animation's name is inside the resource — the index holds a hashed key and
@@ -679,6 +693,13 @@ static Unsigned32 simWardrobeOverrideCount[WARDROBE_PART_COUNT];
    the walk meets first, which is one garment out of hundreds — the flag is how
    a run looks at any of the others. */
 static char simWardrobeWanted[WARDROBE_NAME_LIMIT];
+/* One garment asked for per part, chosen from the menu.
+ *
+ * Separate from the single `simWardrobeWanted` above, which is the command
+ * line's substring and applies to every part at once. A menu chooses a top and
+ * then a bottom, and both have to stick — one preference between them would
+ * make the second choice forget the first. */
+static char simWardrobeWantedPart[WARDROBE_PART_COUNT][WARDROBE_NAME_LIMIT];
 /* Set once the wardrobe has been put on, which is what stops the assembly
    walking back into the catalogue and round again. */
 static Boolean simWardrobeWorn = BOOLEAN_FALSE;
@@ -2513,15 +2534,100 @@ static void reportWardrobe(void)
 
             message[0] = '\0';
             stringAppend(message, sizeof(message), "engine:     or any of —");
-            for (which = 0U; which < simWardrobe.alternativeCount[part]; which++)
+            Unsigned32 shown = simWardrobe.alternativeCount[part];
+
+            /* Eight, however many are kept. The store behind this is what the
+               menu's clothing page offers and runs to hundreds; a log line
+               that long buries everything else the walk says, and the point of
+               naming any of them here is to give --wear something to be
+               pointed at. */
+            if (shown > (Unsigned32)WARDROBE_ALTERNATIVES_WORTH_LOGGING)
+            {
+                shown = (Unsigned32)WARDROBE_ALTERNATIVES_WORTH_LOGGING;
+            }
+            for (which = 0U; which < shown; which++)
             {
                 stringAppend(message, sizeof(message), " ");
                 stringAppend(message, sizeof(message),
                              wardrobeGetAlternative(&simWardrobe, part, which));
                 stringAppend(message, sizeof(message), ";");
             }
+            if (simWardrobe.alternativeCount[part] > shown ||
+                wardrobeGetAlternativesBeyondRoom(&simWardrobe, part) > 0U)
+            {
+                stringAppend(message, sizeof(message), " and ");
+                appendCount(message, sizeof(message),
+                            simWardrobe.alternativeCount[part] - shown +
+                                wardrobeGetAlternativesBeyondRoom(&simWardrobe, part));
+                stringAppend(message, sizeof(message), " more, which the menu lists");
+            }
             platformLogMessage(message);
         }
+    }
+}
+
+/* Everything this Sim could wear, as a page.
+ *
+ * Built from what the wardrobe passed over rather than from a second walk of
+ * the catalogue: the walk already made this decision for every entry — right
+ * age, right gender, right slot, not the thing the part already wears — and
+ * throwing that away to make it again would be two answers to one question.
+ *
+ * The parts run in the order the wardrobe names them, so a page reads body,
+ * face, hair, top, bottom, which is roughly how somebody dresses. The row in
+ * effect for each part is marked, and there are five of those on one page
+ * against the menu's one marker — so the marker goes on whichever the cursor is
+ * nearest, which is the one being looked at. */
+static void fillTheClothingPage(void)
+{
+    Unsigned32 part;
+    /* Where the reader was. Choosing a garment rebuilds this page from a fresh
+       walk, and a cursor thrown back to the top every time would make browsing
+       a list of several hundred impossible — you would lose your place on the
+       very action that comes of finding it. */
+    Unsigned32 wasAt = debugMenuGetCursor(&debugMenu, DEBUG_MENU_PAGE_CLOTHING);
+
+    debugMenuClearPage(&debugMenu, DEBUG_MENU_PAGE_CLOTHING);
+    menuClothingCount = 0U;
+    for (part = 0U; part < (Unsigned32)WARDROBE_PART_COUNT; part++)
+    {
+        Unsigned32 which;
+        Unsigned32 held = wardrobeGetAlternativeCount(&simWardrobe, part);
+
+        for (which = 0U; which < held; which++)
+        {
+            const char *name = wardrobeGetAlternative(&simWardrobe, part, which);
+            Unsigned32 row;
+
+            if (name[0] == '\0' || menuClothingCount >= (Unsigned32)MENU_CLOTHING_CAPACITY)
+            {
+                continue;
+            }
+            row = debugMenuAddRow(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, name);
+            if (row == (Unsigned32)DEBUG_MENU_NONE)
+            {
+                continue;
+            }
+            menuClothingParts[row] = (Unsigned8)part;
+            menuClothingCount = row + 1U;
+            /* What the part is actually wearing, so the page opens showing the
+               Sim on screen rather than showing a list with nothing marked. */
+            if (wardrobeIsWorn(&simWardrobe, part) &&
+                stringEqualsIgnoringCase(name, wardrobeGetChosenName(&simWardrobe, part)))
+            {
+                debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, row);
+            }
+        }
+    }
+    (void)debugMenuSetCursor(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, wasAt);
+    {
+        char message[256];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the menu offers ");
+        appendCount(message, sizeof(message), menuClothingCount);
+        stringAppend(message, sizeof(message), " garment(s) to choose from");
+        platformLogMessage(message);
     }
 }
 
@@ -3247,6 +3353,7 @@ static SimAssembly stepTheCatalogue(MemorySize marker)
     {
         reportCatalogue();
         reportWardrobe();
+        fillTheClothingPage();
         if (wardrobeGetChosenCount(&simWardrobe) > 0U)
         {
             simWardrobePart = 0U;
@@ -3719,6 +3826,16 @@ static SimAssembly stepThePaint(MemorySize marker)
            body ended up wearing, so a face cannot be chosen for it until a body
            has been painted. */
         wardrobeBegin(&simWardrobe, simArchetype, simWardrobeWanted, simSkinTone);
+        {
+            /* After begin, which clears them. Whatever the menu has been asked
+               for, restated for the walk that is about to happen. */
+            Unsigned32 part;
+
+            for (part = 0U; part < (Unsigned32)WARDROBE_PART_COUNT; part++)
+            {
+                wardrobeWant(&simWardrobe, part, simWardrobeWantedPart[part]);
+            }
+        }
         simHop = SIM_HOP_CATALOGUE;
         catalogueCursor = 0U;
         catalogueStride = 0U;
@@ -6769,6 +6886,7 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     }
     debugMenuInitialize(&debugMenu);
     debugMenuSetOpen(&debugMenu, configuration->menuIsOpen);
+    (void)debugMenuSetPage(&debugMenu, (DebugMenuPage)configuration->menuPage);
     /* Early, and before anything that might fail: the font the engine carries
        with it is what lets a later failure be reported in words on the screen
        rather than only to a terminal nobody is looking at. */
@@ -6812,6 +6930,18 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         {
             debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, rows,
                               MENU_ANIMATION_CAPACITY);
+        }
+    }
+    {
+        char (*rows)[DEBUG_MENU_NAME_LIMIT] = (char (*)[DEBUG_MENU_NAME_LIMIT])
+            memoryArenaAllocate(globalArena,
+                                (MemorySize)MENU_CLOTHING_CAPACITY *
+                                    (MemorySize)DEBUG_MENU_NAME_LIMIT, 1UL);
+
+        if (rows != NULL_POINTER)
+        {
+            debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, rows,
+                              MENU_CLOTHING_CAPACITY);
         }
     }
     composeTheArchetype();
@@ -7179,8 +7309,32 @@ static void applyTheChoice(void)
             }
             break;
 
+        case DEBUG_MENU_PAGE_CLOTHING:
+            if (row < menuClothingCount)
+            {
+                const char *name = debugMenuGetRow(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, row);
+                Unsigned32 part = menuClothingParts[row];
+                char message[256];
+
+                simWardrobeWantedPart[part][0] = '\0';
+                stringAppend(simWardrobeWantedPart[part], (MemorySize)WARDROBE_NAME_LIMIT, name);
+                debugMenuSetInEffect(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, row);
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine: dressing the ");
+                stringAppend(message, sizeof(message), wardrobeGetPartName(part));
+                stringAppend(message, sizeof(message), " in ");
+                stringAppend(message, sizeof(message), name);
+                platformLogMessage(message);
+                /* The whole assembly again, because the wardrobe is decided
+                   during the catalogue walk and nowhere else. The index is
+                   kept, so this costs a second rather than another walk of the
+                   disc. */
+                restartTheAssembly();
+                settleTheSkeleton();
+            }
+            break;
+
         default:
-            /* Clothing is a list the load does not build yet. */
             break;
         }
     }

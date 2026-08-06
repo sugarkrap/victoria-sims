@@ -453,5 +453,108 @@ int main(void)
                   wardrobe.offered == 6U && accounted == wardrobe.offered);
     }
 
+
+    /* ---- asked for by name, one part at a time -------------------------
+     *
+     * The single `wanted` is a substring matched against every part, which is
+     * right for a command line: somebody types "cowboy" and means whatever that
+     * turns out to be. It is wrong for a menu, where a top and a bottom are
+     * chosen one after the other and both have to stick — one preference
+     * between them would make the second choice forget the first. */
+    {
+        Wardrobe menu;
+
+        wardrobeBegin(&menu, "am", "", "s1");
+        wardrobeWant(&menu, WARDROBE_PART_TOP, "amtopcowboyshirt_brownstriped");
+        wardrobeWant(&menu, WARDROBE_PART_BOTTOM, "ambottomshorts_blueplaid");
+        checkThat(&failureCount, "a part remembers what it was asked for",
+                  stringEquals(wardrobeGetWanted(&menu, WARDROBE_PART_TOP),
+                               "amtopcowboyshirt_brownstriped"));
+
+        /* Offered in the order a walk would meet them: something plausible
+           first, then the thing that was actually asked for. */
+        (void)wardrobeOffer(&menu, "amtopplainshirt_s1", 0x04U);
+        (void)wardrobeOffer(&menu, "amtopcowboyshirt_brownstriped", 0x04U);
+        (void)wardrobeOffer(&menu, "ambottomjeans_s1", 0x10U);
+        (void)wardrobeOffer(&menu, "ambottomshorts_blueplaid", 0x10U);
+        checkThat(&failureCount, "and wears it over what it met first",
+                  stringEquals(wardrobeGetChosenName(&menu, WARDROBE_PART_TOP),
+                               "amtopcowboyshirt_brownstriped"));
+        checkThat(&failureCount, "for both parts at once, which one preference could not do",
+                  stringEquals(wardrobeGetChosenName(&menu, WARDROBE_PART_BOTTOM),
+                               "ambottomshorts_blueplaid"));
+
+        /* And nothing displaces it afterwards. A garment chosen from a menu is
+           the most specific thing anybody has said; a walk that met a better
+           tone later and swapped it out would look like the menu being
+           ignored. */
+        (void)wardrobeOffer(&menu, "amtopanothershirt_s1", 0x04U);
+        checkThat(&failureCount, "and a later candidate with the right tone does not displace it",
+                  stringEquals(wardrobeGetChosenName(&menu, WARDROBE_PART_TOP),
+                               "amtopcowboyshirt_brownstriped"));
+
+        /* An exact request beats a fragment, because a name taken off a list of
+           what the disc carries is a better guide than something typed blind. */
+        {
+            Wardrobe both;
+
+            wardrobeBegin(&both, "am", "plain", "s1");
+            wardrobeWant(&both, WARDROBE_PART_TOP, "amtopcowboyshirt_brownstriped");
+            (void)wardrobeOffer(&both, "amtopplainshirt_s1", 0x04U);
+            (void)wardrobeOffer(&both, "amtopcowboyshirt_brownstriped", 0x04U);
+            checkThat(&failureCount, "an exact request outranks a fragment",
+                      stringEquals(wardrobeGetChosenName(&both, WARDROBE_PART_TOP),
+                                   "amtopcowboyshirt_brownstriped"));
+        }
+
+        /* Taking the choice back. An empty name asks for nothing. */
+        wardrobeBegin(&menu, "am", "", "s1");
+        wardrobeWant(&menu, WARDROBE_PART_TOP, "");
+        (void)wardrobeOffer(&menu, "amtopplainshirt_s1", 0x04U);
+        checkThat(&failureCount, "and asking for nothing leaves the catalogue to decide",
+                  stringEquals(wardrobeGetChosenName(&menu, WARDROBE_PART_TOP),
+                               "amtopplainshirt_s1"));
+        checkThat(&failureCount, "a part past the end is refused rather than written past",
+                  stringEquals(wardrobeGetWanted(&menu, 99U), ""));
+    }
+
+    /* ---- what it passed over ------------------------------------------
+     *
+     * The same list the menu's clothing page is made of, so it has to hold more
+     * than the handful a log line wants — and say so when it cannot. */
+    {
+        Wardrobe many;
+        Unsigned32 index;
+
+        wardrobeBegin(&many, "am", "", "s1");
+        for (index = 0U; index < (Unsigned32)WARDROBE_ALTERNATIVE_LIMIT + 5U; index++)
+        {
+            char name[64];
+            char number[16];
+
+            name[0] = '\0';
+            (void)stringAppend(name, sizeof(name), "amtopshirt");
+            (void)stringWriteUnsigned(number, sizeof(number), index);
+            (void)stringAppend(name, sizeof(name), number);
+            (void)stringAppend(name, sizeof(name), "_s1");
+            (void)wardrobeOffer(&many, name, 0x04U);
+        }
+        checkThat(&failureCount, "a part remembers as many candidates as there is room for",
+                  wardrobeGetAlternativeCount(&many, WARDROBE_PART_TOP) ==
+                      (Unsigned32)WARDROBE_ALTERNATIVE_LIMIT);
+        checkThat(&failureCount, "and counts the ones it could not, rather than dropping them "
+                                 "in silence",
+                  wardrobeGetAlternativesBeyondRoom(&many, WARDROBE_PART_TOP) == 5U);
+        checkThat(&failureCount, "and every one of them can be read back by name",
+                  stringEquals(wardrobeGetAlternative(&many, WARDROBE_PART_TOP, 0U),
+                               "amtopshirt0_s1") &&
+                      stringEquals(wardrobeGetAlternative(&many, WARDROBE_PART_TOP,
+                                                          (Unsigned32)WARDROBE_ALTERNATIVE_LIMIT -
+                                                              1U),
+                                   "amtopshirt127_s1"));
+        checkThat(&failureCount, "a part that was offered nothing has nothing to offer",
+                  wardrobeGetAlternativeCount(&many, WARDROBE_PART_HAIR) == 0U);
+    }
+
     return checkSummarize(failureCount, "wardrobe");
 }
