@@ -963,3 +963,38 @@ tiles are empty. Thumbnails are stand-ins everywhere: `thumbnailForRow` in
 engineCore is the hook, and the answer for clothing is already in the engine —
 the garment textures are read to paint the Sim, and a thumbnail is one of them
 scaled down.
+
+
+## engineCore, and what is still in it
+
+It was 7456 lines with `engineStepDiscLoad` accounting for 2010 of them in one
+function. Two things have been done about that.
+
+**The dispatcher is 86 lines.** Every phase of the load — probe, installer,
+content, index, fetch, seek, and the rest — was written out inside one `if`
+chain, because each capability added since the bootstrap needed a turn of that
+loop and another branch was always the cheapest way to get one. Each is now a
+named function: `probeTheDisc`, `openTheInstaller`, `searchTheContent`,
+`seekTheSim`, `seekTheAnimation` and so on. Nothing about the state changed —
+they still share it — only where each one is written down, so reading any of
+them no longer means scrolling past the other nine.
+
+**The text is its own module.** `engineText.c` owns the order of things between
+a font on a disc and words on a screen: try the cache, then the disc, then the
+font we carry. It needs four things from the rest of the engine and is handed
+all four — an arena, a file system, the menu's state, the words — so it knows
+nothing about assembling a Sim and nothing about it knows anything about text.
+
+That leaves engineCore at 7266 lines, of which the honest remainder is the Sim
+assembly: `stepTheSidecar` at 392, `stepTheSim` at 346, `stepTheCatalogue`,
+`stepThePaint`, `stepTheWardrobe`, `stepTheFollow`, and about two dozen
+statics they all read — `simParts`, `simRange*`, `simWardrobe*`, `discSearch`,
+`simIndex`. Moving those to a `simAssembly.c` is not a file move; it needs that
+state named and passed explicitly, or the new file reaches back through a header
+full of `extern`s, which is worse than one big file. That is a session of its
+own and it has not been started.
+
+A measurement note, since it misled once: counting a function by the distance to
+the next line that looks like a definition is wrong in this file, because the
+declaration blocks between functions are hundreds of lines long.
+`engineReportDiscCatalogue` measures 635 that way and is 63.

@@ -50,6 +50,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/fontAtlas.c \
                   engine/source/interfaceSurface.c \
                   engine/source/interfaceMenu.c \
+                  engine/source/engineText.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \

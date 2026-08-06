@@ -20,8 +20,7 @@
 #include "victoria/debugMenu.h"
 #include "victoria/resourceCache.h"
 #include "victoria/fontAtlas.h"
-#include "victoria/interfaceMenu.h"
-#include "victoria/interfaceSurface.h"
+#include "victoria/engineText.h"
 #include "utils/checksum.h"
 
 /* How often the text report is regenerated. Formatting is cheap but not free,
@@ -4598,442 +4597,2014 @@ static EngineDiscLoadStatus stepTheAnimationList(void)
     return ENGINE_DISC_WORKING;
 }
 
-/* ---- The text on the screen -------------------------------------------
- *
- * The debug menu used to be printed to a terminal, which is a fine place for it
- * right up until somebody runs the game the way a game is run. It is drawn now,
- * with the game's own font, read off the disc the way its meshes and textures
- * are.
- *
- * The order of preference is the whole of the design here:
- *
- *   1. a sheet of glyphs left behind by a previous run, read back from the
- *      platform's cache. Nothing is rasterized and the font file is not even
- *      opened. This is the case that matters for the slow end of the device
- *      ladder, where it turns a second of start-up into nothing at all.
- *   2. the disc's own font, rasterized once and then written to that cache so
- *      the next run takes route one.
- *   3. the font the engine carries with it, five pixels by seven, which is what
- *      draws before a disc is open and on a disc with no font on it.
- *
- * A browser has no cache to write to and says so, which lands it on route two
- * every session — and the sheet then lives in an arena for as long as the page
- * does, which is exactly the lifetime an arena is good at. */
-
-#define TEXT_PIXEL_SIZE 14U
-#define TEXT_SHEET_WIDTH 256U
-#define TEXT_SHEET_HEIGHT 256U
-/* Big enough for the menu at its largest and for the one-line hint at its
-   smallest. Four bytes a pixel, so this is a megabyte and a half of the budget
-   — the price of an interface that draws the same on a machine with shaders and
-   one without. */
-#define INTERFACE_LIMIT_WIDTH 768U
-#define INTERFACE_LIMIT_HEIGHT 512U
-
-/* All transient: taken from the arena while a font is being turned into pixels
-   and given straight back. Only the sheet and the surface outlive the build. */
-#define FONT_FILE_CAPACITY (320UL * 1024UL)
-#define FONT_CACHE_CAPACITY (80UL * 1024UL)
-#define FONT_POINT_LIMIT 1024U
-#define FONT_CONTOUR_LIMIT 64U
-#define GLYPH_EDGE_LIMIT 4096U
-#define GLYPH_CROSSING_LIMIT 256U
-
-static FontAtlas textAtlas;
-static InterfaceSurface interfaceSurface;
-static InterfaceMenuLayout menuLayout;
-/* What the pointer is over, and what it was over last time the interface was
-   drawn. A button that lights up under the pointer has to be redrawn when the
-   pointer moves off it as well as onto it. */
-static InterfaceMenuHit menuHovered;
-static Integer32 pointerX = -1;
-static Integer32 pointerY = -1;
-/* Which composition the backend has been given, and what the menu said when it
-   was made. Both compared rather than assumed, so a menu nobody is touching
-   costs one comparison a frame instead of a layout and an upload. */
-static Unsigned32 interfaceRevisionSent = 0U;
-static char menuTextDrawn[2048];
-static InterfaceMenuHit menuHoveredDrawn;
-static Unsigned32 interfaceWindowWidth = 1280U;
-static Unsigned32 interfaceWindowHeight = 720U;
-static Boolean textIsReady = BOOLEAN_FALSE;
-/* Whether the question "is there a font on this disc" has been answered. Asked
-   once; the answer may well be no. */
-static Boolean fontIsSettled = BOOLEAN_FALSE;
-
-/* The font the engine carries with it. Built before anything else so that a
-   failure further down still leaves something able to say so. */
-static void settleTheText(void)
+static EngineDiscLoadStatus seekTheSim(void)
 {
-    Unsigned8 *sheet = (Unsigned8 *)memoryArenaAllocate(
-        globalArena, (MemorySize)TEXT_SHEET_WIDTH * (MemorySize)TEXT_SHEET_HEIGHT, 16UL);
-    Unsigned8 *pixels = (Unsigned8 *)memoryArenaAllocate(
-        globalArena,
-        (MemorySize)INTERFACE_LIMIT_WIDTH * (MemorySize)INTERFACE_LIMIT_HEIGHT *
-            (MemorySize)INTERFACE_BYTES_PER_PIXEL,
-        16UL);
-
-    fontAtlasBind(&textAtlas, sheet, TEXT_SHEET_WIDTH, TEXT_SHEET_HEIGHT);
-    interfaceSurfaceBind(&interfaceSurface, pixels, INTERFACE_LIMIT_WIDTH,
-                         INTERFACE_LIMIT_HEIGHT);
-    menuHovered.target = INTERFACE_MENU_NOTHING;
-    menuHovered.value = 0U;
-    menuHoveredDrawn = menuHovered;
-    if (sheet == NULL_POINTER || pixels == NULL_POINTER)
-    {
-        platformLogMessage("engine: no room for a glyph sheet, so nothing will be drawn in "
-                           "words");
-        return;
-    }
-    if (!fontAtlasBuildFromBuiltin(&textAtlas, 2U))
-    {
-        return;
-    }
-    textIsReady = BOOLEAN_TRUE;
-    menuTextDrawn[0] = '\0';
-}
-
-/* Which file on this disc to read a font out of.
- *
- * Preferring the one the game's own FontStyle.ini names as its default, and
- * falling back to whichever turns up first. Both are guesses about a disc
- * somebody else laid out, so the name of what was chosen is logged — a wrong
- * guess should be readable rather than mysterious. */
-static Integer32 findAFontOnThisDisc(void)
-{
-    Integer32 firstFound = -1;
-    Unsigned32 index;
-
-    for (index = 0U; index < discFileSystem->entryCount; index++)
-    {
-        const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, index);
-
-        if (entry == NULL_POINTER || !stringEndsWithIgnoringCase(entry->path, ".mxf") ||
-            entry->sizeInBytes == 0ULL || entry->sizeInBytes > (Unsigned64)FONT_FILE_CAPACITY)
-        {
-            continue;
-        }
-        if (stringContainsIgnoringCase(entry->path, "benguiat"))
-        {
-            return (Integer32)index;
-        }
-        if (firstFound < 0)
-        {
-            firstFound = (Integer32)index;
-        }
-    }
-    return firstFound;
-}
-
-/* What a cached sheet was made from: which file, how long it is, and at what
- * size it was drawn.
- *
- * Not a checksum of the font's bytes, deliberately — that would mean reading a
- * hundred and eighty kilobytes off the disc before discovering that the answer
- * was already on hand, which is most of the cost this exists to avoid. A path
- * and a length identify a file on a pressed disc perfectly well. */
-static Unsigned32 markForFont(const VirtualFileEntry *entry)
-{
-    Unsigned32 mark = checksumCrc32((const Unsigned8 *)entry->path, stringLength(entry->path));
-
-    mark = (mark * 31U) + (Unsigned32)(entry->sizeInBytes & 0xFFFFFFFFULL);
-    mark = (mark * 31U) + (Unsigned32)TEXT_PIXEL_SIZE;
-    /* The sheet's shape too. A build compiled with a different one refuses the
-       block anyway, but refusing it by the mark says why rather than looking
-       like a damaged file. */
-    mark = (mark * 31U) + (Unsigned32)TEXT_SHEET_WIDTH;
-    mark = (mark * 31U) + (Unsigned32)TEXT_SHEET_HEIGHT;
-    /* Nought is what an atlas built from the font we carry ourselves reports,
-       and the two must never be mistaken for each other. */
-    return (mark == 0U) ? 1U : mark;
-}
-
-static void nameTheCache(Unsigned32 mark, char *destination, MemorySize capacity)
-{
-    char digits[24];
-
-    destination[0] = '\0';
-    stringAppend(destination, capacity, "glyphs");
-    (void)stringWriteHexadecimal(digits, sizeof(digits), (Unsigned64)mark, 8UL);
-    stringAppend(destination, capacity, digits);
-}
-
-/* Rasterizes the font at the given index and keeps the result. Every array it
- * needs comes out of the arena and goes back into it before this returns; what
- * survives is the sheet, which was allocated once at start-up.
- *
- * Answers false when the bytes have not arrived yet, which on a browser is the
- * ordinary case and not a failure. */
-static Boolean buildTheAtlasFromDisc(Unsigned32 fileIndex, Unsigned32 mark)
-{
-    MemorySize marker = memoryArenaGetMarker(globalArena);
-    const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, fileIndex);
-    MemorySize size = (MemorySize)entry->sizeInBytes;
-    Unsigned8 *bytes = (Unsigned8 *)memoryArenaAllocate(globalArena, size, 8UL);
-    GlyphRasterEdge *edges = (GlyphRasterEdge *)memoryArenaAllocate(
-        globalArena, (MemorySize)GLYPH_EDGE_LIMIT * sizeof(GlyphRasterEdge), 8UL);
-    Integer32 *crossingX = (Integer32 *)memoryArenaAllocate(
-        globalArena, (MemorySize)GLYPH_CROSSING_LIMIT * sizeof(Integer32), 4UL);
-    Integer32 *crossingDirection = (Integer32 *)memoryArenaAllocate(
-        globalArena, (MemorySize)GLYPH_CROSSING_LIMIT * sizeof(Integer32), 4UL);
-    Unsigned16 *rowCoverage = (Unsigned16 *)memoryArenaAllocate(
-        globalArena, (MemorySize)TEXT_SHEET_WIDTH * sizeof(Unsigned16), 2UL);
-    Integer32 *pointX = (Integer32 *)memoryArenaAllocate(
-        globalArena, (MemorySize)FONT_POINT_LIMIT * sizeof(Integer32), 4UL);
-    Integer32 *pointY = (Integer32 *)memoryArenaAllocate(
-        globalArena, (MemorySize)FONT_POINT_LIMIT * sizeof(Integer32), 4UL);
-    Unsigned8 *onCurve = (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_POINT_LIMIT, 1UL);
-    Unsigned32 *contourEnds = (Unsigned32 *)memoryArenaAllocate(
-        globalArena, (MemorySize)FONT_CONTOUR_LIMIT * sizeof(Unsigned32), 4UL);
-    FontReader font;
-    FontGlyphOutline outline;
-    GlyphRasterizer rasterizer;
-    VirtualReadResult read;
     char message[512];
 
-    if (bytes == NULL_POINTER || edges == NULL_POINTER || crossingX == NULL_POINTER ||
-        crossingDirection == NULL_POINTER || rowCoverage == NULL_POINTER ||
-        pointX == NULL_POINTER || pointY == NULL_POINTER || onCurve == NULL_POINTER ||
-        contourEnds == NULL_POINTER)
+    const ResourceIndexEntry *entry;
+    MemorySize marker;
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    if (simIndexBuilding)
     {
-        memoryArenaRewindToMarker(globalArena, marker);
-        platformLogMessage("engine: no room to rasterize a font, keeping the built-in one");
-        return BOOLEAN_TRUE;
+        if (resourceIndexStep(&simIndex) == RESOURCE_INDEX_WORKING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        simIndexBuilding = BOOLEAN_FALSE;
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), simIndex.countByType[0]);
+        stringAppend(message, sizeof(message), " transform tree(s) across ");
+        appendCount(message, sizeof(message), simIndex.filesIndexed);
+        stringAppend(message, sizeof(message), " package(s) to look among");
+        platformLogMessage(message);
+        reportArchetypesOnThisDisc();
+        settleTheSkeleton();
+        return ENGINE_DISC_WORKING;
     }
 
-    read = virtualFileSystemReadFile(discFileSystem, fileIndex, 0ULL, size, bytes);
-    if (read == VIRTUAL_READ_PENDING)
+    if (simPartCursor >= SIM_PART_COUNT)
     {
-        /* Given back and asked for again next step. The arena is a stack, and
-           leaving this allocated across a pend would strand it. */
-        memoryArenaRewindToMarker(globalArena, marker);
-        return BOOLEAN_FALSE;
-    }
-    if (read != VIRTUAL_READ_OK || !fontReaderOpen(&font, bytes, size))
-    {
-        memoryArenaRewindToMarker(globalArena, marker);
-        platformLogMessage("engine: that font would not read, keeping the built-in one");
-        return BOOLEAN_TRUE;
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), simPartsFound);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), (Unsigned32)SIM_PART_COUNT);
+        stringAppend(message, sizeof(message),
+                     " of a whole Sim's parts are on this disc by name");
+        /* Once, not once per attempt. Assembling a Sim takes many steps
+           against a store that answers one read at a time, and a line
+           logged on each of them buried the console under fifteen thousand
+           copies of itself. */
+        if (!saidWhatTheDiscHas)
+        {
+            saidWhatTheDiscHas = BOOLEAN_TRUE;
+            platformLogMessage(message);
+        }
+        /* At least one thing to draw, rather than all four.
+         *
+         * Demanding all four meant an elder could not be built at all: this
+         * disc carries emBodyNaked_cres and efBodyNaked_cres and no elder
+         * bald scalp, because an elder is an adult with different meshes and
+         * the scalp is not one of them. Refusing over that costs a whole age
+         * to save a bald head — on a Sim the catalogue is about to put hair
+         * on anyway.
+         *
+         * Each hop already skips a part whose name is not on the disc, and
+         * the skeleton hop already reports its own absence and leaves the
+         * Sim in its bind pose. So the only thing worth refusing over is
+         * having nothing to draw. */
+        if (simDrawnPartsFound > 0U)
+        {
+            SimAssembly assembly = stepTheSim();
+
+            if (assembly == SIM_ASSEMBLY_PENDING)
+            {
+                return ENGINE_DISC_WORKING;
+            }
+        }
+        discPhase = DISC_PHASE_DONE;
+        return finishOrSeekSkin();
     }
 
-    glyphRasterizerBind(&rasterizer, edges, GLYPH_EDGE_LIMIT, crossingX, crossingDirection,
-                        GLYPH_CROSSING_LIMIT, rowCoverage, TEXT_SHEET_WIDTH);
-    fontOutlineBind(&outline, pointX, pointY, onCurve, contourEnds, FONT_POINT_LIMIT,
-                    FONT_CONTOUR_LIMIT);
+    entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES,
+                                   simPartNames[simPartCursor]);
+    if (entry != NULL_POINTER)
+    {
+        simPartFileIndex = entry->fileIndex;
+    }
+    if (entry == NULL_POINTER)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
+        stringAppend(message, sizeof(message), " — not on this disc under that name");
+        platformLogMessage(message);
+        simPartCursor++;
+        return ENGINE_DISC_WORKING;
+    }
 
-    if (!fontAtlasBuildFromFont(&textAtlas, &font, &rasterizer, &outline, TEXT_PIXEL_SIZE, mark))
+    marker = memoryArenaGetMarker(globalArena);
+    if (!readIndexedResource(entry, &bytes, &size))
     {
         memoryArenaRewindToMarker(globalArena, marker);
-        (void)fontAtlasBuildFromBuiltin(&textAtlas, 2U);
-        platformLogMessage("engine: that font would not rasterize, keeping the built-in one");
-        return BOOLEAN_TRUE;
+        return ENGINE_DISC_WORKING;
     }
 
     message[0] = '\0';
-    stringAppend(message, sizeof(message), "engine: reading text from ");
-    stringAppend(message, sizeof(message), entry->path);
-    stringAppend(message, sizeof(message), " — ");
-    appendCount(message, sizeof(message), font.glyphCount);
-    stringAppend(message, sizeof(message), " glyphs in the file, ");
-    appendCount(message, sizeof(message), (Unsigned32)FONT_ATLAS_CHARACTER_COUNT -
-                                              textAtlas.glyphsRefused);
-    stringAppend(message, sizeof(message), " drawn at ");
-    appendCount(message, sizeof(message), TEXT_PIXEL_SIZE);
-    stringAppend(message, sizeof(message), " pixels");
-    platformLogMessage(message);
-
-    /* Left for the next run. A platform with nowhere to put it says so, and the
-       only consequence is that the next run does this again. */
+    stringAppend(message, sizeof(message), "engine:   ");
+    stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
+    if (bytes != NULL_POINTER &&
+        resourceNodeRead(&simPartTree, bytes, size) == RESOURCE_NODE_OK)
     {
-        Unsigned8 *block =
-            (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_CACHE_CAPACITY, 8UL);
-        MemorySize written = 0UL;
-        char name[64];
+        const VirtualFileEntry *holder =
+            virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
+        Unsigned32 shapes = 0U;
+        Unsigned32 bones = 0U;
+        Unsigned32 index;
 
-        if (block != NULL_POINTER)
+        for (index = 0U; index < simPartTree.storedNodeCount; index++)
         {
-            written = fontAtlasStore(&textAtlas, block, FONT_CACHE_CAPACITY);
+            if (simPartTree.nodes[index].hasShape)
+            {
+                shapes++;
+            }
+            /* The sentinel a node carries when it is not a joint, so this
+               counts the ones that are. */
+            if (simPartTree.nodes[index].boneIdentifier != 0x7FFFFFFFUL)
+            {
+                bones++;
+            }
         }
-        nameTheCache(mark, name, sizeof(name));
-        if (written > 0UL && platformCacheStore(name, block, written))
+        simPartsFound++;
+        /* The skeleton is simPartNames[0] and carries no geometry. */
+        if (simPartCursor > 0U)
+        {
+            simDrawnPartsFound++;
+        }
+        stringAppend(message, sizeof(message), " — ");
+        appendCount(message, sizeof(message), simPartTree.storedNodeCount);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), simPartTree.nodeCount);
+        stringAppend(message, sizeof(message), " node(s) kept, ");
+        appendCount(message, sizeof(message), bones);
+        stringAppend(message, sizeof(message), " of them bones, naming ");
+        appendCount(message, sizeof(message), shapes);
+        stringAppend(message, sizeof(message), " shape(s), in ");
+        stringAppend(message, sizeof(message),
+                     (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
+    }
+    else
+    {
+        stringAppend(message, sizeof(message),
+                     " — found by name, but its tree would not read");
+    }
+    platformLogMessage(message);
+    memoryArenaRewindToMarker(globalArena, marker);
+    simPartCursor++;
+    return ENGINE_DISC_WORKING;
+}
+
+static EngineDiscLoadStatus seekTheAnimation(void)
+{
+    char message[512];
+
+    const ResourceIndexEntry *entry;
+    MemorySize marker;
+    Unsigned8 *bytes;
+    MemorySize size;
+    AnimationReadResult animationResult;
+
+    if (animationIndexBuilding)
+    {
+        if (resourceIndexStep(&animationIndex) == RESOURCE_INDEX_WORKING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        animationIndexBuilding = BOOLEAN_FALSE;
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), animationIndex.countByType[0]);
+        stringAppend(message, sizeof(message), " animation(s) across ");
+        appendCount(message, sizeof(message), animationIndex.filesIndexed);
+        stringAppend(message, sizeof(message), " package(s) to choose from");
+        platformLogMessage(message);
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* The rest pose first, by name, before falling back to whatever the
+     * scan reaches.
+     *
+     * This animation is very nearly the pose the mesh was authored in, so
+     * posing by it should move the model almost not at all. That makes it
+     * the one animation on the disc whose correct result is known in
+     * advance, and therefore the only one that can tell a working pose
+     * pipeline from a broken one — every other animation produces a shape
+     * nobody here can check. openTS2's own SimAnimationTest opens with it
+     * for the same reason. */
+    if (!animationTriedNamed)
+    {
+        entry = resourceIndexFindNamed(&animationIndex, (Unsigned32)PACKAGE_TYPE_ANIM,
+                                       ANIMATION_REST_POSE_NAME);
+        if (entry == NULL_POINTER)
+        {
+            platformLogMessage("engine: the rest pose " ANIMATION_REST_POSE_NAME
+                               " is not on this disc — falling back to the scan, whose "
+                               "result nothing here can check");
+            animationTriedNamed = BOOLEAN_TRUE;
+            return ENGINE_DISC_WORKING;
+        }
+        marker = memoryArenaGetMarker(globalArena);
+        if (!readIndexedResource(entry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        animationTriedNamed = BOOLEAN_TRUE;
+        animationUsedRestPose = BOOLEAN_TRUE;
+    }
+    else
+    {
+        if (animationCursor >= animationIndex.count || animationScanned >= ANIMATION_SCAN_LIMIT)
         {
             message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: kept those glyphs as ");
-            stringAppend(message, sizeof(message), name);
-            stringAppend(message, sizeof(message), ", so the next run draws them without "
-                                                   "rasterizing anything");
+            stringAppend(message, sizeof(message), "engine: opened ");
+            appendCount(message, sizeof(message), animationScanned);
+            stringAppend(message, sizeof(message), " of ");
+            appendCount(message, sizeof(message), animationIndex.count);
+            stringAppend(message, sizeof(message),
+                         " animation(s) and none would pose this mesh");
             platformLogMessage(message);
+            return beginTheAnimationList();
+        }
+
+        entry = &animationIndex.entries[animationCursor];
+        marker = memoryArenaGetMarker(globalArena);
+        /* One read per step, for the reason the skin search records: two
+           would alternate forever against a store that answers PENDING. */
+        if (!readIndexedResource(entry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        animationCursor++;
+        animationScanned++;
+        animationUsedRestPose = BOOLEAN_FALSE;
+    }
+
+    animationResult = (bytes != NULL_POINTER)
+                          ? animationReaderOpen(&posedAnimation, bytes, size, globalArena)
+                          : ANIMATION_READ_TRUNCATED;
+    if (animationResult != ANIMATION_READ_OK)
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: animation ");
+    stringAppend(message, sizeof(message), posedAnimation.resourceName);
+    stringAppend(message, sizeof(message), " — ");
+    appendCount(message, sizeof(message), posedAnimation.channelCount);
+    stringAppend(message, sizeof(message), " channel(s) over ");
+    appendCount(message, sizeof(message), posedAnimation.targetCount);
+    stringAppend(message, sizeof(message), " target(s), ");
+    appendCount(message, sizeof(message), posedAnimation.durationTicks);
+    stringAppend(message, sizeof(message), " tick(s) long, authored against ");
+    stringAppend(message, sizeof(message), (posedAnimation.skeletonTag[0] != '\0')
+                                               ? posedAnimation.skeletonTag
+                                               : "a skeleton it does not name");
+    {
+        /* What unit its tangents are in, measured off the animation in
+           hand. The curve was followed once on the assumption of per tick
+           and threw the Sim about; this is the number that says whether
+           that was the shape or the scale. */
+        Real32 slopeToChange;
+        Unsigned32 intervals;
+
+        animationMeasureTangentScale(&posedAnimation, &slopeToChange, &intervals);
+        if (intervals > 0U)
+        {
+            stringAppend(message, sizeof(message), "; its tangents account for ");
+            appendThousandths(message, sizeof(message), slopeToChange);
+            stringAppend(message, sizeof(message), " times the change they span over ");
+            appendCount(message, sizeof(message), intervals);
+            stringAppend(message, sizeof(message),
+                         " interval(s) — about one means per tick, about eight hundred "
+                         "means per second");
+        }
+    }
+    if (posedAnimation.chainCount > 0U)
+    {
+        stringAppend(message, sizeof(message), ", and ");
+        appendCount(message, sizeof(message), posedAnimation.chainCount);
+        stringAppend(message, sizeof(message),
+                     " inverse kinematics chain(s) this does not follow");
+    }
+    platformLogMessage(message);
+
+    /* An animation authored against an object cannot be placed without it.
+     *
+     * The mark is "2o", as in to-object, and the letter before it is who: a2o
+     * is adult, t2o teen, c2o child. Matching only "a2o" caught a bench
+     * press and then settled on a teen applying zit cream to a mirror that
+     * is equally not there — the convention is a family, not a prefix.
+     *
+     * A bench press start is authored in the exercise machine's space —
+     * played with no machine in the scene it
+     * drives the Sim's root to where it would be relative to a bench that
+     * is not there, and the Sim tumbles through empty air with every limb
+     * perfectly sensible. That is not a pose gone wrong; it is a pose
+     * missing its other half.
+     *
+     * This is the naming convention and not the format talking, so it is a
+     * rule about which animation to choose rather than a claim about what
+     * one contains — and it is skipped out loud. */
+    if (stringContainsIgnoringCase(posedAnimation.resourceName, "2o-") ||
+        stringContainsIgnoringCase(posedAnimation.resourceName, "2o_"))
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        stringAppend(message, sizeof(message), posedAnimation.resourceName);
+        stringAppend(message, sizeof(message),
+                     " is authored against an object this scene has not got, so it would "
+                     "place the Sim relative to nothing — looking for one that stands on "
+                     "its own");
+        platformLogMessage(message);
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (discContentPoseFromAnimation(&discSearch, &posedAnimation, ANIMATION_POSE_TICK,
+                                     globalArena))
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: posed ");
+        appendCount(message, sizeof(message), discSearch.verticesPosed);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+        stringAppend(message, sizeof(message), " vertices over ");
+        appendCount(message, sizeof(message), discSearch.bonesPosed);
+        stringAppend(message, sizeof(message), " bone(s), ");
+        appendCount(message, sizeof(message), discSearch.channelsApplied);
+        stringAppend(message, sizeof(message), " channel(s) of the animation reaching them");
+        /* Against the model's own size, because a displacement means
+           nothing on its own. This is the number that says whether what is
+           on screen is a pose or the spike. */
+        stringAppend(message, sizeof(message), "; it moved by ");
+        appendThousandths(message, sizeof(message), discSearch.poseShift);
+        stringAppend(message, sizeof(message), " against a model ");
+        appendThousandths(message, sizeof(message), discSearch.poseSpan);
+        stringAppend(message, sizeof(message), " across");
+        platformLogMessage(message);
+
+        /* The verdict, but only for the rest pose — it is the only
+           animation whose right answer is known ahead of time. For any
+           other the displacement above is a number with nothing to compare
+           it against, and saying more than that would be inventing a
+           standard. */
+        if (animationUsedRestPose)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message),
+                         "engine: that was the rest pose, which should move the mesh almost "
+                         "not at all — ");
+            if (discSearch.poseShift < discSearch.poseSpan / 20.0f)
+            {
+                stringAppend(message, sizeof(message),
+                             "and it did not, so the pose composes the way the game does");
+            }
+            else
+            {
+                stringAppend(message, sizeof(message),
+                             "and it did, so the matrices are being composed in some "
+                             "convention this engine has wrong");
+            }
+            platformLogMessage(message);
+        }
+
+        /* Per bone the mesh actually draws with, how much of its chain the
+           animation reached against how much was applied. A chain named far
+           more than it is applied is posed in part, and a mesh posed in part
+           is dragged against itself — which is what a torn face looks like,
+           and what a displacement measured on the bounds cannot see. */
+        {
+            Unsigned32 which;
+
+            for (which = 0U; which < discSearch.boneReportCount; which++)
+            {
+                const DiscContentBoneReport *report = &discSearch.boneReports[which];
+
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:   bone ");
+                stringAppend(message, sizeof(message), report->nodeName);
+                stringAppend(message, sizeof(message), " — chain of ");
+                appendCount(message, sizeof(message), report->chainLength);
+                stringAppend(message, sizeof(message), ", ");
+                appendCount(message, sizeof(message), report->chainNamed);
+                stringAppend(message, sizeof(message), " named by a channel, ");
+                appendCount(message, sizeof(message), report->chainApplied);
+                stringAppend(message, sizeof(message), " applied");
+                if (report->anySkipped)
+                {
+                    stringAppend(message, sizeof(message), "; first skipped is ");
+                    stringAppend(message, sizeof(message), report->skippedNode);
+                    stringAppend(message, sizeof(message), " as ");
+                    stringAppend(message, sizeof(message),
+                                 animationChannelTypeGetName(report->skippedType));
+                    stringAppend(message, sizeof(message), " driving its ");
+                    stringAppend(message, sizeof(message),
+                                 animationAttributeGetName(report->skippedAttribute));
+                    stringAppend(message, sizeof(message), " over ");
+                    appendCount(message, sizeof(message), report->skippedComponents);
+                    stringAppend(message, sizeof(message), " component(s)");
+                }
+                platformLogMessage(message);
+            }
+        }
+        /* The vertices have moved; the mesh is otherwise the one already
+           uploaded, so only they are sent.
+           
+           renderSetMesh here would start by releasing everything the last
+           mesh took — which includes every per-part texture. The Sim was
+           correctly painted right up until the first pose landed, and then
+           reverted to wearing one texture over all three parts, because
+           this line threw them away. The body went back to wearing a face:
+           a band across the arm and a patch at the waist, the same
+           artefacts per-part texturing had just removed. */
+        renderUpdateMeshVertices(&discSearch.mesh, globalArena);
+        /* And from here the frame loop keeps it moving. Only now, because
+           until a pose has succeeded once there is nothing to advance and
+           a frame that tried would pay for a palette every frame to
+           discover it. */
+        if (posedAnimation.durationTicks > 0U)
+        {
+            poseIsAnimated = BOOLEAN_TRUE;
+            platformLogMessage("engine: playing it from here, re-skinned each frame on the "
+                               "processor from the bind pose kept aside");
+            /* And last of all, what the catalogue said a Sim can be made
+               of.
+             *
+               It is read long before this, but the animation search prints
+               a line per candidate and there are eleven thousand of them to
+               pick through — so by the time a load finishes, the catalogue
+               has scrolled out of any console anyone would copy. Three logs
+               in a row came back without it. Repeating it here costs
+               nothing and puts the answer where the log ends. */
+            reportCatalogueSlots(BOOLEAN_TRUE);
         }
         else
         {
-            platformLogMessage("engine: nowhere to keep the glyphs, so every run will "
-                               "rasterize them again");
+            /* The rest pose has no duration — it is one pose, which is
+               exactly why it can be checked. Having checked with it, the
+               search carries on for something with a length to play, or
+               the clock work would never have anything to move. */
+            platformLogMessage("engine: that one has no duration to play over — keeping its "
+                               "verdict and looking for an animation with a length");
+            return ENGINE_DISC_WORKING;
+        }
+    }
+    else
+    {
+        /* Read but did not move anything. Almost always the animation and
+           the model naming their bones differently, which is a miss and not
+           a failure — said plainly so it is not read as one. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message),
+                     "engine: that animation moved nothing — ");
+        appendCount(message, sizeof(message), discSearch.channelsApplied);
+        stringAppend(message, sizeof(message), " channel(s) reached a bone of ");
+        appendCount(message, sizeof(message), discSearch.bonesPosed);
+        stringAppend(message, sizeof(message), " posed; looking at the next one");
+        platformLogMessage(message);
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
+    }
+
+    return beginTheAnimationList();
+}
+
+static EngineDiscLoadStatus seekTheSkin(void)
+{
+    char message[512];
+
+    static GeometryMesh probe;
+    const ResourceIndexEntry *entry;
+    MemorySize marker;
+    Unsigned8 *bytes;
+    MemorySize size;
+
+    if (skinIndexBuilding)
+    {
+        if (resourceIndexStep(&skinIndex) == RESOURCE_INDEX_WORKING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        skinIndexBuilding = BOOLEAN_FALSE;
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), skinIndex.countByType[0]);
+        stringAppend(message, sizeof(message), " geometry container(s) across ");
+        appendCount(message, sizeof(message), skinIndex.filesIndexed);
+        stringAppend(message, sizeof(message), " package(s) to look through");
+        platformLogMessage(message);
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (skinCursor >= skinIndex.count || skinScanned >= SKIN_SCAN_LIMIT)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: opened ");
+        appendCount(message, sizeof(message), skinScanned);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), skinIndex.count);
+        stringAppend(message, sizeof(message),
+                     " container(s) and none carried bone assignments");
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_DONE;
+        discLoadStatus = ENGINE_DISC_READY;
+        return discLoadStatus;
+    }
+
+    entry = &skinIndex.entries[skinCursor];
+    marker = memoryArenaGetMarker(globalArena);
+    /* Exactly one read per step. Two would alternate forever on a store that
+       answers PENDING, which is a lesson this file has already paid for. */
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
+    }
+    skinCursor++;
+    skinScanned++;
+
+    if (bytes != NULL_POINTER &&
+        geometryReaderOpen(&probe, bytes, size, globalArena) == GEOMETRY_READ_OK &&
+        probe.boneAssignments != NULL_POINTER)
+    {
+        const VirtualFileEntry *holder =
+            virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: skinned geometry is on this disc — ");
+        stringAppend(message, sizeof(message), probe.resourceName);
+        stringAppend(message, sizeof(message), ", ");
+        appendCount(message, sizeof(message), probe.skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), probe.vertexCount);
+        stringAppend(message, sizeof(message), " vertices weighted, ");
+        appendCount(message, sizeof(message), probe.weightsStoredPerVertex);
+        stringAppend(message, sizeof(message), " weight(s) stored per vertex, in ");
+        stringAppend(message, sizeof(message),
+                     (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
+        platformLogMessage(message);
+        /* Found after scanning this many, which says whether skinned meshes
+           are everywhere or rare enough that the next search needs to know
+           exactly where to look. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: found after opening ");
+        appendCount(message, sizeof(message), skinScanned);
+        stringAppend(message, sizeof(message), " container(s)");
+        platformLogMessage(message);
+
+        /* Read that package properly rather than stopping at having found
+           it. The probe opened a container on its own, which is enough to
+           answer where skinning lives and not enough to draw: a model needs
+           the shape that names its materials and the tree that places it,
+           and those come from the same walk everything else goes through.
+         *
+           Its file index is kept before the arena is given back — the entry
+           it came from sits below this marker and survives, but reading a
+           pointer after rewinding it is a habit worth not having. */
+        {
+            Unsigned32 skinnedFile = entry->fileIndex;
+
+            memoryArenaRewindToMarker(globalArena, marker);
+            platformLogMessage("engine: reading that package instead, for a model with a "
+                               "skeleton under it");
+            discContentBeginInFile(&discSearch, discFileSystem, globalArena, skinnedFile);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
         }
     }
 
     memoryArenaRewindToMarker(globalArena, marker);
-    return BOOLEAN_TRUE;
+    return ENGINE_DISC_WORKING;
 }
 
-/* One step of finding a font. Answers false while a read is outstanding, which
- * is what makes it safe to drive from the same loop as everything else on a
- * store that cannot answer on the spot. */
-static Boolean stepTheFont(void)
+static EngineDiscLoadStatus stepTheIndex(void)
 {
-    Integer32 fileIndex;
-    const VirtualFileEntry *entry;
-    Unsigned32 mark;
-    char name[64];
+    char message[512];
 
-    if (!textIsReady || discFileSystem == NULL_POINTER)
+    ResourceIndexStatus indexStatus = resourceIndexStep(&textureIndex);
+
+    if (indexStatus == RESOURCE_INDEX_WORKING)
     {
-        fontIsSettled = BOOLEAN_TRUE;
-        return BOOLEAN_TRUE;
-    }
-    fileIndex = findAFontOnThisDisc();
-    if (fileIndex < 0)
-    {
-        fontIsSettled = BOOLEAN_TRUE;
-        platformLogMessage("engine: no font on this disc, so text is drawn with the one the "
-                           "engine carries");
-        return BOOLEAN_TRUE;
+        return ENGINE_DISC_WORKING;
     }
 
-    entry = virtualFileSystemGetEntry(discFileSystem, (Unsigned32)fileIndex);
-    mark = markForFont(entry);
-    nameTheCache(mark, name, sizeof(name));
-
-    /* Route one: a sheet from a previous run. The font file is never opened. */
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: indexed ");
+    appendCount(message, sizeof(message), textureIndex.filesIndexed);
+    stringAppend(message, sizeof(message), " package(s), ");
+    appendCount(message, sizeof(message), textureIndex.entriesSeen);
+    stringAppend(message, sizeof(message), " resource(s): ");
+    appendCount(message, sizeof(message), textureIndex.countByType[0]);
+    stringAppend(message, sizeof(message), " image(s), ");
+    appendCount(message, sizeof(message), textureIndex.countByType[1]);
+    stringAppend(message, sizeof(message), " mip level(s)");
+    if (textureIndex.dropped > 0U)
     {
-        MemorySize marker = memoryArenaGetMarker(globalArena);
-        Unsigned8 *block =
-            (Unsigned8 *)memoryArenaAllocate(globalArena, FONT_CACHE_CAPACITY, 8UL);
-        MemorySize read = 0UL;
+        stringAppend(message, sizeof(message), ", ");
+        appendCount(message, sizeof(message), textureIndex.dropped);
+        stringAppend(message, sizeof(message), " past the index's room");
+    }
+    if (textureIndex.filesRefused > 0U)
+    {
+        stringAppend(message, sizeof(message), ", ");
+        appendCount(message, sizeof(message), textureIndex.filesRefused);
+        stringAppend(message, sizeof(message), " would not be read");
+    }
+    platformLogMessage(message);
 
-        if (block != NULL_POINTER)
+    /* What the disc is actually made of. Looking for one type and finding
+       little of it says nothing about whether the disc is unusual or the
+       search is; this says which, in the same run. */
+    {
+        Unsigned32 rank;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: most common —");
+        for (rank = 0U; rank < 8U; rank++)
         {
-            read = platformCacheLoad(name, block, FONT_CACHE_CAPACITY);
+            Unsigned32 typeIdentifier;
+            Unsigned32 howMany;
+
+            if (!resourceIndexGetCensusRank(&textureIndex, rank, &typeIdentifier, &howMany))
+            {
+                break;
+            }
+            stringAppend(message, sizeof(message), " ");
+            appendHexadecimal(message, sizeof(message), typeIdentifier);
+            stringAppend(message, sizeof(message), " x");
+            appendCount(message, sizeof(message), howMany);
+            stringAppend(message, sizeof(message), ";");
         }
-        if (read > 0UL && fontAtlasRestore(&textAtlas, block, read, mark))
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), textureIndex.censusCount);
+        stringAppend(message, sizeof(message), " distinct type(s)");
+        if (textureIndex.censusOverflow > 0U)
         {
-            memoryArenaRewindToMarker(globalArena, marker);
-            fontIsSettled = BOOLEAN_TRUE;
-            menuTextDrawn[0] = '\0';
-            platformLogMessage("engine: read this disc's glyphs back from the cache, so "
-                               "nothing had to be rasterized");
-            return BOOLEAN_TRUE;
+            /* The census ran out of room. Everything above is a tally of
+               what fitted, which is not the same as a tally of the disc. */
+            stringAppend(message, sizeof(message), ", ");
+            appendCount(message, sizeof(message), textureIndex.censusOverflow);
+            stringAppend(message, sizeof(message), " entries of untallied types");
         }
+        platformLogMessage(message);
+    }
+
+    discPhase = DISC_PHASE_FETCH_TEXTURE;
+    return ENGINE_DISC_WORKING;
+}
+
+/* Following the reference to the largest level, with the texture that named
+ * it still allocated beneath. Its own marker, so a pend gives back only what
+ * this step claimed and leaves the texture alone — and so a LIFO that will
+ * not read falls back on the smaller level rather than on nothing. */
+static EngineDiscLoadStatus fetchTheLevel(void)
+{
+    char message[512];
+
+    MemorySize marker = memoryArenaGetMarker(globalArena);
+
+    if (!fetchLargestLevel(message, sizeof(message)))
+    {
         memoryArenaRewindToMarker(globalArena, marker);
+        return ENGINE_DISC_WORKING;
     }
 
-    if (!buildTheAtlasFromDisc((Unsigned32)fileIndex, mark))
-    {
-        return BOOLEAN_FALSE;
-    }
-    fontIsSettled = BOOLEAN_TRUE;
-    menuTextDrawn[0] = '\0';
-    return BOOLEAN_TRUE;
+    renderSetMesh(&discSearch.mesh, globalArena);
+    uploadFoundTexture();
+    memoryArenaRewindToMarker(globalArena, textureFetchMarker);
+    return finishOrSeekSkin();
 }
 
-/* A picture for one tile, if there is one.
- *
- * There is not, yet, for any page: body types and animations have nothing that
- * could be a thumbnail, and the clothing page is a list the load does not build
- * yet. The hook is here rather than later because it is what decides the shape
- * of the drawing code, and because the answer for clothing is already sitting
- * in the engine — the garment textures are read to paint the Sim, and a
- * thumbnail is one of them scaled down. */
-static Boolean thumbnailForRow(void *context, DebugMenuPage page, Unsigned32 row,
-                               const Unsigned8 **rgbaPixels, Unsigned32 *width,
-                               Unsigned32 *height)
+static EngineDiscLoadStatus fetchTheTexture(void)
 {
-    (void)context;
-    (void)page;
-    (void)row;
-    (void)rgbaPixels;
-    (void)width;
-    (void)height;
-    return BOOLEAN_FALSE;
-}
+    char message[512];
 
-/* Redraws the interface when what it would show has changed.
- *
- * Three things can change it: what the menu says, what the pointer is over, and
- * the size of the window. All three are compared rather than tracked by flags —
- * a flag set in one of the dozen places that can move the menu is a flag that
- * will one day not be set. */
-static void drawTheInterface(void)
-{
-    const char *wanted;
-    Boolean sameText;
+    char wanted[RESOURCE_NAME_LIMIT];
+    const ResourceIndexEntry *found;
 
-    if (!textIsReady)
+    /* Both spellings, and both types. The suffix is a convention rather
+       than a rule, and a texture whose only copy on the disc is the mip
+       level resource is still the texture. Trying one shape and reporting
+       "nowhere on this disc" would be reporting the convention's failure
+       as the disc's. */
+    materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_txtr");
+    found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
+    if (found == NULL_POINTER)
     {
-        return;
+        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR,
+                                       discSearch.textureName);
     }
-    wanted = engineGetMenuText();
-    sameText = stringEquals(wanted, menuTextDrawn);
-    if (sameText && menuHovered.target == menuHoveredDrawn.target &&
-        menuHovered.value == menuHoveredDrawn.value)
+    if (found == NULL_POINTER)
     {
-        return;
+        materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_lifo");
+        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
     }
-    menuTextDrawn[0] = '\0';
-    (void)stringAppend(menuTextDrawn, sizeof(menuTextDrawn), wanted);
-    menuHoveredDrawn = menuHovered;
-
-    if (!debugMenuIsOpen(&debugMenu))
+    if (found == NULL_POINTER)
     {
-        Unsigned32 width = 0U;
-        Unsigned32 height = 0U;
+        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
+                                       discSearch.textureName);
+    }
 
-        /* Shut, and still saying so. A debug feature nobody can discover is a
-           debug feature nobody has. */
-        if (interfaceMenuMeasureHint(&textAtlas, "menu: press m", &width, &height) &&
-            interfaceSurfaceBegin(&interfaceSurface, width, height))
+    if (found != NULL_POINTER)
+    {
+        Boolean succeeded = BOOLEAN_FALSE;
+
+        textureFetchMarker = memoryArenaGetMarker(globalArena);
+        if (!fetchIndexedTexture(found, &succeeded))
         {
-            interfaceMenuDrawHint(&interfaceSurface, &textAtlas, "menu: press m");
+            memoryArenaRewindToMarker(globalArena, textureFetchMarker);
+            return ENGINE_DISC_WORKING;
         }
-        interfaceSurfaceEnd(&interfaceSurface);
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        stringAppend(message, sizeof(message), wanted);
+        if (succeeded)
+        {
+            stringAppend(message, sizeof(message), " found elsewhere on the disc, ");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
+            stringAppend(message, sizeof(message), "x");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message),
+                         textureFormatGetName(discSearch.texture.format));
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), " was indexed but would not read");
+        }
+        platformLogMessage(message);
+        /* The level in the TXTR is the largest one it holds, which is not
+           always the largest one there is. Handed to a phase of its own so
+           the texture just read stays where it is: the reference costs
+           another read, and a read that pends must not take the first one
+           with it. */
+        if (succeeded && discSearch.texture.largestIsElsewhere &&
+            discSearch.texture.lifoName[0] != '\0')
+        {
+            discPhase = DISC_PHASE_FETCH_LEVEL;
+            return ENGINE_DISC_WORKING;
+        }
+        /* The mesh before the texture. A backend binds an image to the
+           pipeline the mesh created, so there is nothing to bind it to
+           until the mesh has been uploaded — an ordering that held by
+           accident for as long as no texture was ever found, and broke on
+           the first disc that yielded one. */
+        renderSetMesh(&discSearch.mesh, globalArena);
+        uploadFoundTexture();
+        /* Held until the upload has copied it, then given back. */
+        memoryArenaRewindToMarker(globalArena, textureFetchMarker);
     }
     else
     {
-        interfaceMenuLayout(&menuLayout, interfaceWindowWidth, interfaceWindowHeight);
-        if (menuLayout.width > interfaceSurface.maximumWidth)
-        {
-            menuLayout.width = interfaceSurface.maximumWidth;
-        }
-        if (menuLayout.height > interfaceSurface.maximumHeight)
-        {
-            menuLayout.height = interfaceSurface.maximumHeight;
-        }
-        /* The keys are told how the tiles are arranged, so down is a row of the
-           grid rather than one tile along it — otherwise the cursor walks the
-           list in reading order while the eye follows a grid. */
-        debugMenuSetGrid(&debugMenu, debugMenuGetPage(&debugMenu), menuLayout.columns,
-                         INTERFACE_MENU_PER_PAGE(&menuLayout));
-        if (interfaceSurfaceBegin(&interfaceSurface, menuLayout.width, menuLayout.height))
-        {
-            interfaceMenuDraw(&interfaceSurface, &menuLayout, &debugMenu, &textAtlas, menuHovered,
-                              thumbnailForRow, NULL_POINTER);
-        }
-        interfaceSurfaceEnd(&interfaceSurface);
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        stringAppend(message, sizeof(message), wanted);
+        stringAppend(message, sizeof(message), " is nowhere on this disc");
+        platformLogMessage(message);
+        renderSetMesh(&discSearch.mesh, globalArena);
     }
 
-    if (interfaceSurface.revision != interfaceRevisionSent)
-    {
-        renderSetOverlay(interfaceSurface.pixels, interfaceSurface.width,
-                         interfaceSurface.height);
-        interfaceRevisionSent = interfaceSurface.revision;
-    }
+    return finishOrSeekSkin();
 }
 
-EngineDiscLoadStatus engineStepDiscLoad(void)
+/* Says what the disc's large non-package files actually are, before any of
+   the work that assumes the answer is "nothing that matters". Sixteen bytes
+   apiece; the phase exists at all because on the web even sixteen bytes have
+   to go back to the event loop. */
+static EngineDiscLoadStatus probeTheDisc(void)
 {
-    /* Wide enough for every refusal reason at once. A truncated diagnostic is
-       worse than none: it looks complete. */
     char message[512];
 
+    const VirtualFileEntry *entry;
+    Unsigned8 head[64];
+    MemorySize headSize;
+    VirtualReadResult read;
+    Unsigned64 nextSize = 0ULL;
+    Unsigned32 nextIndex = 0U;
+
+    if (probesDone >= PROBE_LIMIT ||
+        !findNextLargestOther(discFileSystem, probeCeilingSize, probeCeilingIndex, &nextSize,
+                              &nextIndex))
+    {
+        discPhase = (installerFileIndex == NO_INSTALLER) ? DISC_PHASE_CONTENT
+                                                         : DISC_PHASE_INSTALLER;
+        installerStage = 0U;
+        return ENGINE_DISC_WORKING;
+    }
+
+    entry = virtualFileSystemGetEntry(discFileSystem, nextIndex);
+    if (entry == NULL_POINTER)
+    {
+        probeCeilingSize = nextSize;
+        probeCeilingIndex = nextIndex;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Whatever the file holds, capped at what it holds: a file shorter than
+       the head buffer still has a signature, and asking for more than exists
+       is refused outright rather than answered short. */
+    headSize = (entry->sizeInBytes < (Unsigned64)sizeof(head)) ? (MemorySize)entry->sizeInBytes
+                                                              : sizeof(head);
+    read = virtualFileSystemReadFile(discFileSystem, nextIndex, 0U, headSize, head);
+    if (read == VIRTUAL_READ_PENDING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    probeCeilingSize = nextSize;
+    probeCeilingIndex = nextIndex;
+    probesDone++;
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine:   ");
+    stringAppend(message, sizeof(message), entry->path);
+    stringAppend(message, sizeof(message), " — ");
+    if (read != VIRTUAL_READ_OK)
+    {
+        /* Said rather than skipped. A probe that goes quiet on a file it
+           could not read looks exactly like a disc with nothing on it. */
+        stringAppend(message, sizeof(message), "would not read: ");
+        stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+        platformLogMessage(message);
+        return ENGINE_DISC_WORKING;
+    }
+    {
+        const FileSignature *signature = identifySignature(head, headSize);
+
+        stringAppend(message, sizeof(message),
+                     (signature != NULL_POINTER) ? signature->name : "unrecognised");
+        /* The largest one worth opening, which is the first met: the walk
+           is largest first, and the file holding a disc's game is not the
+           second biggest thing on it. */
+        if (signature != NULL_POINTER && signature->worthFollowing &&
+            installerFileIndex == NO_INSTALLER)
+        {
+            installerFileIndex = nextIndex;
+        }
+    }
+    stringAppend(message, sizeof(message), ", starting ");
+    {
+        /* The bytes as well as the verdict. A name this reader does not know
+           is exactly the case where the bytes themselves are what somebody
+           needs to see — and the same goes for the mark at 0x30, which is
+           where a program that carries an archive says so. */
+        appendHexadecimalBytes(message, sizeof(message), head, headSize, 0UL, 8UL);
+        if (headSize >= INSTALLER_LOADER_HEADER_OFFSET + 8UL)
+        {
+            stringAppend(message, sizeof(message), "and at 0x30 ");
+            appendHexadecimalBytes(message, sizeof(message), head, headSize,
+                                   INSTALLER_LOADER_HEADER_OFFSET, 8UL);
+        }
+    }
+    platformLogMessage(message);
+    return ENGINE_DISC_WORKING;
+}
+
+/* Opening the installer the probe found.
+ *
+ * Three reads: the front of the file, to find where the offset table is;
+ * the table itself, which ends with the two offsets everything else hangs
+ * off; and the version string at the first of them, because which fields
+ * the setup header holds depends on which version wrote it.
+ *
+ * Nothing is decompressed here. This establishes that the installer can be
+ * navigated and says what would have to be decoded next — a reader that
+ * announced it could open an archive before it could find its way around
+ * one would be announcing nothing. */
+static EngineDiscLoadStatus openTheInstaller(void)
+{
+    char message[512];
+
+    static Unsigned64 tableOffsetInBytes = 0ULL;
+    Unsigned8 buffer[INSTALLER_TABLE_LARGEST_BYTES > INSTALLER_VERSION_STRING_BYTES
+                         ? INSTALLER_TABLE_LARGEST_BYTES
+                         : INSTALLER_VERSION_STRING_BYTES];
+    const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, installerFileIndex);
+    VirtualReadResult read;
+    InstallerReadResult opened;
+
+    if (entry == NULL_POINTER)
+    {
+        discPhase = DISC_PHASE_CONTENT;
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (installerStage == 0U)
+    {
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U,
+                                         INSTALLER_LOADER_HEADER_OFFSET + 12UL, buffer);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        opened = (read == VIRTUAL_READ_OK)
+                     ? installerFindOffsetTable(buffer, INSTALLER_LOADER_HEADER_OFFSET + 12UL,
+                                                &tableOffsetInBytes)
+                     : INSTALLER_READ_TRUNCATED;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        stringAppend(message, sizeof(message), entry->path);
+        if (opened == INSTALLER_READ_NOT_AN_INSTALLER)
+        {
+            /* Not where the older loaders keep it. A newer one keeps it in
+               a resource inside the program, which is three formats deep
+               from here — so it gets looked for instead, because the table
+               says what it is and can be recognised on sight. */
+            stringAppend(message, sizeof(message),
+                         " keeps no table at 0x30, so its payload is appended");
+            platformLogMessage(message);
+            installerScanOffset = 0ULL;
+            installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+            installerStage = 3U;
+            return ENGINE_DISC_WORKING;
+        }
+        if (opened != INSTALLER_READ_OK)
+        {
+            stringAppend(message, sizeof(message), " — ");
+            stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        stringAppend(message, sizeof(message), " keeps its offset table at ");
+        appendHexadecimal(message, sizeof(message), (Unsigned32)tableOffsetInBytes);
+        platformLogMessage(message);
+        installerStage = 1U;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Where the program stops.
+     *
+     * Nothing that identifies an installer is in the first thirty-three
+     * mebibytes of this one, which is not evidence that there is nothing
+     * there — it is evidence that the thing is not at the front. A program
+     * carrying an archive has to start with a real program, so the payload
+     * is past the end of it, and the section table says where that is. */
+    if (installerStage == 3U)
+    {
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+        /* However much of the front there is. Asking for more than the file
+           holds is refused outright rather than answered short, and a small
+           program is still a program. */
+        MemorySize frontBytes = (entry->sizeInBytes < (Unsigned64)PROGRAM_LAYOUT_BYTES_NEEDED)
+                                    ? (MemorySize)entry->sizeInBytes
+                                    : PROGRAM_LAYOUT_BYTES_NEEDED;
+        Unsigned8 *front = (Unsigned8 *)memoryArenaAllocate(globalArena, frontBytes, 4UL);
+        ProgramLayout layout;
+        ProgramReadResult layoutResult;
+
+        if (front == NULL_POINTER)
+        {
+            platformLogMessage("engine: no room to read the program's layout");
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U, frontBytes,
+                                         front);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        layoutResult = (read == VIRTUAL_READ_OK)
+                           ? programReadLayout(front, frontBytes, entry->sizeInBytes, &layout)
+                           : PROGRAM_READ_TRUNCATED;
+        memoryArenaRewindToMarker(globalArena, marker);
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        if (layoutResult != PROGRAM_READ_OK)
+        {
+            stringAppend(message, sizeof(message), "its layout — ");
+            stringAppend(message, sizeof(message), programReadResultGetName(layoutResult));
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        stringAppend(message, sizeof(message), "the program in it is ");
+        appendCount(message, sizeof(message), layout.sectionCount);
+        stringAppend(message, sizeof(message), " section(s) ending at ");
+        appendHexadecimal(message, sizeof(message), (Unsigned32)layout.endOfProgramInBytes);
+        stringAppend(message, sizeof(message), ", leaving ");
+        appendByteSize(message, sizeof(message),
+                       entry->sizeInBytes - layout.endOfProgramInBytes);
+        stringAppend(message, sizeof(message), " appended past it");
+        platformLogMessage(message);
+
+        installerScanFrom = layout.endOfProgramInBytes;
+        installerScanOffset = layout.endOfProgramInBytes;
+        installerStage = 4U;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* What the appended part starts with, named the same way any other file
+       is. The front of a container is where it says what it is. */
+    if (installerStage == 4U)
+    {
+        Unsigned8 appendedHead[64];
+        Unsigned32 which;
+
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, installerScanFrom,
+                                         sizeof(appendedHead), appendedHead);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: what is appended starts ");
+        if (read == VIRTUAL_READ_OK)
+        {
+            const FileSignature *signature =
+                identifySignature(appendedHead, sizeof(appendedHead));
+
+            appendHexadecimalBytes(message, sizeof(message), appendedHead,
+                                   sizeof(appendedHead), 0UL, 16UL);
+            stringAppend(message, sizeof(message), "— ");
+            stringAppend(message, sizeof(message),
+                         (signature != NULL_POINTER) ? signature->name : "unrecognised");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+        }
+        platformLogMessage(message);
+
+        /* An archive says what it is in seven bytes, and if it is one this
+           reader can walk then walking it beats searching it: the block
+           chain says where every entry is, and a search only says where one
+           mark happened to land. */
+        if (read == VIRTUAL_READ_OK &&
+            archiveReadMark(appendedHead, sizeof(appendedHead), installerScanFrom,
+                            &archiveBlockOffset) == ARCHIVE_READ_OK)
+        {
+            archiveEntriesWalked = 0U;
+            archiveStoredCount = 0U;
+            archivePackedCount = 0U;
+            archiveStoredBytes = 0ULL;
+            installerStage = 6U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
+        {
+            searchedMarkOffsets[which] = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
+        }
+        installerStage = 5U;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Walking the archive's blocks.
+     *
+     * Each block says how long it is, so this is a matter of addition — and
+     * what it is really asking is whether the entries were stored or
+     * packed. A stored entry is a range of the file and can be handed
+     * straight to the package reader; a packed one needs an unpacker for a
+     * format whose only complete implementation cannot be borrowed from
+     * here. The answer decides how much of the rest of this there is. */
+    if (installerStage == 6U)
+    {
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+        MemorySize wanted = ARCHIVE_BLOCK_BYTES_NEEDED;
+        Unsigned8 *block;
+        ArchiveEntry archiveEntry;
+        ArchiveReadResult blockResult;
+
+        if (archiveEntriesWalked >= ARCHIVE_WALK_LIMIT ||
+            archiveBlockOffset >= entry->sizeInBytes)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: walked ");
+            appendCount(message, sizeof(message), archiveEntriesWalked);
+            stringAppend(message, sizeof(message), " archive entries — ");
+            appendCount(message, sizeof(message), archiveStoredCount);
+            stringAppend(message, sizeof(message), " stored (");
+            appendByteSize(message, sizeof(message), archiveStoredBytes);
+            stringAppend(message, sizeof(message), "), ");
+            appendCount(message, sizeof(message), archivePackedCount);
+            stringAppend(message, sizeof(message), " packed, ");
+            appendCount(message, sizeof(message), archiveMountedCount);
+            stringAppend(message, sizeof(message), " package(s) mounted");
+            if (archiveUnmountableCount > 0U)
+            {
+                /* Said rather than swallowed: a catalogue that filled up
+                   looks exactly like an archive that held less. */
+                stringAppend(message, sizeof(message), ", ");
+                appendCount(message, sizeof(message), archiveUnmountableCount);
+                stringAppend(message, sizeof(message), " would not fit");
+            }
+            platformLogMessage(message);
+            installerStage = 7U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (archiveBlockOffset + (Unsigned64)wanted > entry->sizeInBytes)
+        {
+            wanted = (MemorySize)(entry->sizeInBytes - archiveBlockOffset);
+        }
+        block = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
+        if (block == NULL_POINTER)
+        {
+            platformLogMessage("engine: no room to walk the archive");
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, archiveBlockOffset,
+                                         wanted, block);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        if (read != VIRTUAL_READ_OK)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: the walk stopped at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
+            stringAppend(message, sizeof(message), " — ");
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        blockResult = archiveReadBlock(block, wanted, archiveBlockOffset, &archiveEntry);
+        memoryArenaRewindToMarker(globalArena, marker);
+
+        if (blockResult == ARCHIVE_READ_OK)
+        {
+            archiveEntriesWalked++;
+            if (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
+            {
+                archiveStoredCount++;
+                archiveStoredBytes += archiveEntry.unpackedSizeInBytes;
+                mountArchiveEntry(entry, &archiveEntry);
+            }
+            else
+            {
+                archivePackedCount++;
+            }
+            if (archiveEntriesWalked <= ARCHIVE_NAME_LIMIT_IN_LOG)
+            {
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "engine:   ");
+                stringAppend(message, sizeof(message),
+                             (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
+                                 ? "stored "
+                                 : "packed ");
+                appendByteSize(message, sizeof(message), archiveEntry.unpackedSizeInBytes);
+                stringAppend(message, sizeof(message), " at ");
+                appendHexadecimal(message, sizeof(message),
+                                  (Unsigned32)archiveEntry.dataOffsetInBytes);
+                stringAppend(message, sizeof(message), "  ");
+                stringAppend(message, sizeof(message), archiveEntry.name);
+                platformLogMessage(message);
+            }
+        }
+        else if (blockResult != ARCHIVE_READ_NOT_A_FILE)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: the archive stopped making sense at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
+            stringAppend(message, sizeof(message), " — ");
+            stringAppend(message, sizeof(message), archiveReadResultGetName(blockResult));
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* A block that did not advance would be walked for ever. */
+        if (archiveEntry.nextBlockOffsetInBytes <= archiveBlockOffset)
+        {
+            platformLogMessage("engine: an archive block that does not advance, stopping");
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        archiveBlockOffset = archiveEntry.nextBlockOffsetInBytes;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Reading the first package that was mounted, to see whether it is one.
+     *
+     * The archive counts from the start of the file that holds it and the
+     * catalogue counts from the start of the store, so mounting is one
+     * addition — and getting it wrong would point every mounted package at
+     * the wrong place by exactly the size of the program in front of them,
+     * which is the kind of mistake that produces six hundred unreadable
+     * files and no explanation. Four bytes settle it. */
+    if (installerStage == 7U)
+    {
+        Unsigned8 head[4];
+
+        if (archiveFirstMountedIndex == 0xFFFFFFFFUL)
+        {
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        read = virtualFileSystemReadFile(discFileSystem, archiveFirstMountedIndex, 0U,
+                                         sizeof(head), head);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the first mounted package ");
+        if (read != VIRTUAL_READ_OK)
+        {
+            stringAppend(message, sizeof(message), "would not read: ");
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+        }
+        else if (head[0] == (Unsigned8)'D' && head[1] == (Unsigned8)'B' &&
+                 head[2] == (Unsigned8)'P' && head[3] == (Unsigned8)'F')
+        {
+            stringAppend(message, sizeof(message), "really is one");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), "starts ");
+            appendHexadecimalBytes(message, sizeof(message), head, sizeof(head), 0UL, 4UL);
+            stringAppend(message, sizeof(message), "rather than DBPF, so the offsets are wrong");
+        }
+        platformLogMessage(message);
+        discPhase = DISC_PHASE_CONTENT;
+        return ENGINE_DISC_WORKING;
+    }
+
+    /* Reading the appended part a chunk at a time, looking for any mark
+       worth knowing about. Chunks overlap, so a mark lying across a boundary
+       is still met whole — a search that reads adjacent blocks and finds
+       nothing at the seam reports "not there" about something that is. */
+    if (installerStage == 5U)
+    {
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+        Unsigned8 *chunk;
+        MemorySize wanted = INSTALLER_SCAN_CHUNK_BYTES;
+        Unsigned64 foundTable;
+        Unsigned32 which;
+
+        if (installerScanOffset >= entry->sizeInBytes ||
+            installerScanOffset - installerScanFrom >= (Unsigned64)INSTALLER_SCAN_LIMIT_BYTES)
+        {
+            Unsigned32 found = 0U;
+
+            for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
+            {
+                if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+                {
+                    found++;
+                }
+            }
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: searched the first ");
+            appendByteSize(message, sizeof(message), installerScanOffset - installerScanFrom);
+            stringAppend(message, sizeof(message), " past the program, ");
+            appendCount(message, sizeof(message), found);
+            stringAppend(message, sizeof(message), " mark(s) found, no offset table");
+            platformLogMessage(message);
+
+            if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                installerTable.headerOffsetInBytes = (Unsigned32)installerVersionOffset;
+                installerStage = 2U;
+                return ENGINE_DISC_WORKING;
+            }
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        if (installerScanOffset + (Unsigned64)wanted > entry->sizeInBytes)
+        {
+            wanted = (MemorySize)(entry->sizeInBytes - installerScanOffset);
+        }
+        chunk = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
+        if (chunk == NULL_POINTER)
+        {
+            platformLogMessage("engine: no room to search the installer");
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
+                                         installerScanOffset, wanted, chunk);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return ENGINE_DISC_WORKING;
+        }
+        if (read != VIRTUAL_READ_OK)
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: the search stopped at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)installerScanOffset);
+            stringAppend(message, sizeof(message), " — ");
+            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+
+        foundTable = installerFindTableMarker(chunk, wanted, installerScanOffset);
+        if (installerVersionOffset == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+        {
+            installerVersionOffset = installerFindVersionMarker(chunk, wanted, installerScanOffset);
+        }
+        for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
+        {
+            Unsigned64 at;
+
+            if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                continue;
+            }
+            at = installerFindMark(chunk, wanted, installerScanOffset,
+                                   searchedMarks[which].bytes, searchedMarks[which].length);
+            if (at == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+            {
+                continue;
+            }
+            searchedMarkOffsets[which] = at;
+            /* Said as it is met rather than gathered for the end. The search
+               stops the moment it finds an offset table, and a summary
+               printed after that would never be printed at all. */
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine:   ");
+            stringAppend(message, sizeof(message), searchedMarks[which].name);
+            stringAppend(message, sizeof(message), " at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)at);
+            platformLogMessage(message);
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+
+        if (foundTable != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
+        {
+            tableOffsetInBytes = foundTable;
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: found an offset table at ");
+            appendHexadecimal(message, sizeof(message), (Unsigned32)foundTable);
+            platformLogMessage(message);
+            installerStage = 1U;
+            return ENGINE_DISC_WORKING;
+        }
+
+        /* Back by the overlap, so nothing is missed at the seam. */
+        installerScanOffset += (Unsigned64)wanted;
+        if (wanted > INSTALLER_MARKER_OVERLAP_BYTES)
+        {
+            installerScanOffset -= (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES;
+        }
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (installerStage == 1U)
+    {
+        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, tableOffsetInBytes,
+                                         INSTALLER_TABLE_LARGEST_BYTES, buffer);
+        if (read == VIRTUAL_READ_PENDING)
+        {
+            return ENGINE_DISC_WORKING;
+        }
+        opened = (read == VIRTUAL_READ_OK)
+                     ? installerReadOffsetTable(buffer, INSTALLER_TABLE_LARGEST_BYTES,
+                                                tableOffsetInBytes, &installerTable)
+                     : INSTALLER_READ_TRUNCATED;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        if (opened != INSTALLER_READ_OK)
+        {
+            stringAppend(message, sizeof(message), "its offset table — ");
+            stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+            stringAppend(message, sizeof(message), ", starting ");
+            appendHexadecimalBytes(message, sizeof(message), buffer,
+                                   INSTALLER_TABLE_LARGEST_BYTES, 0UL, 12UL);
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_CONTENT;
+            return ENGINE_DISC_WORKING;
+        }
+        stringAppend(message, sizeof(message), "table revision ");
+        appendCount(message, sizeof(message), installerTable.tableRevision);
+        stringAppend(message, sizeof(message), ", ");
+        appendCount(message, sizeof(message), installerTable.wordCount);
+        stringAppend(message, sizeof(message), " fields: accounts for ");
+        appendByteSize(message, sizeof(message), (Unsigned64)installerTable.totalSizeInBytes);
+        stringAppend(message, sizeof(message), " of ");
+        appendByteSize(message, sizeof(message), entry->sizeInBytes);
+        stringAppend(message, sizeof(message), ", header at ");
+        appendHexadecimal(message, sizeof(message), installerTable.headerOffsetInBytes);
+        stringAppend(message, sizeof(message), ", data at ");
+        appendHexadecimal(message, sizeof(message), installerTable.dataOffsetInBytes);
+        platformLogMessage(message);
+        installerStage = 2U;
+        return ENGINE_DISC_WORKING;
+    }
+
+    read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
+                                     (Unsigned64)installerTable.headerOffsetInBytes,
+                                     INSTALLER_VERSION_STRING_BYTES, buffer);
+    if (read == VIRTUAL_READ_PENDING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: built with ");
+    if (read == VIRTUAL_READ_OK)
+    {
+        char version[INSTALLER_VERSION_STRING_BYTES + 1UL];
+
+        opened = installerReadVersionString(buffer, INSTALLER_VERSION_STRING_BYTES, version,
+                                            sizeof(version));
+        if (opened == INSTALLER_READ_OK)
+        {
+            stringAppend(message, sizeof(message), version);
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), installerReadResultGetName(opened));
+            stringAppend(message, sizeof(message), ", starting ");
+            appendHexadecimalBytes(message, sizeof(message), buffer,
+                                   INSTALLER_VERSION_STRING_BYTES, 0UL, 12UL);
+        }
+    }
+    else
+    {
+        stringAppend(message, sizeof(message), virtualReadResultGetName(read));
+    }
+    platformLogMessage(message);
+    discPhase = DISC_PHASE_CONTENT;
+    return ENGINE_DISC_WORKING;
+}
+
+static EngineDiscLoadStatus walkTheDisc(void)
+{
+    char message[512];
+
+    DiscReadStatus walk = discReaderStep(&discReader);
+
+    if (walk == DISC_READ_PENDING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+    if (walk != DISC_READ_COMPLETE)
+    {
+        reportDiscFailure(discReadStatusGetName(walk));
+        return discLoadStatus;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: disc ");
+    stringAppend(message, sizeof(message), discReader.volumeIdentifier);
+    stringAppend(message, sizeof(message), " holds ");
+    appendCount(message, sizeof(message), discFileSystem->entryCount);
+    stringAppend(message, sizeof(message), " files");
+    platformLogMessage(message);
+    engineReportDiscCatalogue(discFileSystem);
+
+    discCatalogueIsBuilt = BOOLEAN_TRUE;
+    probeCeilingSize = 0xFFFFFFFFFFFFFFFFULL;
+    probeCeilingIndex = 0U;
+    probesDone = 0U;
+    discPhase = DISC_PHASE_PROBE;
+    discContentBegin(&discSearch, discFileSystem, globalArena);
+    return ENGINE_DISC_WORKING;
+}
+
+static EngineDiscLoadStatus searchTheContent(void)
+{
+    char message[512];
+
+{
+    DiscContentStatus status = discContentStep(&discSearch);
+
+    if (status == DISC_CONTENT_PENDING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: opened ");
+    appendCount(message, sizeof(message), discSearch.packagesOpened);
+    stringAppend(message, sizeof(message), " packages, ");
+    appendCount(message, sizeof(message), discSearch.packagesCompressed);
+    stringAppend(message, sizeof(message), " compressed, ");
+    appendCount(message, sizeof(message), discSearch.packagesWithGeometry);
+    stringAppend(message, sizeof(message), " with geometry, ");
+    appendCount(message, sizeof(message), discSearch.packagesWithShapes);
+    stringAppend(message, sizeof(message), " with a shape, ");
+    appendCount(message, sizeof(message), discSearch.packagesWithTrees);
+    stringAppend(message, sizeof(message), " with a tree, ");
+    appendCount(message, sizeof(message), discSearch.modelsResolved);
+    stringAppend(message, sizeof(message), " followed to a model");
+    platformLogMessage(message);
+
+    /* Why the ones that were refused were refused. A count on its own says
+       something is wrong; this says what, and whether it is one thing or
+       several. */
+    if (discSearch.geometryRefused > 0U)
+    {
+        Unsigned32 reason;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: refused ");
+        appendCount(message, sizeof(message), discSearch.geometryRefused);
+        stringAppend(message, sizeof(message), " meshes —");
+        if (discSearch.decompressionRefused > 0U)
+        {
+            stringAppend(message, sizeof(message), " would not decompress x");
+            appendCount(message, sizeof(message), discSearch.decompressionRefused);
+            stringAppend(message, sizeof(message), ";");
+        }
+        for (reason = 0U; reason < GEOMETRY_READ_RESULT_COUNT; reason++)
+        {
+            if (discSearch.refusalsByReason[reason] == 0U)
+            {
+                continue;
+            }
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message),
+                         geometryReadResultGetName((GeometryReadResult)reason));
+            stringAppend(message, sizeof(message), " x");
+            appendCount(message, sizeof(message), discSearch.refusalsByReason[reason]);
+            stringAppend(message, sizeof(message), ";");
+        }
+        if (discSearch.largestArenaWant > 0UL)
+        {
+            stringAppend(message, sizeof(message), " largest allocation wanted ");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.largestArenaWant);
+            stringAppend(message, sizeof(message), " bytes;");
+        }
+        platformLogMessage(message);
+    }
+
+    /* What the disc holds, as opposed to what was done with it. A reason
+       only says where this engine stopped; the versions say which layouts
+       the game actually shipped, and that is the part guessing cannot
+       supply. It doubles as proof the page is not a cached older build. */
+    {
+        Unsigned32 bucket;
+        Boolean anyVersion = BOOLEAN_FALSE;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: container versions seen —");
+        for (bucket = 0U; bucket < DISC_CONTENT_VERSION_BUCKETS; bucket++)
+        {
+            if (discSearch.versionsSeen[bucket] == 0U)
+            {
+                continue;
+            }
+            anyVersion = BOOLEAN_TRUE;
+            stringAppend(message, sizeof(message), " v");
+            appendCount(message, sizeof(message), bucket);
+            if (bucket == DISC_CONTENT_VERSION_BUCKETS - 1U)
+            {
+                stringAppend(message, sizeof(message), "+");
+            }
+            stringAppend(message, sizeof(message), " x");
+            appendCount(message, sizeof(message), discSearch.versionsSeen[bucket]);
+            stringAppend(message, sizeof(message), ";");
+        }
+        if (!anyVersion)
+        {
+            stringAppend(message, sizeof(message), " none reached the block header");
+        }
+        if (discSearch.sawUnknownMark)
+        {
+            stringAppend(message, sizeof(message), " first non-0xFFFF0001 mark ");
+            appendHexadecimal(message, sizeof(message), discSearch.firstUnknownMark);
+            stringAppend(message, sizeof(message), ";");
+        }
+        if (discSearch.largestElementCount > 0U)
+        {
+            stringAppend(message, sizeof(message), " largest element count ");
+            appendCount(message, sizeof(message), discSearch.largestElementCount);
+            stringAppend(message, sizeof(message), ";");
+        }
+        platformLogMessage(message);
+    }
+
+    if (status != DISC_CONTENT_FOUND)
+    {
+        /* A search that was pointed at one package and came away with
+           nothing is not a failed load. Something is already drawn and
+           uploaded — this was an attempt to draw something better — so the
+           engine keeps what it has and says why, rather than reporting a
+           disc it read perfectly well as unreadable. */
+        if (discSearch.limitedToOneFile)
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message),
+                         "engine: that package holds skinned geometry but no model this can "
+                         "follow (");
+            stringAppend(message, sizeof(message), discContentStatusGetName(status));
+            stringAppend(message, sizeof(message), ") — keeping what was already drawn");
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_DONE;
+            discLoadStatus = ENGINE_DISC_READY;
+            return discLoadStatus;
+        }
+        reportDiscFailure(discContentStatusGetName(status));
+        return discLoadStatus;
+    }
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: drawing ");
+    stringAppend(message, sizeof(message), discSearch.mesh.name);
+    /* Named only when a shape led here. A container taken outright is not a
+       model, and saying it is would make the log agree with a claim the
+       engine has not earned. */
+    if (discSearch.foundThroughScenegraph)
+    {
+        stringAppend(message, sizeof(message), " of model ");
+        stringAppend(message, sizeof(message), discSearch.modelName);
+    }
+    else
+    {
+        stringAppend(message, sizeof(message), " (no shape, container taken directly)");
+    }
+    stringAppend(message, sizeof(message), " from ");
+    stringAppend(message, sizeof(message), discSearch.packagePath);
+    platformLogMessage(message);
+
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+    stringAppend(message, sizeof(message), " vertices, ");
+    appendCount(message, sizeof(message), discSearch.mesh.indexCount / 3U);
+    stringAppend(message, sizeof(message), " triangles, ");
+    appendCount(message, sizeof(message), discSearch.mesh.storedPrimitiveCount);
+    stringAppend(message, sizeof(message), " of ");
+    appendCount(message, sizeof(message), discSearch.mesh.primitiveCount);
+    stringAppend(message, sizeof(message), " primitive(s) drawn, from ");
+    appendCount(message, sizeof(message), discSearch.mesh.componentCount);
+    stringAppend(message, sizeof(message), " component(s)");
+    platformLogMessage(message);
+
+    /* Where the model's tree says this part belongs. Nothing applies it
+       yet — one shape is drawn, and a single part's own transform is
+       usually identity — so it is reported rather than claimed. The number
+       to watch is whether every block was walked: a tree that stopped short
+       has parts this engine cannot reach at all. */
+    if (discSearch.modelHasTree)
+    {
+        const TransformNode *node = &discSearch.modelTree.nodes[discSearch.modelNodeIndex];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: tree ");
+        stringAppend(message, sizeof(message), discSearch.modelTree.resourceName);
+        stringAppend(message, sizeof(message), " — ");
+        appendCount(message, sizeof(message), discSearch.modelTree.blocksRead);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), discSearch.modelTree.blockCount);
+        stringAppend(message, sizeof(message), " blocks walked, ");
+        appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), discSearch.modelTree.nodeCount);
+        stringAppend(message, sizeof(message), " node(s) kept");
+        if (discSearch.modelTree.storedNodeCount > 0U)
+        {
+            stringAppend(message, sizeof(message), ", bone ");
+            appendCount(message, sizeof(message), node->boneIdentifier);
+        }
+        /* Whether the node the part hangs from actually moved it. A model
+           whose one node is its root is placed at the origin either way,
+           and a transform that silently does nothing looks exactly like one
+           that was never applied. */
+        stringAppend(message, sizeof(message),
+                     discSearch.partWasMoved ? ", which places the part"
+                                             : ", which leaves the part where it was");
+        platformLogMessage(message);
+    }
+
+    /* What the model is made of, against what is being drawn. One part of
+       several is a face where a Sim should be, and until this was counted
+       nobody could see the difference in a log. */
+    if (discSearch.partCount > 0U)
+    {
+        Unsigned32 part;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), discSearch.partCount);
+        stringAppend(message, sizeof(message), " part(s) —");
+        for (part = 0U; part < discSearch.partCount && part < 8U; part++)
+        {
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message), discSearch.parts[part].meshName);
+            stringAppend(message, sizeof(message), " (");
+            appendCount(message, sizeof(message), discSearch.parts[part].indexCount / 3U);
+            stringAppend(message, sizeof(message), " triangles)");
+            if (discSearch.parts[part].materialName[0] != '\0')
+            {
+                stringAppend(message, sizeof(message), " wearing ");
+                stringAppend(message, sizeof(message), discSearch.parts[part].materialName);
+            }
+            stringAppend(message, sizeof(message), ";");
+        }
+        /* Which one the whole model is painted with, while it is still
+           painted with one. Naming it beside the others is what makes the
+           compromise visible rather than mysterious. */
+        if (discSearch.partCount > 1U && discSearch.materialName[0] != '\0')
+        {
+            stringAppend(message, sizeof(message), " all painted with ");
+            stringAppend(message, sizeof(message), discSearch.materialName);
+        }
+        if (discSearch.coarserPartsDropped > 0U)
+        {
+            stringAppend(message, sizeof(message), " ");
+            appendCount(message, sizeof(message), discSearch.coarserPartsDropped);
+            stringAppend(message, sizeof(message), " coarser copy(s) set aside;");
+        }
+        if (discSearch.partsBeyondRoom > 0U)
+        {
+            stringAppend(message, sizeof(message), " and ");
+            appendCount(message, sizeof(message), discSearch.partsBeyondRoom);
+            stringAppend(message, sizeof(message), " with no room to remember them");
+        }
+        platformLogMessage(message);
+    }
+
+    /* Where the rest of the model is. A Sim's tree names its body meshes by
+       key, and those keys are not in the file that describes one Sim — they
+       are in the packages the game ships, which are now mounted and
+       indexed. This says how many of them there are to go after. */
+    if (!discSearch.foundInPreferred && discSearch.modelHasTree)
+    {
+        /* Said when the model came from outside the game's own mesh
+           directory. A character file describes one Sim's face and the
+           skeleton under it; the body it wears is chosen at run time from
+           resources it does not name, so there is nothing else in there to
+           draw however hard this looks. */
+        platformLogMessage("engine: this is not one of the game's own meshes, so it may hold "
+                           "only a part of a model");
+    }
+
+    /* What the search turned down before it settled. A run that took the
+       first model it met and a run that walked past forty rigid ones to get
+       here look identical otherwise. */
+    if (discSearch.rigidModelsPassed > 0U)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: walked past ");
+        appendCount(message, sizeof(message), discSearch.rigidModelsPassed);
+        stringAppend(message, sizeof(message), " rigid model(s) looking for a skinned one");
+        if (discSearch.mesh.boneAssignments == NULL_POINTER)
+        {
+            stringAppend(message, sizeof(message),
+                         ", found none, and came back for the first of them");
+        }
+        platformLogMessage(message);
+    }
+
+    if (discSearch.shapeReferences > 0U)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: the tree names ");
+        appendCount(message, sizeof(message), discSearch.shapeReferences);
+        stringAppend(message, sizeof(message), " shape(s), ");
+        appendCount(message, sizeof(message), discSearch.shapeReferencesResolved);
+        stringAppend(message, sizeof(message), " of them in this package");
+        platformLogMessage(message);
+    }
+
+    /* The material and its texture. Nothing samples it yet, so this reports
+       what was found rather than what is on screen — but a name that failed
+       to match and a file that would not read are different problems, and
+       this is where the difference shows. */
+    if (discSearch.materialName[0] != '\0')
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: material ");
+        stringAppend(message, sizeof(message), discSearch.materialName);
+        if (!discSearch.materialFound)
+        {
+            /* The count separates a name that did not match from a package
+               with no materials in it at all. The second is not a lookup
+               bug: a Sim's face material is built from shared resources
+               that live elsewhere on the disc, and finding it needs a
+               wider search rather than a better comparison. */
+            stringAppend(message, sizeof(message), " — not among the ");
+            appendCount(message, sizeof(message), discSearch.materialsInPackage);
+            stringAppend(message, sizeof(message), " material(s) in this package");
+        }
+        else if (!discSearch.textureFound)
+        {
+            stringAppend(message, sizeof(message), " — read, but its texture is not among the ");
+            appendCount(message, sizeof(message), discSearch.texturesInPackage);
+            stringAppend(message, sizeof(message), " here");
+        }
+        else
+        {
+            stringAppend(message, sizeof(message), " — texture ");
+            stringAppend(message, sizeof(message), discSearch.texture.resourceName);
+            stringAppend(message, sizeof(message), " ");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.width);
+            stringAppend(message, sizeof(message), "x");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.height);
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message),
+                         textureFormatGetName(discSearch.texture.format));
+            stringAppend(message, sizeof(message), ", level ");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
+            stringAppend(message, sizeof(message), "x");
+            appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
+            if (discSearch.texture.largestIsElsewhere)
+            {
+                stringAppend(message, sizeof(message), ", top level in ");
+                stringAppend(message, sizeof(message), discSearch.texture.lifoName);
+            }
+        }
+        platformLogMessage(message);
+    }
+
+    /* What the mesh is weighted to, or that it is weighted to nothing.
+       A face is rigid — it hangs off one joint whole — and prints the
+       second, which is not a failure to read and should not look like
+       one. */
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    if (discSearch.mesh.boneAssignments != NULL_POINTER)
+    {
+        appendCount(message, sizeof(message), discSearch.mesh.skinnedVertexCount);
+        stringAppend(message, sizeof(message), " of ");
+        appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
+        stringAppend(message, sizeof(message), " vertices are weighted to bones, ");
+        appendCount(message, sizeof(message), discSearch.mesh.weightsStoredPerVertex);
+        stringAppend(message, sizeof(message), " weight(s) stored per vertex and one implied");
+    }
+    else
+    {
+        stringAppend(message, sizeof(message),
+                     "the mesh carries no bone assignments — it is rigid, and hangs where its "
+                     "node puts it");
+    }
+    platformLogMessage(message);
+
+    /* What the mesh is weighted to, and that nothing was moved by it.
+       Skinning a mesh at rest is the identity — the mesh is already in the
+       pose its bones were measured in — so this says what is ready rather
+       than claiming a pose was applied. */
+    if (discSearch.mesh.boneAssignments != NULL_POINTER)
+    {
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: weighted to ");
+        appendCount(message, sizeof(message), discSearch.bonesInPalette);
+        stringAppend(message, sizeof(message), " bone(s) named by its primitives, out of ");
+        appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
+        stringAppend(message, sizeof(message),
+                     " node(s) in the tree, left in its bind pose because skinning it there "
+                     "would move nothing");
+        if (discSearch.firstBoneNameCount > 0U)
+        {
+            Unsigned32 which;
+
+            /* The bones a primitive named. These are identifiers its nodes
+               carry, not positions in the node list, so the line below says
+               how many of them a node actually answered to. */
+            stringAppend(message, sizeof(message), "; its primitives named bones");
+            for (which = 0U; which < discSearch.firstBoneNameCount; which++)
+            {
+                stringAppend(message, sizeof(message), " ");
+                appendCount(message, sizeof(message), discSearch.firstBoneNames[which]);
+                stringAppend(message, sizeof(message), " (");
+                stringAppend(message, sizeof(message), discSearch.firstBoneNodeNames[which]);
+                stringAppend(message, sizeof(message), ")");
+            }
+        }
+        platformLogMessage(message);
+
+        /* How the bone numbers resolved, and what the container's own bind
+           pose turned out to be. Both directions are printed because the
+           number that matters is whichever one is near nought, and a reader
+           who is told only the winner has to take the comparison on trust. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: ");
+        appendCount(message, sizeof(message), discSearch.bonesMatchedToANode);
+        stringAppend(message, sizeof(message), " bone name(s) matched a node by identifier, ");
+        appendCount(message, sizeof(message), discSearch.bonesWithoutANode);
+        stringAppend(message, sizeof(message), " matched none");
+        if (discSearch.bonesMeasured > 0U)
+        {
+            stringAppend(message, sizeof(message), "; over ");
+            appendCount(message, sizeof(message), discSearch.bonesMeasured);
+            stringAppend(message, sizeof(message),
+                         " measured, world x stored is ");
+            appendThousandths(message, sizeof(message), discSearch.bindPoseFromIdentity);
+            stringAppend(message, sizeof(message), " from the identity and stored is ");
+            appendThousandths(message, sizeof(message), discSearch.bindPoseFromWorld);
+            stringAppend(message, sizeof(message),
+                         " from world — the smaller says which the file holds");
+        }
+        else if (discSearch.mesh.bindPoseCount == 0U)
+        {
+            stringAppend(message, sizeof(message), "; the container carried no bind pose");
+        }
+        platformLogMessage(message);
+    }
+
+    /* Element kinds the reader met and did not use, by name where the
+       format's own table has one. A number alone sends the next reader
+       looking it up; the name says at once whether what was passed over
+       was a morph target or a second colour set. */
+    if (discSearch.mesh.unusedElementCount > 0U)
+    {
+        Unsigned32 unused;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: vertex elements met and not used —");
+        for (unused = 0U; unused < discSearch.mesh.unusedElementCount; unused++)
+        {
+            const char *elementName =
+                geometryElementGetName(discSearch.mesh.unusedElements[unused]);
+
+            stringAppend(message, sizeof(message), " ");
+            if (elementName != NULL_POINTER)
+            {
+                stringAppend(message, sizeof(message), elementName);
+                stringAppend(message, sizeof(message), " (");
+                appendHexadecimal(message, sizeof(message),
+                                  discSearch.mesh.unusedElements[unused]);
+                stringAppend(message, sizeof(message), ")");
+            }
+            else
+            {
+                stringAppend(message, sizeof(message), "unnamed ");
+                appendHexadecimal(message, sizeof(message),
+                                  discSearch.mesh.unusedElements[unused]);
+            }
+            stringAppend(message, sizeof(message), " as format ");
+            appendCount(message, sizeof(message), discSearch.mesh.unusedElementFormats[unused]);
+            stringAppend(message, sizeof(message), ";");
+        }
+        platformLogMessage(message);
+    }
+
+    /* Each part by name. A model that arrives as one silhouette is hard to
+       tell from a model that arrived as one part, and the difference
+       matters as soon as materials do. */
+    if (discSearch.mesh.storedPrimitiveCount > 1U)
+    {
+        Unsigned32 part;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: parts —");
+        for (part = 0U; part < discSearch.mesh.storedPrimitiveCount; part++)
+        {
+            stringAppend(message, sizeof(message), " ");
+            stringAppend(message, sizeof(message), discSearch.mesh.primitives[part].name);
+            stringAppend(message, sizeof(message), " (");
+            appendCount(message, sizeof(message),
+                        discSearch.mesh.primitives[part].indexCount / 3U);
+            stringAppend(message, sizeof(message), " triangles);");
+        }
+        platformLogMessage(message);
+    }
+
+    /* The image the material asked for was not in its own package. A Sim's
+       face texture lives in the shared skin packages, so this is the normal
+       case rather than a failure — but it needs a search of the whole disc,
+       which is a phase of its own. */
+    if (!discSearch.textureFound && discSearch.textureName[0] != '\0' &&
+        discSearch.mesh.textureCoordinates != NULL_POINTER)
+    {
+        /* Images and the resources that hold a single mip level of one.
+           Both are indexed because a texture whose top level lives in a
+           LIFO may be filed either way, and looking for only one of them
+           and finding nothing proves nothing about the other. */
+        static const Unsigned32 wantedTypes[2] = { (Unsigned32)PACKAGE_TYPE_TXTR,
+                                                   (Unsigned32)PACKAGE_TYPE_LIFO };
+
+        if (resourceIndexBegin(&textureIndex, discFileSystem, globalArena,
+                               TEXTURE_INDEX_CAPACITY, wantedTypes, 2U))
+        {
+            message[0] = '\0';
+            stringAppend(message, sizeof(message), "engine: looking for ");
+            stringAppend(message, sizeof(message), discSearch.textureName);
+            stringAppend(message, sizeof(message), " across the rest of the disc");
+            platformLogMessage(message);
+            discPhase = DISC_PHASE_INDEX;
+            return ENGINE_DISC_WORKING;
+        }
+        platformLogMessage("engine: not enough room to index the disc for a texture");
+    }
+
+    /* The mesh first here too, for the same reason: this is the path taken
+       when a package held its own texture, and it had the same ordering. */
+    renderSetMesh(&discSearch.mesh, globalArena);
+    uploadFoundTexture();
+    return finishOrSeekSkin();
+}
+return discLoadStatus;
+}
+
+/* Which phase of the load gets this step.
+ *
+ * This was two thousand lines with every phase written out inside it, which is
+ * how it got there: each capability added since the bootstrap needed a turn of
+ * this loop, and another branch here was always the cheapest way to get one.
+ * The phases are unchanged and still share their state; what has moved is only
+ * where each one is written down, so that reading any of them no longer means
+ * scrolling past the other nine. */
+EngineDiscLoadStatus engineStepDiscLoad(void)
+{
     if (discLoadStatus != ENGINE_DISC_WORKING)
     {
         return discLoadStatus;
@@ -5046,9 +6617,9 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
      * answer later, so it needs a turn of the same loop. Taking one step here
      * and returning gives it exactly that, once, without any phase having to
      * know it exists. */
-    if (!fontIsSettled && discCatalogueIsBuilt)
+    if (!engineTextFontIsSettled() && discCatalogueIsBuilt)
     {
-        if (!stepTheFont())
+        if (!engineTextStepFont(discFileSystem))
         {
             return ENGINE_DISC_WORKING;
         }
@@ -5066,1978 +6637,58 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
 
     if (discPhase == DISC_PHASE_SEEK_SIM)
     {
-        const ResourceIndexEntry *entry;
-        MemorySize marker;
-        Unsigned8 *bytes;
-        MemorySize size;
-
-        if (simIndexBuilding)
-        {
-            if (resourceIndexStep(&simIndex) == RESOURCE_INDEX_WORKING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            simIndexBuilding = BOOLEAN_FALSE;
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), simIndex.countByType[0]);
-            stringAppend(message, sizeof(message), " transform tree(s) across ");
-            appendCount(message, sizeof(message), simIndex.filesIndexed);
-            stringAppend(message, sizeof(message), " package(s) to look among");
-            platformLogMessage(message);
-            reportArchetypesOnThisDisc();
-            settleTheSkeleton();
-            return ENGINE_DISC_WORKING;
-        }
-
-        if (simPartCursor >= SIM_PART_COUNT)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), simPartsFound);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), (Unsigned32)SIM_PART_COUNT);
-            stringAppend(message, sizeof(message),
-                         " of a whole Sim's parts are on this disc by name");
-            /* Once, not once per attempt. Assembling a Sim takes many steps
-               against a store that answers one read at a time, and a line
-               logged on each of them buried the console under fifteen thousand
-               copies of itself. */
-            if (!saidWhatTheDiscHas)
-            {
-                saidWhatTheDiscHas = BOOLEAN_TRUE;
-                platformLogMessage(message);
-            }
-            /* At least one thing to draw, rather than all four.
-             *
-             * Demanding all four meant an elder could not be built at all: this
-             * disc carries emBodyNaked_cres and efBodyNaked_cres and no elder
-             * bald scalp, because an elder is an adult with different meshes and
-             * the scalp is not one of them. Refusing over that costs a whole age
-             * to save a bald head — on a Sim the catalogue is about to put hair
-             * on anyway.
-             *
-             * Each hop already skips a part whose name is not on the disc, and
-             * the skeleton hop already reports its own absence and leaves the
-             * Sim in its bind pose. So the only thing worth refusing over is
-             * having nothing to draw. */
-            if (simDrawnPartsFound > 0U)
-            {
-                SimAssembly assembly = stepTheSim();
-
-                if (assembly == SIM_ASSEMBLY_PENDING)
-                {
-                    return ENGINE_DISC_WORKING;
-                }
-            }
-            discPhase = DISC_PHASE_DONE;
-            return finishOrSeekSkin();
-        }
-
-        entry = resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES,
-                                       simPartNames[simPartCursor]);
-        if (entry != NULL_POINTER)
-        {
-            simPartFileIndex = entry->fileIndex;
-        }
-        if (entry == NULL_POINTER)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine:   ");
-            stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
-            stringAppend(message, sizeof(message), " — not on this disc under that name");
-            platformLogMessage(message);
-            simPartCursor++;
-            return ENGINE_DISC_WORKING;
-        }
-
-        marker = memoryArenaGetMarker(globalArena);
-        if (!readIndexedResource(entry, &bytes, &size))
-        {
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), simPartNames[simPartCursor]);
-        if (bytes != NULL_POINTER &&
-            resourceNodeRead(&simPartTree, bytes, size) == RESOURCE_NODE_OK)
-        {
-            const VirtualFileEntry *holder =
-                virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
-            Unsigned32 shapes = 0U;
-            Unsigned32 bones = 0U;
-            Unsigned32 index;
-
-            for (index = 0U; index < simPartTree.storedNodeCount; index++)
-            {
-                if (simPartTree.nodes[index].hasShape)
-                {
-                    shapes++;
-                }
-                /* The sentinel a node carries when it is not a joint, so this
-                   counts the ones that are. */
-                if (simPartTree.nodes[index].boneIdentifier != 0x7FFFFFFFUL)
-                {
-                    bones++;
-                }
-            }
-            simPartsFound++;
-            /* The skeleton is simPartNames[0] and carries no geometry. */
-            if (simPartCursor > 0U)
-            {
-                simDrawnPartsFound++;
-            }
-            stringAppend(message, sizeof(message), " — ");
-            appendCount(message, sizeof(message), simPartTree.storedNodeCount);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), simPartTree.nodeCount);
-            stringAppend(message, sizeof(message), " node(s) kept, ");
-            appendCount(message, sizeof(message), bones);
-            stringAppend(message, sizeof(message), " of them bones, naming ");
-            appendCount(message, sizeof(message), shapes);
-            stringAppend(message, sizeof(message), " shape(s), in ");
-            stringAppend(message, sizeof(message),
-                         (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
-        }
-        else
-        {
-            stringAppend(message, sizeof(message),
-                         " — found by name, but its tree would not read");
-        }
-        platformLogMessage(message);
-        memoryArenaRewindToMarker(globalArena, marker);
-        simPartCursor++;
-        return ENGINE_DISC_WORKING;
+        return seekTheSim();
     }
+
 
     if (discPhase == DISC_PHASE_SEEK_ANIMATION)
     {
-        const ResourceIndexEntry *entry;
-        MemorySize marker;
-        Unsigned8 *bytes;
-        MemorySize size;
-        AnimationReadResult animationResult;
-
-        if (animationIndexBuilding)
-        {
-            if (resourceIndexStep(&animationIndex) == RESOURCE_INDEX_WORKING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            animationIndexBuilding = BOOLEAN_FALSE;
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), animationIndex.countByType[0]);
-            stringAppend(message, sizeof(message), " animation(s) across ");
-            appendCount(message, sizeof(message), animationIndex.filesIndexed);
-            stringAppend(message, sizeof(message), " package(s) to choose from");
-            platformLogMessage(message);
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* The rest pose first, by name, before falling back to whatever the
-         * scan reaches.
-         *
-         * This animation is very nearly the pose the mesh was authored in, so
-         * posing by it should move the model almost not at all. That makes it
-         * the one animation on the disc whose correct result is known in
-         * advance, and therefore the only one that can tell a working pose
-         * pipeline from a broken one — every other animation produces a shape
-         * nobody here can check. openTS2's own SimAnimationTest opens with it
-         * for the same reason. */
-        if (!animationTriedNamed)
-        {
-            entry = resourceIndexFindNamed(&animationIndex, (Unsigned32)PACKAGE_TYPE_ANIM,
-                                           ANIMATION_REST_POSE_NAME);
-            if (entry == NULL_POINTER)
-            {
-                platformLogMessage("engine: the rest pose " ANIMATION_REST_POSE_NAME
-                                   " is not on this disc — falling back to the scan, whose "
-                                   "result nothing here can check");
-                animationTriedNamed = BOOLEAN_TRUE;
-                return ENGINE_DISC_WORKING;
-            }
-            marker = memoryArenaGetMarker(globalArena);
-            if (!readIndexedResource(entry, &bytes, &size))
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                return ENGINE_DISC_WORKING;
-            }
-            animationTriedNamed = BOOLEAN_TRUE;
-            animationUsedRestPose = BOOLEAN_TRUE;
-        }
-        else
-        {
-            if (animationCursor >= animationIndex.count || animationScanned >= ANIMATION_SCAN_LIMIT)
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: opened ");
-                appendCount(message, sizeof(message), animationScanned);
-                stringAppend(message, sizeof(message), " of ");
-                appendCount(message, sizeof(message), animationIndex.count);
-                stringAppend(message, sizeof(message),
-                             " animation(s) and none would pose this mesh");
-                platformLogMessage(message);
-                return beginTheAnimationList();
-            }
-
-            entry = &animationIndex.entries[animationCursor];
-            marker = memoryArenaGetMarker(globalArena);
-            /* One read per step, for the reason the skin search records: two
-               would alternate forever against a store that answers PENDING. */
-            if (!readIndexedResource(entry, &bytes, &size))
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                return ENGINE_DISC_WORKING;
-            }
-            animationCursor++;
-            animationScanned++;
-            animationUsedRestPose = BOOLEAN_FALSE;
-        }
-
-        animationResult = (bytes != NULL_POINTER)
-                              ? animationReaderOpen(&posedAnimation, bytes, size, globalArena)
-                              : ANIMATION_READ_TRUNCATED;
-        if (animationResult != ANIMATION_READ_OK)
-        {
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: animation ");
-        stringAppend(message, sizeof(message), posedAnimation.resourceName);
-        stringAppend(message, sizeof(message), " — ");
-        appendCount(message, sizeof(message), posedAnimation.channelCount);
-        stringAppend(message, sizeof(message), " channel(s) over ");
-        appendCount(message, sizeof(message), posedAnimation.targetCount);
-        stringAppend(message, sizeof(message), " target(s), ");
-        appendCount(message, sizeof(message), posedAnimation.durationTicks);
-        stringAppend(message, sizeof(message), " tick(s) long, authored against ");
-        stringAppend(message, sizeof(message), (posedAnimation.skeletonTag[0] != '\0')
-                                                   ? posedAnimation.skeletonTag
-                                                   : "a skeleton it does not name");
-        {
-            /* What unit its tangents are in, measured off the animation in
-               hand. The curve was followed once on the assumption of per tick
-               and threw the Sim about; this is the number that says whether
-               that was the shape or the scale. */
-            Real32 slopeToChange;
-            Unsigned32 intervals;
-
-            animationMeasureTangentScale(&posedAnimation, &slopeToChange, &intervals);
-            if (intervals > 0U)
-            {
-                stringAppend(message, sizeof(message), "; its tangents account for ");
-                appendThousandths(message, sizeof(message), slopeToChange);
-                stringAppend(message, sizeof(message), " times the change they span over ");
-                appendCount(message, sizeof(message), intervals);
-                stringAppend(message, sizeof(message),
-                             " interval(s) — about one means per tick, about eight hundred "
-                             "means per second");
-            }
-        }
-        if (posedAnimation.chainCount > 0U)
-        {
-            stringAppend(message, sizeof(message), ", and ");
-            appendCount(message, sizeof(message), posedAnimation.chainCount);
-            stringAppend(message, sizeof(message),
-                         " inverse kinematics chain(s) this does not follow");
-        }
-        platformLogMessage(message);
-
-        /* An animation authored against an object cannot be placed without it.
-         *
-         * The mark is "2o", as in to-object, and the letter before it is who: a2o
-         * is adult, t2o teen, c2o child. Matching only "a2o" caught a bench
-         * press and then settled on a teen applying zit cream to a mirror that
-         * is equally not there — the convention is a family, not a prefix.
-         *
-         * A bench press start is authored in the exercise machine's space —
-         * played with no machine in the scene it
-         * drives the Sim's root to where it would be relative to a bench that
-         * is not there, and the Sim tumbles through empty air with every limb
-         * perfectly sensible. That is not a pose gone wrong; it is a pose
-         * missing its other half.
-         *
-         * This is the naming convention and not the format talking, so it is a
-         * rule about which animation to choose rather than a claim about what
-         * one contains — and it is skipped out loud. */
-        if (stringContainsIgnoringCase(posedAnimation.resourceName, "2o-") ||
-            stringContainsIgnoringCase(posedAnimation.resourceName, "2o_"))
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            stringAppend(message, sizeof(message), posedAnimation.resourceName);
-            stringAppend(message, sizeof(message),
-                         " is authored against an object this scene has not got, so it would "
-                         "place the Sim relative to nothing — looking for one that stands on "
-                         "its own");
-            platformLogMessage(message);
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-
-        if (discContentPoseFromAnimation(&discSearch, &posedAnimation, ANIMATION_POSE_TICK,
-                                         globalArena))
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: posed ");
-            appendCount(message, sizeof(message), discSearch.verticesPosed);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
-            stringAppend(message, sizeof(message), " vertices over ");
-            appendCount(message, sizeof(message), discSearch.bonesPosed);
-            stringAppend(message, sizeof(message), " bone(s), ");
-            appendCount(message, sizeof(message), discSearch.channelsApplied);
-            stringAppend(message, sizeof(message), " channel(s) of the animation reaching them");
-            /* Against the model's own size, because a displacement means
-               nothing on its own. This is the number that says whether what is
-               on screen is a pose or the spike. */
-            stringAppend(message, sizeof(message), "; it moved by ");
-            appendThousandths(message, sizeof(message), discSearch.poseShift);
-            stringAppend(message, sizeof(message), " against a model ");
-            appendThousandths(message, sizeof(message), discSearch.poseSpan);
-            stringAppend(message, sizeof(message), " across");
-            platformLogMessage(message);
-
-            /* The verdict, but only for the rest pose — it is the only
-               animation whose right answer is known ahead of time. For any
-               other the displacement above is a number with nothing to compare
-               it against, and saying more than that would be inventing a
-               standard. */
-            if (animationUsedRestPose)
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message),
-                             "engine: that was the rest pose, which should move the mesh almost "
-                             "not at all — ");
-                if (discSearch.poseShift < discSearch.poseSpan / 20.0f)
-                {
-                    stringAppend(message, sizeof(message),
-                                 "and it did not, so the pose composes the way the game does");
-                }
-                else
-                {
-                    stringAppend(message, sizeof(message),
-                                 "and it did, so the matrices are being composed in some "
-                                 "convention this engine has wrong");
-                }
-                platformLogMessage(message);
-            }
-
-            /* Per bone the mesh actually draws with, how much of its chain the
-               animation reached against how much was applied. A chain named far
-               more than it is applied is posed in part, and a mesh posed in part
-               is dragged against itself — which is what a torn face looks like,
-               and what a displacement measured on the bounds cannot see. */
-            {
-                Unsigned32 which;
-
-                for (which = 0U; which < discSearch.boneReportCount; which++)
-                {
-                    const DiscContentBoneReport *report = &discSearch.boneReports[which];
-
-                    message[0] = '\0';
-                    stringAppend(message, sizeof(message), "engine:   bone ");
-                    stringAppend(message, sizeof(message), report->nodeName);
-                    stringAppend(message, sizeof(message), " — chain of ");
-                    appendCount(message, sizeof(message), report->chainLength);
-                    stringAppend(message, sizeof(message), ", ");
-                    appendCount(message, sizeof(message), report->chainNamed);
-                    stringAppend(message, sizeof(message), " named by a channel, ");
-                    appendCount(message, sizeof(message), report->chainApplied);
-                    stringAppend(message, sizeof(message), " applied");
-                    if (report->anySkipped)
-                    {
-                        stringAppend(message, sizeof(message), "; first skipped is ");
-                        stringAppend(message, sizeof(message), report->skippedNode);
-                        stringAppend(message, sizeof(message), " as ");
-                        stringAppend(message, sizeof(message),
-                                     animationChannelTypeGetName(report->skippedType));
-                        stringAppend(message, sizeof(message), " driving its ");
-                        stringAppend(message, sizeof(message),
-                                     animationAttributeGetName(report->skippedAttribute));
-                        stringAppend(message, sizeof(message), " over ");
-                        appendCount(message, sizeof(message), report->skippedComponents);
-                        stringAppend(message, sizeof(message), " component(s)");
-                    }
-                    platformLogMessage(message);
-                }
-            }
-            /* The vertices have moved; the mesh is otherwise the one already
-               uploaded, so only they are sent.
-               
-               renderSetMesh here would start by releasing everything the last
-               mesh took — which includes every per-part texture. The Sim was
-               correctly painted right up until the first pose landed, and then
-               reverted to wearing one texture over all three parts, because
-               this line threw them away. The body went back to wearing a face:
-               a band across the arm and a patch at the waist, the same
-               artefacts per-part texturing had just removed. */
-            renderUpdateMeshVertices(&discSearch.mesh, globalArena);
-            /* And from here the frame loop keeps it moving. Only now, because
-               until a pose has succeeded once there is nothing to advance and
-               a frame that tried would pay for a palette every frame to
-               discover it. */
-            if (posedAnimation.durationTicks > 0U)
-            {
-                poseIsAnimated = BOOLEAN_TRUE;
-                platformLogMessage("engine: playing it from here, re-skinned each frame on the "
-                                   "processor from the bind pose kept aside");
-                /* And last of all, what the catalogue said a Sim can be made
-                   of.
-                 *
-                   It is read long before this, but the animation search prints
-                   a line per candidate and there are eleven thousand of them to
-                   pick through — so by the time a load finishes, the catalogue
-                   has scrolled out of any console anyone would copy. Three logs
-                   in a row came back without it. Repeating it here costs
-                   nothing and puts the answer where the log ends. */
-                reportCatalogueSlots(BOOLEAN_TRUE);
-            }
-            else
-            {
-                /* The rest pose has no duration — it is one pose, which is
-                   exactly why it can be checked. Having checked with it, the
-                   search carries on for something with a length to play, or
-                   the clock work would never have anything to move. */
-                platformLogMessage("engine: that one has no duration to play over — keeping its "
-                                   "verdict and looking for an animation with a length");
-                return ENGINE_DISC_WORKING;
-            }
-        }
-        else
-        {
-            /* Read but did not move anything. Almost always the animation and
-               the model naming their bones differently, which is a miss and not
-               a failure — said plainly so it is not read as one. */
-            message[0] = '\0';
-            stringAppend(message, sizeof(message),
-                         "engine: that animation moved nothing — ");
-            appendCount(message, sizeof(message), discSearch.channelsApplied);
-            stringAppend(message, sizeof(message), " channel(s) reached a bone of ");
-            appendCount(message, sizeof(message), discSearch.bonesPosed);
-            stringAppend(message, sizeof(message), " posed; looking at the next one");
-            platformLogMessage(message);
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-
-        return beginTheAnimationList();
+        return seekTheAnimation();
     }
+
 
     if (discPhase == DISC_PHASE_SEEK_SKIN)
     {
-        static GeometryMesh probe;
-        const ResourceIndexEntry *entry;
-        MemorySize marker;
-        Unsigned8 *bytes;
-        MemorySize size;
-
-        if (skinIndexBuilding)
-        {
-            if (resourceIndexStep(&skinIndex) == RESOURCE_INDEX_WORKING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            skinIndexBuilding = BOOLEAN_FALSE;
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), skinIndex.countByType[0]);
-            stringAppend(message, sizeof(message), " geometry container(s) across ");
-            appendCount(message, sizeof(message), skinIndex.filesIndexed);
-            stringAppend(message, sizeof(message), " package(s) to look through");
-            platformLogMessage(message);
-            return ENGINE_DISC_WORKING;
-        }
-
-        if (skinCursor >= skinIndex.count || skinScanned >= SKIN_SCAN_LIMIT)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: opened ");
-            appendCount(message, sizeof(message), skinScanned);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), skinIndex.count);
-            stringAppend(message, sizeof(message),
-                         " container(s) and none carried bone assignments");
-            platformLogMessage(message);
-            discPhase = DISC_PHASE_DONE;
-            discLoadStatus = ENGINE_DISC_READY;
-            return discLoadStatus;
-        }
-
-        entry = &skinIndex.entries[skinCursor];
-        marker = memoryArenaGetMarker(globalArena);
-        /* Exactly one read per step. Two would alternate forever on a store that
-           answers PENDING, which is a lesson this file has already paid for. */
-        if (!readIndexedResource(entry, &bytes, &size))
-        {
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-        skinCursor++;
-        skinScanned++;
-
-        if (bytes != NULL_POINTER &&
-            geometryReaderOpen(&probe, bytes, size, globalArena) == GEOMETRY_READ_OK &&
-            probe.boneAssignments != NULL_POINTER)
-        {
-            const VirtualFileEntry *holder =
-                virtualFileSystemGetEntry(discFileSystem, entry->fileIndex);
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: skinned geometry is on this disc — ");
-            stringAppend(message, sizeof(message), probe.resourceName);
-            stringAppend(message, sizeof(message), ", ");
-            appendCount(message, sizeof(message), probe.skinnedVertexCount);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), probe.vertexCount);
-            stringAppend(message, sizeof(message), " vertices weighted, ");
-            appendCount(message, sizeof(message), probe.weightsStoredPerVertex);
-            stringAppend(message, sizeof(message), " weight(s) stored per vertex, in ");
-            stringAppend(message, sizeof(message),
-                         (holder != NULL_POINTER) ? holder->path : "a package it cannot name");
-            platformLogMessage(message);
-            /* Found after scanning this many, which says whether skinned meshes
-               are everywhere or rare enough that the next search needs to know
-               exactly where to look. */
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: found after opening ");
-            appendCount(message, sizeof(message), skinScanned);
-            stringAppend(message, sizeof(message), " container(s)");
-            platformLogMessage(message);
-
-            /* Read that package properly rather than stopping at having found
-               it. The probe opened a container on its own, which is enough to
-               answer where skinning lives and not enough to draw: a model needs
-               the shape that names its materials and the tree that places it,
-               and those come from the same walk everything else goes through.
-             *
-               Its file index is kept before the arena is given back — the entry
-               it came from sits below this marker and survives, but reading a
-               pointer after rewinding it is a habit worth not having. */
-            {
-                Unsigned32 skinnedFile = entry->fileIndex;
-
-                memoryArenaRewindToMarker(globalArena, marker);
-                platformLogMessage("engine: reading that package instead, for a model with a "
-                                   "skeleton under it");
-                discContentBeginInFile(&discSearch, discFileSystem, globalArena, skinnedFile);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-        }
-
-        memoryArenaRewindToMarker(globalArena, marker);
-        return ENGINE_DISC_WORKING;
+        return seekTheSkin();
     }
+
 
     if (discPhase == DISC_PHASE_INDEX)
     {
-        ResourceIndexStatus indexStatus = resourceIndexStep(&textureIndex);
-
-        if (indexStatus == RESOURCE_INDEX_WORKING)
-        {
-            return ENGINE_DISC_WORKING;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: indexed ");
-        appendCount(message, sizeof(message), textureIndex.filesIndexed);
-        stringAppend(message, sizeof(message), " package(s), ");
-        appendCount(message, sizeof(message), textureIndex.entriesSeen);
-        stringAppend(message, sizeof(message), " resource(s): ");
-        appendCount(message, sizeof(message), textureIndex.countByType[0]);
-        stringAppend(message, sizeof(message), " image(s), ");
-        appendCount(message, sizeof(message), textureIndex.countByType[1]);
-        stringAppend(message, sizeof(message), " mip level(s)");
-        if (textureIndex.dropped > 0U)
-        {
-            stringAppend(message, sizeof(message), ", ");
-            appendCount(message, sizeof(message), textureIndex.dropped);
-            stringAppend(message, sizeof(message), " past the index's room");
-        }
-        if (textureIndex.filesRefused > 0U)
-        {
-            stringAppend(message, sizeof(message), ", ");
-            appendCount(message, sizeof(message), textureIndex.filesRefused);
-            stringAppend(message, sizeof(message), " would not be read");
-        }
-        platformLogMessage(message);
-
-        /* What the disc is actually made of. Looking for one type and finding
-           little of it says nothing about whether the disc is unusual or the
-           search is; this says which, in the same run. */
-        {
-            Unsigned32 rank;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: most common —");
-            for (rank = 0U; rank < 8U; rank++)
-            {
-                Unsigned32 typeIdentifier;
-                Unsigned32 howMany;
-
-                if (!resourceIndexGetCensusRank(&textureIndex, rank, &typeIdentifier, &howMany))
-                {
-                    break;
-                }
-                stringAppend(message, sizeof(message), " ");
-                appendHexadecimal(message, sizeof(message), typeIdentifier);
-                stringAppend(message, sizeof(message), " x");
-                appendCount(message, sizeof(message), howMany);
-                stringAppend(message, sizeof(message), ";");
-            }
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), textureIndex.censusCount);
-            stringAppend(message, sizeof(message), " distinct type(s)");
-            if (textureIndex.censusOverflow > 0U)
-            {
-                /* The census ran out of room. Everything above is a tally of
-                   what fitted, which is not the same as a tally of the disc. */
-                stringAppend(message, sizeof(message), ", ");
-                appendCount(message, sizeof(message), textureIndex.censusOverflow);
-                stringAppend(message, sizeof(message), " entries of untallied types");
-            }
-            platformLogMessage(message);
-        }
-
-        discPhase = DISC_PHASE_FETCH_TEXTURE;
-        return ENGINE_DISC_WORKING;
+        return stepTheIndex();
     }
 
-    /* Following the reference to the largest level, with the texture that named
-     * it still allocated beneath. Its own marker, so a pend gives back only what
-     * this step claimed and leaves the texture alone — and so a LIFO that will
-     * not read falls back on the smaller level rather than on nothing. */
+
     if (discPhase == DISC_PHASE_FETCH_LEVEL)
     {
-        MemorySize marker = memoryArenaGetMarker(globalArena);
-
-        if (!fetchLargestLevel(message, sizeof(message)))
-        {
-            memoryArenaRewindToMarker(globalArena, marker);
-            return ENGINE_DISC_WORKING;
-        }
-
-        renderSetMesh(&discSearch.mesh, globalArena);
-        uploadFoundTexture();
-        memoryArenaRewindToMarker(globalArena, textureFetchMarker);
-        return finishOrSeekSkin();
+        return fetchTheLevel();
     }
+
 
     if (discPhase == DISC_PHASE_FETCH_TEXTURE)
     {
-        char wanted[RESOURCE_NAME_LIMIT];
-        const ResourceIndexEntry *found;
-
-        /* Both spellings, and both types. The suffix is a convention rather
-           than a rule, and a texture whose only copy on the disc is the mip
-           level resource is still the texture. Trying one shape and reporting
-           "nowhere on this disc" would be reporting the convention's failure
-           as the disc's. */
-        materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_txtr");
-        found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR, wanted);
-        if (found == NULL_POINTER)
-        {
-            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_TXTR,
-                                           discSearch.textureName);
-        }
-        if (found == NULL_POINTER)
-        {
-            materialBuildResourceName(wanted, sizeof(wanted), discSearch.textureName, "_lifo");
-            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO, wanted);
-        }
-        if (found == NULL_POINTER)
-        {
-            found = resourceIndexFindNamed(&textureIndex, (Unsigned32)PACKAGE_TYPE_LIFO,
-                                           discSearch.textureName);
-        }
-
-        if (found != NULL_POINTER)
-        {
-            Boolean succeeded = BOOLEAN_FALSE;
-
-            textureFetchMarker = memoryArenaGetMarker(globalArena);
-            if (!fetchIndexedTexture(found, &succeeded))
-            {
-                memoryArenaRewindToMarker(globalArena, textureFetchMarker);
-                return ENGINE_DISC_WORKING;
-            }
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            stringAppend(message, sizeof(message), wanted);
-            if (succeeded)
-            {
-                stringAppend(message, sizeof(message), " found elsewhere on the disc, ");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
-                stringAppend(message, sizeof(message), "x");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
-                stringAppend(message, sizeof(message), " ");
-                stringAppend(message, sizeof(message),
-                             textureFormatGetName(discSearch.texture.format));
-            }
-            else
-            {
-                stringAppend(message, sizeof(message), " was indexed but would not read");
-            }
-            platformLogMessage(message);
-            /* The level in the TXTR is the largest one it holds, which is not
-               always the largest one there is. Handed to a phase of its own so
-               the texture just read stays where it is: the reference costs
-               another read, and a read that pends must not take the first one
-               with it. */
-            if (succeeded && discSearch.texture.largestIsElsewhere &&
-                discSearch.texture.lifoName[0] != '\0')
-            {
-                discPhase = DISC_PHASE_FETCH_LEVEL;
-                return ENGINE_DISC_WORKING;
-            }
-            /* The mesh before the texture. A backend binds an image to the
-               pipeline the mesh created, so there is nothing to bind it to
-               until the mesh has been uploaded — an ordering that held by
-               accident for as long as no texture was ever found, and broke on
-               the first disc that yielded one. */
-            renderSetMesh(&discSearch.mesh, globalArena);
-            uploadFoundTexture();
-            /* Held until the upload has copied it, then given back. */
-            memoryArenaRewindToMarker(globalArena, textureFetchMarker);
-        }
-        else
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            stringAppend(message, sizeof(message), wanted);
-            stringAppend(message, sizeof(message), " is nowhere on this disc");
-            platformLogMessage(message);
-            renderSetMesh(&discSearch.mesh, globalArena);
-        }
-
-        return finishOrSeekSkin();
+        return fetchTheTexture();
     }
 
-    /* Says what the disc's large non-package files actually are, before any of
-       the work that assumes the answer is "nothing that matters". Sixteen bytes
-       apiece; the phase exists at all because on the web even sixteen bytes have
-       to go back to the event loop. */
+
     if (discPhase == DISC_PHASE_PROBE)
     {
-        const VirtualFileEntry *entry;
-        Unsigned8 head[64];
-        MemorySize headSize;
-        VirtualReadResult read;
-        Unsigned64 nextSize = 0ULL;
-        Unsigned32 nextIndex = 0U;
-
-        if (probesDone >= PROBE_LIMIT ||
-            !findNextLargestOther(discFileSystem, probeCeilingSize, probeCeilingIndex, &nextSize,
-                                  &nextIndex))
-        {
-            discPhase = (installerFileIndex == NO_INSTALLER) ? DISC_PHASE_CONTENT
-                                                             : DISC_PHASE_INSTALLER;
-            installerStage = 0U;
-            return ENGINE_DISC_WORKING;
-        }
-
-        entry = virtualFileSystemGetEntry(discFileSystem, nextIndex);
-        if (entry == NULL_POINTER)
-        {
-            probeCeilingSize = nextSize;
-            probeCeilingIndex = nextIndex;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* Whatever the file holds, capped at what it holds: a file shorter than
-           the head buffer still has a signature, and asking for more than exists
-           is refused outright rather than answered short. */
-        headSize = (entry->sizeInBytes < (Unsigned64)sizeof(head)) ? (MemorySize)entry->sizeInBytes
-                                                                  : sizeof(head);
-        read = virtualFileSystemReadFile(discFileSystem, nextIndex, 0U, headSize, head);
-        if (read == VIRTUAL_READ_PENDING)
-        {
-            return ENGINE_DISC_WORKING;
-        }
-
-        probeCeilingSize = nextSize;
-        probeCeilingIndex = nextIndex;
-        probesDone++;
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine:   ");
-        stringAppend(message, sizeof(message), entry->path);
-        stringAppend(message, sizeof(message), " — ");
-        if (read != VIRTUAL_READ_OK)
-        {
-            /* Said rather than skipped. A probe that goes quiet on a file it
-               could not read looks exactly like a disc with nothing on it. */
-            stringAppend(message, sizeof(message), "would not read: ");
-            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-            platformLogMessage(message);
-            return ENGINE_DISC_WORKING;
-        }
-        {
-            const FileSignature *signature = identifySignature(head, headSize);
-
-            stringAppend(message, sizeof(message),
-                         (signature != NULL_POINTER) ? signature->name : "unrecognised");
-            /* The largest one worth opening, which is the first met: the walk
-               is largest first, and the file holding a disc's game is not the
-               second biggest thing on it. */
-            if (signature != NULL_POINTER && signature->worthFollowing &&
-                installerFileIndex == NO_INSTALLER)
-            {
-                installerFileIndex = nextIndex;
-            }
-        }
-        stringAppend(message, sizeof(message), ", starting ");
-        {
-            /* The bytes as well as the verdict. A name this reader does not know
-               is exactly the case where the bytes themselves are what somebody
-               needs to see — and the same goes for the mark at 0x30, which is
-               where a program that carries an archive says so. */
-            appendHexadecimalBytes(message, sizeof(message), head, headSize, 0UL, 8UL);
-            if (headSize >= INSTALLER_LOADER_HEADER_OFFSET + 8UL)
-            {
-                stringAppend(message, sizeof(message), "and at 0x30 ");
-                appendHexadecimalBytes(message, sizeof(message), head, headSize,
-                                       INSTALLER_LOADER_HEADER_OFFSET, 8UL);
-            }
-        }
-        platformLogMessage(message);
-        return ENGINE_DISC_WORKING;
+        return probeTheDisc();
     }
 
-    /* Opening the installer the probe found.
-     *
-     * Three reads: the front of the file, to find where the offset table is;
-     * the table itself, which ends with the two offsets everything else hangs
-     * off; and the version string at the first of them, because which fields
-     * the setup header holds depends on which version wrote it.
-     *
-     * Nothing is decompressed here. This establishes that the installer can be
-     * navigated and says what would have to be decoded next — a reader that
-     * announced it could open an archive before it could find its way around
-     * one would be announcing nothing. */
+
     if (discPhase == DISC_PHASE_INSTALLER)
     {
-        static Unsigned64 tableOffsetInBytes = 0ULL;
-        Unsigned8 buffer[INSTALLER_TABLE_LARGEST_BYTES > INSTALLER_VERSION_STRING_BYTES
-                             ? INSTALLER_TABLE_LARGEST_BYTES
-                             : INSTALLER_VERSION_STRING_BYTES];
-        const VirtualFileEntry *entry = virtualFileSystemGetEntry(discFileSystem, installerFileIndex);
-        VirtualReadResult read;
-        InstallerReadResult opened;
-
-        if (entry == NULL_POINTER)
-        {
-            discPhase = DISC_PHASE_CONTENT;
-            return ENGINE_DISC_WORKING;
-        }
-
-        if (installerStage == 0U)
-        {
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U,
-                                             INSTALLER_LOADER_HEADER_OFFSET + 12UL, buffer);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            opened = (read == VIRTUAL_READ_OK)
-                         ? installerFindOffsetTable(buffer, INSTALLER_LOADER_HEADER_OFFSET + 12UL,
-                                                    &tableOffsetInBytes)
-                         : INSTALLER_READ_TRUNCATED;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            stringAppend(message, sizeof(message), entry->path);
-            if (opened == INSTALLER_READ_NOT_AN_INSTALLER)
-            {
-                /* Not where the older loaders keep it. A newer one keeps it in
-                   a resource inside the program, which is three formats deep
-                   from here — so it gets looked for instead, because the table
-                   says what it is and can be recognised on sight. */
-                stringAppend(message, sizeof(message),
-                             " keeps no table at 0x30, so its payload is appended");
-                platformLogMessage(message);
-                installerScanOffset = 0ULL;
-                installerVersionOffset = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
-                installerStage = 3U;
-                return ENGINE_DISC_WORKING;
-            }
-            if (opened != INSTALLER_READ_OK)
-            {
-                stringAppend(message, sizeof(message), " — ");
-                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            stringAppend(message, sizeof(message), " keeps its offset table at ");
-            appendHexadecimal(message, sizeof(message), (Unsigned32)tableOffsetInBytes);
-            platformLogMessage(message);
-            installerStage = 1U;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* Where the program stops.
-         *
-         * Nothing that identifies an installer is in the first thirty-three
-         * mebibytes of this one, which is not evidence that there is nothing
-         * there — it is evidence that the thing is not at the front. A program
-         * carrying an archive has to start with a real program, so the payload
-         * is past the end of it, and the section table says where that is. */
-        if (installerStage == 3U)
-        {
-            MemorySize marker = memoryArenaGetMarker(globalArena);
-            /* However much of the front there is. Asking for more than the file
-               holds is refused outright rather than answered short, and a small
-               program is still a program. */
-            MemorySize frontBytes = (entry->sizeInBytes < (Unsigned64)PROGRAM_LAYOUT_BYTES_NEEDED)
-                                        ? (MemorySize)entry->sizeInBytes
-                                        : PROGRAM_LAYOUT_BYTES_NEEDED;
-            Unsigned8 *front = (Unsigned8 *)memoryArenaAllocate(globalArena, frontBytes, 4UL);
-            ProgramLayout layout;
-            ProgramReadResult layoutResult;
-
-            if (front == NULL_POINTER)
-            {
-                platformLogMessage("engine: no room to read the program's layout");
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, 0U, frontBytes,
-                                             front);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                return ENGINE_DISC_WORKING;
-            }
-            layoutResult = (read == VIRTUAL_READ_OK)
-                               ? programReadLayout(front, frontBytes, entry->sizeInBytes, &layout)
-                               : PROGRAM_READ_TRUNCATED;
-            memoryArenaRewindToMarker(globalArena, marker);
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            if (layoutResult != PROGRAM_READ_OK)
-            {
-                stringAppend(message, sizeof(message), "its layout — ");
-                stringAppend(message, sizeof(message), programReadResultGetName(layoutResult));
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            stringAppend(message, sizeof(message), "the program in it is ");
-            appendCount(message, sizeof(message), layout.sectionCount);
-            stringAppend(message, sizeof(message), " section(s) ending at ");
-            appendHexadecimal(message, sizeof(message), (Unsigned32)layout.endOfProgramInBytes);
-            stringAppend(message, sizeof(message), ", leaving ");
-            appendByteSize(message, sizeof(message),
-                           entry->sizeInBytes - layout.endOfProgramInBytes);
-            stringAppend(message, sizeof(message), " appended past it");
-            platformLogMessage(message);
-
-            installerScanFrom = layout.endOfProgramInBytes;
-            installerScanOffset = layout.endOfProgramInBytes;
-            installerStage = 4U;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* What the appended part starts with, named the same way any other file
-           is. The front of a container is where it says what it is. */
-        if (installerStage == 4U)
-        {
-            Unsigned8 appendedHead[64];
-            Unsigned32 which;
-
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, installerScanFrom,
-                                             sizeof(appendedHead), appendedHead);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: what is appended starts ");
-            if (read == VIRTUAL_READ_OK)
-            {
-                const FileSignature *signature =
-                    identifySignature(appendedHead, sizeof(appendedHead));
-
-                appendHexadecimalBytes(message, sizeof(message), appendedHead,
-                                       sizeof(appendedHead), 0UL, 16UL);
-                stringAppend(message, sizeof(message), "— ");
-                stringAppend(message, sizeof(message),
-                             (signature != NULL_POINTER) ? signature->name : "unrecognised");
-            }
-            else
-            {
-                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-            }
-            platformLogMessage(message);
-
-            /* An archive says what it is in seven bytes, and if it is one this
-               reader can walk then walking it beats searching it: the block
-               chain says where every entry is, and a search only says where one
-               mark happened to land. */
-            if (read == VIRTUAL_READ_OK &&
-                archiveReadMark(appendedHead, sizeof(appendedHead), installerScanFrom,
-                                &archiveBlockOffset) == ARCHIVE_READ_OK)
-            {
-                archiveEntriesWalked = 0U;
-                archiveStoredCount = 0U;
-                archivePackedCount = 0U;
-                archiveStoredBytes = 0ULL;
-                installerStage = 6U;
-                return ENGINE_DISC_WORKING;
-            }
-
-            for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
-            {
-                searchedMarkOffsets[which] = (Unsigned64)INSTALLER_MARKER_NOT_FOUND;
-            }
-            installerStage = 5U;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* Walking the archive's blocks.
-         *
-         * Each block says how long it is, so this is a matter of addition — and
-         * what it is really asking is whether the entries were stored or
-         * packed. A stored entry is a range of the file and can be handed
-         * straight to the package reader; a packed one needs an unpacker for a
-         * format whose only complete implementation cannot be borrowed from
-         * here. The answer decides how much of the rest of this there is. */
-        if (installerStage == 6U)
-        {
-            MemorySize marker = memoryArenaGetMarker(globalArena);
-            MemorySize wanted = ARCHIVE_BLOCK_BYTES_NEEDED;
-            Unsigned8 *block;
-            ArchiveEntry archiveEntry;
-            ArchiveReadResult blockResult;
-
-            if (archiveEntriesWalked >= ARCHIVE_WALK_LIMIT ||
-                archiveBlockOffset >= entry->sizeInBytes)
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: walked ");
-                appendCount(message, sizeof(message), archiveEntriesWalked);
-                stringAppend(message, sizeof(message), " archive entries — ");
-                appendCount(message, sizeof(message), archiveStoredCount);
-                stringAppend(message, sizeof(message), " stored (");
-                appendByteSize(message, sizeof(message), archiveStoredBytes);
-                stringAppend(message, sizeof(message), "), ");
-                appendCount(message, sizeof(message), archivePackedCount);
-                stringAppend(message, sizeof(message), " packed, ");
-                appendCount(message, sizeof(message), archiveMountedCount);
-                stringAppend(message, sizeof(message), " package(s) mounted");
-                if (archiveUnmountableCount > 0U)
-                {
-                    /* Said rather than swallowed: a catalogue that filled up
-                       looks exactly like an archive that held less. */
-                    stringAppend(message, sizeof(message), ", ");
-                    appendCount(message, sizeof(message), archiveUnmountableCount);
-                    stringAppend(message, sizeof(message), " would not fit");
-                }
-                platformLogMessage(message);
-                installerStage = 7U;
-                return ENGINE_DISC_WORKING;
-            }
-
-            if (archiveBlockOffset + (Unsigned64)wanted > entry->sizeInBytes)
-            {
-                wanted = (MemorySize)(entry->sizeInBytes - archiveBlockOffset);
-            }
-            block = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
-            if (block == NULL_POINTER)
-            {
-                platformLogMessage("engine: no room to walk the archive");
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, archiveBlockOffset,
-                                             wanted, block);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                return ENGINE_DISC_WORKING;
-            }
-            if (read != VIRTUAL_READ_OK)
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: the walk stopped at ");
-                appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
-                stringAppend(message, sizeof(message), " — ");
-                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-
-            blockResult = archiveReadBlock(block, wanted, archiveBlockOffset, &archiveEntry);
-            memoryArenaRewindToMarker(globalArena, marker);
-
-            if (blockResult == ARCHIVE_READ_OK)
-            {
-                archiveEntriesWalked++;
-                if (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
-                {
-                    archiveStoredCount++;
-                    archiveStoredBytes += archiveEntry.unpackedSizeInBytes;
-                    mountArchiveEntry(entry, &archiveEntry);
-                }
-                else
-                {
-                    archivePackedCount++;
-                }
-                if (archiveEntriesWalked <= ARCHIVE_NAME_LIMIT_IN_LOG)
-                {
-                    message[0] = '\0';
-                    stringAppend(message, sizeof(message), "engine:   ");
-                    stringAppend(message, sizeof(message),
-                                 (archiveEntry.method == (Unsigned8)ARCHIVE_METHOD_STORED)
-                                     ? "stored "
-                                     : "packed ");
-                    appendByteSize(message, sizeof(message), archiveEntry.unpackedSizeInBytes);
-                    stringAppend(message, sizeof(message), " at ");
-                    appendHexadecimal(message, sizeof(message),
-                                      (Unsigned32)archiveEntry.dataOffsetInBytes);
-                    stringAppend(message, sizeof(message), "  ");
-                    stringAppend(message, sizeof(message), archiveEntry.name);
-                    platformLogMessage(message);
-                }
-            }
-            else if (blockResult != ARCHIVE_READ_NOT_A_FILE)
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: the archive stopped making sense at ");
-                appendHexadecimal(message, sizeof(message), (Unsigned32)archiveBlockOffset);
-                stringAppend(message, sizeof(message), " — ");
-                stringAppend(message, sizeof(message), archiveReadResultGetName(blockResult));
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-
-            /* A block that did not advance would be walked for ever. */
-            if (archiveEntry.nextBlockOffsetInBytes <= archiveBlockOffset)
-            {
-                platformLogMessage("engine: an archive block that does not advance, stopping");
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            archiveBlockOffset = archiveEntry.nextBlockOffsetInBytes;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* Reading the first package that was mounted, to see whether it is one.
-         *
-         * The archive counts from the start of the file that holds it and the
-         * catalogue counts from the start of the store, so mounting is one
-         * addition — and getting it wrong would point every mounted package at
-         * the wrong place by exactly the size of the program in front of them,
-         * which is the kind of mistake that produces six hundred unreadable
-         * files and no explanation. Four bytes settle it. */
-        if (installerStage == 7U)
-        {
-            Unsigned8 head[4];
-
-            if (archiveFirstMountedIndex == 0xFFFFFFFFUL)
-            {
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            read = virtualFileSystemReadFile(discFileSystem, archiveFirstMountedIndex, 0U,
-                                             sizeof(head), head);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: the first mounted package ");
-            if (read != VIRTUAL_READ_OK)
-            {
-                stringAppend(message, sizeof(message), "would not read: ");
-                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-            }
-            else if (head[0] == (Unsigned8)'D' && head[1] == (Unsigned8)'B' &&
-                     head[2] == (Unsigned8)'P' && head[3] == (Unsigned8)'F')
-            {
-                stringAppend(message, sizeof(message), "really is one");
-            }
-            else
-            {
-                stringAppend(message, sizeof(message), "starts ");
-                appendHexadecimalBytes(message, sizeof(message), head, sizeof(head), 0UL, 4UL);
-                stringAppend(message, sizeof(message), "rather than DBPF, so the offsets are wrong");
-            }
-            platformLogMessage(message);
-            discPhase = DISC_PHASE_CONTENT;
-            return ENGINE_DISC_WORKING;
-        }
-
-        /* Reading the appended part a chunk at a time, looking for any mark
-           worth knowing about. Chunks overlap, so a mark lying across a boundary
-           is still met whole — a search that reads adjacent blocks and finds
-           nothing at the seam reports "not there" about something that is. */
-        if (installerStage == 5U)
-        {
-            MemorySize marker = memoryArenaGetMarker(globalArena);
-            Unsigned8 *chunk;
-            MemorySize wanted = INSTALLER_SCAN_CHUNK_BYTES;
-            Unsigned64 foundTable;
-            Unsigned32 which;
-
-            if (installerScanOffset >= entry->sizeInBytes ||
-                installerScanOffset - installerScanFrom >= (Unsigned64)INSTALLER_SCAN_LIMIT_BYTES)
-            {
-                Unsigned32 found = 0U;
-
-                for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
-                {
-                    if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-                    {
-                        found++;
-                    }
-                }
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: searched the first ");
-                appendByteSize(message, sizeof(message), installerScanOffset - installerScanFrom);
-                stringAppend(message, sizeof(message), " past the program, ");
-                appendCount(message, sizeof(message), found);
-                stringAppend(message, sizeof(message), " mark(s) found, no offset table");
-                platformLogMessage(message);
-
-                if (installerVersionOffset != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-                {
-                    installerTable.headerOffsetInBytes = (Unsigned32)installerVersionOffset;
-                    installerStage = 2U;
-                    return ENGINE_DISC_WORKING;
-                }
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-
-            if (installerScanOffset + (Unsigned64)wanted > entry->sizeInBytes)
-            {
-                wanted = (MemorySize)(entry->sizeInBytes - installerScanOffset);
-            }
-            chunk = (Unsigned8 *)memoryArenaAllocate(globalArena, wanted, 4UL);
-            if (chunk == NULL_POINTER)
-            {
-                platformLogMessage("engine: no room to search the installer");
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
-                                             installerScanOffset, wanted, chunk);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                return ENGINE_DISC_WORKING;
-            }
-            if (read != VIRTUAL_READ_OK)
-            {
-                memoryArenaRewindToMarker(globalArena, marker);
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: the search stopped at ");
-                appendHexadecimal(message, sizeof(message), (Unsigned32)installerScanOffset);
-                stringAppend(message, sizeof(message), " — ");
-                stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-
-            foundTable = installerFindTableMarker(chunk, wanted, installerScanOffset);
-            if (installerVersionOffset == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-            {
-                installerVersionOffset = installerFindVersionMarker(chunk, wanted, installerScanOffset);
-            }
-            for (which = 0U; which < (Unsigned32)VICTORIA_ARRAY_LENGTH(searchedMarks); which++)
-            {
-                Unsigned64 at;
-
-                if (searchedMarkOffsets[which] != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-                {
-                    continue;
-                }
-                at = installerFindMark(chunk, wanted, installerScanOffset,
-                                       searchedMarks[which].bytes, searchedMarks[which].length);
-                if (at == (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-                {
-                    continue;
-                }
-                searchedMarkOffsets[which] = at;
-                /* Said as it is met rather than gathered for the end. The search
-                   stops the moment it finds an offset table, and a summary
-                   printed after that would never be printed at all. */
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine:   ");
-                stringAppend(message, sizeof(message), searchedMarks[which].name);
-                stringAppend(message, sizeof(message), " at ");
-                appendHexadecimal(message, sizeof(message), (Unsigned32)at);
-                platformLogMessage(message);
-            }
-            memoryArenaRewindToMarker(globalArena, marker);
-
-            if (foundTable != (Unsigned64)INSTALLER_MARKER_NOT_FOUND)
-            {
-                tableOffsetInBytes = foundTable;
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: found an offset table at ");
-                appendHexadecimal(message, sizeof(message), (Unsigned32)foundTable);
-                platformLogMessage(message);
-                installerStage = 1U;
-                return ENGINE_DISC_WORKING;
-            }
-
-            /* Back by the overlap, so nothing is missed at the seam. */
-            installerScanOffset += (Unsigned64)wanted;
-            if (wanted > INSTALLER_MARKER_OVERLAP_BYTES)
-            {
-                installerScanOffset -= (Unsigned64)INSTALLER_MARKER_OVERLAP_BYTES;
-            }
-            return ENGINE_DISC_WORKING;
-        }
-
-        if (installerStage == 1U)
-        {
-            read = virtualFileSystemReadFile(discFileSystem, installerFileIndex, tableOffsetInBytes,
-                                             INSTALLER_TABLE_LARGEST_BYTES, buffer);
-            if (read == VIRTUAL_READ_PENDING)
-            {
-                return ENGINE_DISC_WORKING;
-            }
-            opened = (read == VIRTUAL_READ_OK)
-                         ? installerReadOffsetTable(buffer, INSTALLER_TABLE_LARGEST_BYTES,
-                                                    tableOffsetInBytes, &installerTable)
-                         : INSTALLER_READ_TRUNCATED;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            if (opened != INSTALLER_READ_OK)
-            {
-                stringAppend(message, sizeof(message), "its offset table — ");
-                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
-                stringAppend(message, sizeof(message), ", starting ");
-                appendHexadecimalBytes(message, sizeof(message), buffer,
-                                       INSTALLER_TABLE_LARGEST_BYTES, 0UL, 12UL);
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_CONTENT;
-                return ENGINE_DISC_WORKING;
-            }
-            stringAppend(message, sizeof(message), "table revision ");
-            appendCount(message, sizeof(message), installerTable.tableRevision);
-            stringAppend(message, sizeof(message), ", ");
-            appendCount(message, sizeof(message), installerTable.wordCount);
-            stringAppend(message, sizeof(message), " fields: accounts for ");
-            appendByteSize(message, sizeof(message), (Unsigned64)installerTable.totalSizeInBytes);
-            stringAppend(message, sizeof(message), " of ");
-            appendByteSize(message, sizeof(message), entry->sizeInBytes);
-            stringAppend(message, sizeof(message), ", header at ");
-            appendHexadecimal(message, sizeof(message), installerTable.headerOffsetInBytes);
-            stringAppend(message, sizeof(message), ", data at ");
-            appendHexadecimal(message, sizeof(message), installerTable.dataOffsetInBytes);
-            platformLogMessage(message);
-            installerStage = 2U;
-            return ENGINE_DISC_WORKING;
-        }
-
-        read = virtualFileSystemReadFile(discFileSystem, installerFileIndex,
-                                         (Unsigned64)installerTable.headerOffsetInBytes,
-                                         INSTALLER_VERSION_STRING_BYTES, buffer);
-        if (read == VIRTUAL_READ_PENDING)
-        {
-            return ENGINE_DISC_WORKING;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: built with ");
-        if (read == VIRTUAL_READ_OK)
-        {
-            char version[INSTALLER_VERSION_STRING_BYTES + 1UL];
-
-            opened = installerReadVersionString(buffer, INSTALLER_VERSION_STRING_BYTES, version,
-                                                sizeof(version));
-            if (opened == INSTALLER_READ_OK)
-            {
-                stringAppend(message, sizeof(message), version);
-            }
-            else
-            {
-                stringAppend(message, sizeof(message), installerReadResultGetName(opened));
-                stringAppend(message, sizeof(message), ", starting ");
-                appendHexadecimalBytes(message, sizeof(message), buffer,
-                                       INSTALLER_VERSION_STRING_BYTES, 0UL, 12UL);
-            }
-        }
-        else
-        {
-            stringAppend(message, sizeof(message), virtualReadResultGetName(read));
-        }
-        platformLogMessage(message);
-        discPhase = DISC_PHASE_CONTENT;
-        return ENGINE_DISC_WORKING;
+        return openTheInstaller();
     }
+
 
     if (!discCatalogueIsBuilt)
     {
-        DiscReadStatus walk = discReaderStep(&discReader);
-
-        if (walk == DISC_READ_PENDING)
-        {
-            return ENGINE_DISC_WORKING;
-        }
-        if (walk != DISC_READ_COMPLETE)
-        {
-            reportDiscFailure(discReadStatusGetName(walk));
-            return discLoadStatus;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: disc ");
-        stringAppend(message, sizeof(message), discReader.volumeIdentifier);
-        stringAppend(message, sizeof(message), " holds ");
-        appendCount(message, sizeof(message), discFileSystem->entryCount);
-        stringAppend(message, sizeof(message), " files");
-        platformLogMessage(message);
-        engineReportDiscCatalogue(discFileSystem);
-
-        discCatalogueIsBuilt = BOOLEAN_TRUE;
-        probeCeilingSize = 0xFFFFFFFFFFFFFFFFULL;
-        probeCeilingIndex = 0U;
-        probesDone = 0U;
-        discPhase = DISC_PHASE_PROBE;
-        discContentBegin(&discSearch, discFileSystem, globalArena);
-        return ENGINE_DISC_WORKING;
+        return walkTheDisc();
     }
 
-    {
-        DiscContentStatus status = discContentStep(&discSearch);
-
-        if (status == DISC_CONTENT_PENDING)
-        {
-            return ENGINE_DISC_WORKING;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: opened ");
-        appendCount(message, sizeof(message), discSearch.packagesOpened);
-        stringAppend(message, sizeof(message), " packages, ");
-        appendCount(message, sizeof(message), discSearch.packagesCompressed);
-        stringAppend(message, sizeof(message), " compressed, ");
-        appendCount(message, sizeof(message), discSearch.packagesWithGeometry);
-        stringAppend(message, sizeof(message), " with geometry, ");
-        appendCount(message, sizeof(message), discSearch.packagesWithShapes);
-        stringAppend(message, sizeof(message), " with a shape, ");
-        appendCount(message, sizeof(message), discSearch.packagesWithTrees);
-        stringAppend(message, sizeof(message), " with a tree, ");
-        appendCount(message, sizeof(message), discSearch.modelsResolved);
-        stringAppend(message, sizeof(message), " followed to a model");
-        platformLogMessage(message);
-
-        /* Why the ones that were refused were refused. A count on its own says
-           something is wrong; this says what, and whether it is one thing or
-           several. */
-        if (discSearch.geometryRefused > 0U)
-        {
-            Unsigned32 reason;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: refused ");
-            appendCount(message, sizeof(message), discSearch.geometryRefused);
-            stringAppend(message, sizeof(message), " meshes —");
-            if (discSearch.decompressionRefused > 0U)
-            {
-                stringAppend(message, sizeof(message), " would not decompress x");
-                appendCount(message, sizeof(message), discSearch.decompressionRefused);
-                stringAppend(message, sizeof(message), ";");
-            }
-            for (reason = 0U; reason < GEOMETRY_READ_RESULT_COUNT; reason++)
-            {
-                if (discSearch.refusalsByReason[reason] == 0U)
-                {
-                    continue;
-                }
-                stringAppend(message, sizeof(message), " ");
-                stringAppend(message, sizeof(message),
-                             geometryReadResultGetName((GeometryReadResult)reason));
-                stringAppend(message, sizeof(message), " x");
-                appendCount(message, sizeof(message), discSearch.refusalsByReason[reason]);
-                stringAppend(message, sizeof(message), ";");
-            }
-            if (discSearch.largestArenaWant > 0UL)
-            {
-                stringAppend(message, sizeof(message), " largest allocation wanted ");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.largestArenaWant);
-                stringAppend(message, sizeof(message), " bytes;");
-            }
-            platformLogMessage(message);
-        }
-
-        /* What the disc holds, as opposed to what was done with it. A reason
-           only says where this engine stopped; the versions say which layouts
-           the game actually shipped, and that is the part guessing cannot
-           supply. It doubles as proof the page is not a cached older build. */
-        {
-            Unsigned32 bucket;
-            Boolean anyVersion = BOOLEAN_FALSE;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: container versions seen —");
-            for (bucket = 0U; bucket < DISC_CONTENT_VERSION_BUCKETS; bucket++)
-            {
-                if (discSearch.versionsSeen[bucket] == 0U)
-                {
-                    continue;
-                }
-                anyVersion = BOOLEAN_TRUE;
-                stringAppend(message, sizeof(message), " v");
-                appendCount(message, sizeof(message), bucket);
-                if (bucket == DISC_CONTENT_VERSION_BUCKETS - 1U)
-                {
-                    stringAppend(message, sizeof(message), "+");
-                }
-                stringAppend(message, sizeof(message), " x");
-                appendCount(message, sizeof(message), discSearch.versionsSeen[bucket]);
-                stringAppend(message, sizeof(message), ";");
-            }
-            if (!anyVersion)
-            {
-                stringAppend(message, sizeof(message), " none reached the block header");
-            }
-            if (discSearch.sawUnknownMark)
-            {
-                stringAppend(message, sizeof(message), " first non-0xFFFF0001 mark ");
-                appendHexadecimal(message, sizeof(message), discSearch.firstUnknownMark);
-                stringAppend(message, sizeof(message), ";");
-            }
-            if (discSearch.largestElementCount > 0U)
-            {
-                stringAppend(message, sizeof(message), " largest element count ");
-                appendCount(message, sizeof(message), discSearch.largestElementCount);
-                stringAppend(message, sizeof(message), ";");
-            }
-            platformLogMessage(message);
-        }
-
-        if (status != DISC_CONTENT_FOUND)
-        {
-            /* A search that was pointed at one package and came away with
-               nothing is not a failed load. Something is already drawn and
-               uploaded — this was an attempt to draw something better — so the
-               engine keeps what it has and says why, rather than reporting a
-               disc it read perfectly well as unreadable. */
-            if (discSearch.limitedToOneFile)
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message),
-                             "engine: that package holds skinned geometry but no model this can "
-                             "follow (");
-                stringAppend(message, sizeof(message), discContentStatusGetName(status));
-                stringAppend(message, sizeof(message), ") — keeping what was already drawn");
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_DONE;
-                discLoadStatus = ENGINE_DISC_READY;
-                return discLoadStatus;
-            }
-            reportDiscFailure(discContentStatusGetName(status));
-            return discLoadStatus;
-        }
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: drawing ");
-        stringAppend(message, sizeof(message), discSearch.mesh.name);
-        /* Named only when a shape led here. A container taken outright is not a
-           model, and saying it is would make the log agree with a claim the
-           engine has not earned. */
-        if (discSearch.foundThroughScenegraph)
-        {
-            stringAppend(message, sizeof(message), " of model ");
-            stringAppend(message, sizeof(message), discSearch.modelName);
-        }
-        else
-        {
-            stringAppend(message, sizeof(message), " (no shape, container taken directly)");
-        }
-        stringAppend(message, sizeof(message), " from ");
-        stringAppend(message, sizeof(message), discSearch.packagePath);
-        platformLogMessage(message);
-
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: ");
-        appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
-        stringAppend(message, sizeof(message), " vertices, ");
-        appendCount(message, sizeof(message), discSearch.mesh.indexCount / 3U);
-        stringAppend(message, sizeof(message), " triangles, ");
-        appendCount(message, sizeof(message), discSearch.mesh.storedPrimitiveCount);
-        stringAppend(message, sizeof(message), " of ");
-        appendCount(message, sizeof(message), discSearch.mesh.primitiveCount);
-        stringAppend(message, sizeof(message), " primitive(s) drawn, from ");
-        appendCount(message, sizeof(message), discSearch.mesh.componentCount);
-        stringAppend(message, sizeof(message), " component(s)");
-        platformLogMessage(message);
-
-        /* Where the model's tree says this part belongs. Nothing applies it
-           yet — one shape is drawn, and a single part's own transform is
-           usually identity — so it is reported rather than claimed. The number
-           to watch is whether every block was walked: a tree that stopped short
-           has parts this engine cannot reach at all. */
-        if (discSearch.modelHasTree)
-        {
-            const TransformNode *node = &discSearch.modelTree.nodes[discSearch.modelNodeIndex];
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: tree ");
-            stringAppend(message, sizeof(message), discSearch.modelTree.resourceName);
-            stringAppend(message, sizeof(message), " — ");
-            appendCount(message, sizeof(message), discSearch.modelTree.blocksRead);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), discSearch.modelTree.blockCount);
-            stringAppend(message, sizeof(message), " blocks walked, ");
-            appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), discSearch.modelTree.nodeCount);
-            stringAppend(message, sizeof(message), " node(s) kept");
-            if (discSearch.modelTree.storedNodeCount > 0U)
-            {
-                stringAppend(message, sizeof(message), ", bone ");
-                appendCount(message, sizeof(message), node->boneIdentifier);
-            }
-            /* Whether the node the part hangs from actually moved it. A model
-               whose one node is its root is placed at the origin either way,
-               and a transform that silently does nothing looks exactly like one
-               that was never applied. */
-            stringAppend(message, sizeof(message),
-                         discSearch.partWasMoved ? ", which places the part"
-                                                 : ", which leaves the part where it was");
-            platformLogMessage(message);
-        }
-
-        /* What the model is made of, against what is being drawn. One part of
-           several is a face where a Sim should be, and until this was counted
-           nobody could see the difference in a log. */
-        if (discSearch.partCount > 0U)
-        {
-            Unsigned32 part;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), discSearch.partCount);
-            stringAppend(message, sizeof(message), " part(s) —");
-            for (part = 0U; part < discSearch.partCount && part < 8U; part++)
-            {
-                stringAppend(message, sizeof(message), " ");
-                stringAppend(message, sizeof(message), discSearch.parts[part].meshName);
-                stringAppend(message, sizeof(message), " (");
-                appendCount(message, sizeof(message), discSearch.parts[part].indexCount / 3U);
-                stringAppend(message, sizeof(message), " triangles)");
-                if (discSearch.parts[part].materialName[0] != '\0')
-                {
-                    stringAppend(message, sizeof(message), " wearing ");
-                    stringAppend(message, sizeof(message), discSearch.parts[part].materialName);
-                }
-                stringAppend(message, sizeof(message), ";");
-            }
-            /* Which one the whole model is painted with, while it is still
-               painted with one. Naming it beside the others is what makes the
-               compromise visible rather than mysterious. */
-            if (discSearch.partCount > 1U && discSearch.materialName[0] != '\0')
-            {
-                stringAppend(message, sizeof(message), " all painted with ");
-                stringAppend(message, sizeof(message), discSearch.materialName);
-            }
-            if (discSearch.coarserPartsDropped > 0U)
-            {
-                stringAppend(message, sizeof(message), " ");
-                appendCount(message, sizeof(message), discSearch.coarserPartsDropped);
-                stringAppend(message, sizeof(message), " coarser copy(s) set aside;");
-            }
-            if (discSearch.partsBeyondRoom > 0U)
-            {
-                stringAppend(message, sizeof(message), " and ");
-                appendCount(message, sizeof(message), discSearch.partsBeyondRoom);
-                stringAppend(message, sizeof(message), " with no room to remember them");
-            }
-            platformLogMessage(message);
-        }
-
-        /* Where the rest of the model is. A Sim's tree names its body meshes by
-           key, and those keys are not in the file that describes one Sim — they
-           are in the packages the game ships, which are now mounted and
-           indexed. This says how many of them there are to go after. */
-        if (!discSearch.foundInPreferred && discSearch.modelHasTree)
-        {
-            /* Said when the model came from outside the game's own mesh
-               directory. A character file describes one Sim's face and the
-               skeleton under it; the body it wears is chosen at run time from
-               resources it does not name, so there is nothing else in there to
-               draw however hard this looks. */
-            platformLogMessage("engine: this is not one of the game's own meshes, so it may hold "
-                               "only a part of a model");
-        }
-
-        /* What the search turned down before it settled. A run that took the
-           first model it met and a run that walked past forty rigid ones to get
-           here look identical otherwise. */
-        if (discSearch.rigidModelsPassed > 0U)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: walked past ");
-            appendCount(message, sizeof(message), discSearch.rigidModelsPassed);
-            stringAppend(message, sizeof(message), " rigid model(s) looking for a skinned one");
-            if (discSearch.mesh.boneAssignments == NULL_POINTER)
-            {
-                stringAppend(message, sizeof(message),
-                             ", found none, and came back for the first of them");
-            }
-            platformLogMessage(message);
-        }
-
-        if (discSearch.shapeReferences > 0U)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: the tree names ");
-            appendCount(message, sizeof(message), discSearch.shapeReferences);
-            stringAppend(message, sizeof(message), " shape(s), ");
-            appendCount(message, sizeof(message), discSearch.shapeReferencesResolved);
-            stringAppend(message, sizeof(message), " of them in this package");
-            platformLogMessage(message);
-        }
-
-        /* The material and its texture. Nothing samples it yet, so this reports
-           what was found rather than what is on screen — but a name that failed
-           to match and a file that would not read are different problems, and
-           this is where the difference shows. */
-        if (discSearch.materialName[0] != '\0')
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: material ");
-            stringAppend(message, sizeof(message), discSearch.materialName);
-            if (!discSearch.materialFound)
-            {
-                /* The count separates a name that did not match from a package
-                   with no materials in it at all. The second is not a lookup
-                   bug: a Sim's face material is built from shared resources
-                   that live elsewhere on the disc, and finding it needs a
-                   wider search rather than a better comparison. */
-                stringAppend(message, sizeof(message), " — not among the ");
-                appendCount(message, sizeof(message), discSearch.materialsInPackage);
-                stringAppend(message, sizeof(message), " material(s) in this package");
-            }
-            else if (!discSearch.textureFound)
-            {
-                stringAppend(message, sizeof(message), " — read, but its texture is not among the ");
-                appendCount(message, sizeof(message), discSearch.texturesInPackage);
-                stringAppend(message, sizeof(message), " here");
-            }
-            else
-            {
-                stringAppend(message, sizeof(message), " — texture ");
-                stringAppend(message, sizeof(message), discSearch.texture.resourceName);
-                stringAppend(message, sizeof(message), " ");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.width);
-                stringAppend(message, sizeof(message), "x");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.height);
-                stringAppend(message, sizeof(message), " ");
-                stringAppend(message, sizeof(message),
-                             textureFormatGetName(discSearch.texture.format));
-                stringAppend(message, sizeof(message), ", level ");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelWidth);
-                stringAppend(message, sizeof(message), "x");
-                appendCount(message, sizeof(message), (Unsigned32)discSearch.texture.levelHeight);
-                if (discSearch.texture.largestIsElsewhere)
-                {
-                    stringAppend(message, sizeof(message), ", top level in ");
-                    stringAppend(message, sizeof(message), discSearch.texture.lifoName);
-                }
-            }
-            platformLogMessage(message);
-        }
-
-        /* What the mesh is weighted to, or that it is weighted to nothing.
-           A face is rigid — it hangs off one joint whole — and prints the
-           second, which is not a failure to read and should not look like
-           one. */
-        message[0] = '\0';
-        stringAppend(message, sizeof(message), "engine: ");
-        if (discSearch.mesh.boneAssignments != NULL_POINTER)
-        {
-            appendCount(message, sizeof(message), discSearch.mesh.skinnedVertexCount);
-            stringAppend(message, sizeof(message), " of ");
-            appendCount(message, sizeof(message), discSearch.mesh.vertexCount);
-            stringAppend(message, sizeof(message), " vertices are weighted to bones, ");
-            appendCount(message, sizeof(message), discSearch.mesh.weightsStoredPerVertex);
-            stringAppend(message, sizeof(message), " weight(s) stored per vertex and one implied");
-        }
-        else
-        {
-            stringAppend(message, sizeof(message),
-                         "the mesh carries no bone assignments — it is rigid, and hangs where its "
-                         "node puts it");
-        }
-        platformLogMessage(message);
-
-        /* What the mesh is weighted to, and that nothing was moved by it.
-           Skinning a mesh at rest is the identity — the mesh is already in the
-           pose its bones were measured in — so this says what is ready rather
-           than claiming a pose was applied. */
-        if (discSearch.mesh.boneAssignments != NULL_POINTER)
-        {
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: weighted to ");
-            appendCount(message, sizeof(message), discSearch.bonesInPalette);
-            stringAppend(message, sizeof(message), " bone(s) named by its primitives, out of ");
-            appendCount(message, sizeof(message), discSearch.modelTree.storedNodeCount);
-            stringAppend(message, sizeof(message),
-                         " node(s) in the tree, left in its bind pose because skinning it there "
-                         "would move nothing");
-            if (discSearch.firstBoneNameCount > 0U)
-            {
-                Unsigned32 which;
-
-                /* The bones a primitive named. These are identifiers its nodes
-                   carry, not positions in the node list, so the line below says
-                   how many of them a node actually answered to. */
-                stringAppend(message, sizeof(message), "; its primitives named bones");
-                for (which = 0U; which < discSearch.firstBoneNameCount; which++)
-                {
-                    stringAppend(message, sizeof(message), " ");
-                    appendCount(message, sizeof(message), discSearch.firstBoneNames[which]);
-                    stringAppend(message, sizeof(message), " (");
-                    stringAppend(message, sizeof(message), discSearch.firstBoneNodeNames[which]);
-                    stringAppend(message, sizeof(message), ")");
-                }
-            }
-            platformLogMessage(message);
-
-            /* How the bone numbers resolved, and what the container's own bind
-               pose turned out to be. Both directions are printed because the
-               number that matters is whichever one is near nought, and a reader
-               who is told only the winner has to take the comparison on trust. */
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: ");
-            appendCount(message, sizeof(message), discSearch.bonesMatchedToANode);
-            stringAppend(message, sizeof(message), " bone name(s) matched a node by identifier, ");
-            appendCount(message, sizeof(message), discSearch.bonesWithoutANode);
-            stringAppend(message, sizeof(message), " matched none");
-            if (discSearch.bonesMeasured > 0U)
-            {
-                stringAppend(message, sizeof(message), "; over ");
-                appendCount(message, sizeof(message), discSearch.bonesMeasured);
-                stringAppend(message, sizeof(message),
-                             " measured, world x stored is ");
-                appendThousandths(message, sizeof(message), discSearch.bindPoseFromIdentity);
-                stringAppend(message, sizeof(message), " from the identity and stored is ");
-                appendThousandths(message, sizeof(message), discSearch.bindPoseFromWorld);
-                stringAppend(message, sizeof(message),
-                             " from world — the smaller says which the file holds");
-            }
-            else if (discSearch.mesh.bindPoseCount == 0U)
-            {
-                stringAppend(message, sizeof(message), "; the container carried no bind pose");
-            }
-            platformLogMessage(message);
-        }
-
-        /* Element kinds the reader met and did not use, by name where the
-           format's own table has one. A number alone sends the next reader
-           looking it up; the name says at once whether what was passed over
-           was a morph target or a second colour set. */
-        if (discSearch.mesh.unusedElementCount > 0U)
-        {
-            Unsigned32 unused;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: vertex elements met and not used —");
-            for (unused = 0U; unused < discSearch.mesh.unusedElementCount; unused++)
-            {
-                const char *elementName =
-                    geometryElementGetName(discSearch.mesh.unusedElements[unused]);
-
-                stringAppend(message, sizeof(message), " ");
-                if (elementName != NULL_POINTER)
-                {
-                    stringAppend(message, sizeof(message), elementName);
-                    stringAppend(message, sizeof(message), " (");
-                    appendHexadecimal(message, sizeof(message),
-                                      discSearch.mesh.unusedElements[unused]);
-                    stringAppend(message, sizeof(message), ")");
-                }
-                else
-                {
-                    stringAppend(message, sizeof(message), "unnamed ");
-                    appendHexadecimal(message, sizeof(message),
-                                      discSearch.mesh.unusedElements[unused]);
-                }
-                stringAppend(message, sizeof(message), " as format ");
-                appendCount(message, sizeof(message), discSearch.mesh.unusedElementFormats[unused]);
-                stringAppend(message, sizeof(message), ";");
-            }
-            platformLogMessage(message);
-        }
-
-        /* Each part by name. A model that arrives as one silhouette is hard to
-           tell from a model that arrived as one part, and the difference
-           matters as soon as materials do. */
-        if (discSearch.mesh.storedPrimitiveCount > 1U)
-        {
-            Unsigned32 part;
-
-            message[0] = '\0';
-            stringAppend(message, sizeof(message), "engine: parts —");
-            for (part = 0U; part < discSearch.mesh.storedPrimitiveCount; part++)
-            {
-                stringAppend(message, sizeof(message), " ");
-                stringAppend(message, sizeof(message), discSearch.mesh.primitives[part].name);
-                stringAppend(message, sizeof(message), " (");
-                appendCount(message, sizeof(message),
-                            discSearch.mesh.primitives[part].indexCount / 3U);
-                stringAppend(message, sizeof(message), " triangles);");
-            }
-            platformLogMessage(message);
-        }
-
-        /* The image the material asked for was not in its own package. A Sim's
-           face texture lives in the shared skin packages, so this is the normal
-           case rather than a failure — but it needs a search of the whole disc,
-           which is a phase of its own. */
-        if (!discSearch.textureFound && discSearch.textureName[0] != '\0' &&
-            discSearch.mesh.textureCoordinates != NULL_POINTER)
-        {
-            /* Images and the resources that hold a single mip level of one.
-               Both are indexed because a texture whose top level lives in a
-               LIFO may be filed either way, and looking for only one of them
-               and finding nothing proves nothing about the other. */
-            static const Unsigned32 wantedTypes[2] = { (Unsigned32)PACKAGE_TYPE_TXTR,
-                                                       (Unsigned32)PACKAGE_TYPE_LIFO };
-
-            if (resourceIndexBegin(&textureIndex, discFileSystem, globalArena,
-                                   TEXTURE_INDEX_CAPACITY, wantedTypes, 2U))
-            {
-                message[0] = '\0';
-                stringAppend(message, sizeof(message), "engine: looking for ");
-                stringAppend(message, sizeof(message), discSearch.textureName);
-                stringAppend(message, sizeof(message), " across the rest of the disc");
-                platformLogMessage(message);
-                discPhase = DISC_PHASE_INDEX;
-                return ENGINE_DISC_WORKING;
-            }
-            platformLogMessage("engine: not enough room to index the disc for a texture");
-        }
-
-        /* The mesh first here too, for the same reason: this is the path taken
-           when a package held its own texture, and it had the same ordering. */
-        renderSetMesh(&discSearch.mesh, globalArena);
-        uploadFoundTexture();
-        return finishOrSeekSkin();
-    }
-    return discLoadStatus;
+    return searchTheContent();
 }
 
 /* For a platform whose reads never answer PENDING. Nothing here is fatal: an
@@ -7108,10 +6759,7 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
         return BOOLEAN_FALSE;
     }
 
-    interfaceWindowWidth = (configuration->widthInPixels > 0U) ? configuration->widthInPixels
-                                                               : 1U;
-    interfaceWindowHeight = (configuration->heightInPixels > 0U) ? configuration->heightInPixels
-                                                                 : 1U;
+    engineTextSetWindowSize(configuration->widthInPixels, configuration->heightInPixels);
     simMorphHeldChannel = configuration->heldMorphChannel;
 
     if (configuration->simArchetype != NULL_POINTER && configuration->simArchetype[0] != '\0')
@@ -7124,7 +6772,10 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     /* Early, and before anything that might fail: the font the engine carries
        with it is what lets a later failure be reported in words on the screen
        rather than only to a terminal nobody is looking at. */
-    settleTheText();
+    if (!engineTextInitialize(globalArena))
+    {
+        platformLogMessage("engine: nothing will be drawn in words this run");
+    }
     {
         Unsigned8 *block = (Unsigned8 *)memoryArenaAllocate(globalArena, ANIMATION_ARENA_BYTES,
                                                            16UL);
@@ -7225,25 +6876,6 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
    and the two live either side of it. */
 static void applyTheChoice(void);
 
-/* Where the pointer is, translated into the menu's own coordinates.
- *
- * The interface is drawn in the top left corner at one pixel to one, so window
- * coordinates and surface coordinates are the same numbers. That is worth
- * writing down rather than relying on: the day the interface is drawn anywhere
- * else, this is the function that has to change and the only one. */
-static InterfaceMenuHit whatIsUnderThePointer(void)
-{
-    InterfaceMenuHit nothing;
-
-    nothing.target = INTERFACE_MENU_NOTHING;
-    nothing.value = 0U;
-    if (!textIsReady || !debugMenuIsOpen(&debugMenu) || pointerX < 0 || pointerY < 0)
-    {
-        return nothing;
-    }
-    return interfaceMenuHitTest(&menuLayout, &debugMenu, pointerX, pointerY);
-}
-
 Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y)
 {
     InterfaceMenuHit hit;
@@ -7254,29 +6886,24 @@ Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y
     }
     if (action == ENGINE_POINTER_LEFT)
     {
-        Boolean wasOverSomething = (Boolean)(menuHovered.target != INTERFACE_MENU_NOTHING);
+        Boolean wasOverSomething =
+            (Boolean)(engineTextGetHovered().target != INTERFACE_MENU_NOTHING);
 
-        pointerX = -1;
-        pointerY = -1;
-        menuHovered.target = INTERFACE_MENU_NOTHING;
-        menuHovered.value = 0U;
+        engineTextForgetPointer();
         return wasOverSomething;
     }
 
-    pointerX = x;
-    pointerY = y;
-    hit = whatIsUnderThePointer();
+    engineTextSetPointer(x, y);
+    hit = engineTextHitTest(&debugMenu);
     if (action == ENGINE_POINTER_MOVED)
     {
-        Boolean changed = (Boolean)(hit.target != menuHovered.target ||
-                                    hit.value != menuHovered.value);
+        InterfaceMenuHit before = engineTextGetHovered();
 
-        menuHovered = hit;
-        return changed;
+        engineTextSetHovered(hit);
+        return (Boolean)(hit.target != before.target || hit.value != before.value);
     }
 
-    /* A press. */
-    menuHovered = hit;
+    engineTextSetHovered(hit);
     switch (hit.target)
     {
     case INTERFACE_MENU_CLOSE:
@@ -7308,13 +6935,9 @@ Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y
 
 void engineResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
 {
-    /* Kept because the menu sizes itself against the window: a fraction of it,
-       capped, so a debug menu never fills the screen it is describing. */
-    interfaceWindowWidth = (widthInPixels > 0U) ? widthInPixels : 1U;
-    interfaceWindowHeight = (heightInPixels > 0U) ? heightInPixels : 1U;
-    /* Forces a redraw at the new size. Nothing else would: the menu says the
-       same words in a window of any size. */
-    menuTextDrawn[0] = '\0';
+    /* The menu sizes itself against the window: a fraction of it, capped, so a
+       debug menu never fills the screen it is describing. */
+    engineTextSetWindowSize(widthInPixels, heightInPixels);
     if (engineIsRunning == BOOLEAN_FALSE)
     {
         return;
@@ -7576,7 +7199,7 @@ void engineRenderFrame(Real32 elapsedSeconds)
        step of the disc load, and composing it afterwards would put it on screen
        one frame late — which on the frame somebody presses a key is the frame
        they are looking at. */
-    drawTheInterface();
+    engineTextDraw(&debugMenu, engineGetMenuText());
     renderDrawFrame(elapsedSeconds);
     VICTORIA_PROFILE_ZONE_END();
 }
