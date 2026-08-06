@@ -1403,7 +1403,13 @@ static SimAssembly finishThePart(MemorySize marker)
  *
  * One read per step, like every other hop, because a browser's store answers
  * exactly one. */
-#define CATALOGUE_SAMPLE_LIMIT 600U
+/* Six hundred was a sample of one kind of thing. The catalogue is not sorted by
+   what an entry is, but it is grouped: the first hundred and fifty read came
+   back identical — unnamed, uncategorised, one outfit value between them — and
+   a sample that homogeneous says more about where it started than about the
+   disc. Two thousand costs two reads apiece and reaches past the first
+   neighbourhood of it. */
+#define CATALOGUE_SAMPLE_LIMIT 2000U
 #define CATALOGUE_KIND_LIMIT 16U
 static Unsigned32 catalogueCursor = 0U;
 static Unsigned32 catalogueRead = 0U;
@@ -1432,6 +1438,9 @@ static Unsigned32 catalogueShown = 0U;
    that named a shape and could not find it. */
 static Unsigned32 catalogueNotAShape = 0U;
 static Unsigned32 catalogueKeysShown = 0U;
+/* Named entries that reach no mesh — the candidates for a brow, an eye or a
+   lip, which are named things without geometry of their own. */
+static Unsigned32 catalogueNamedMeshlessShown = 0U;
 
 /* The catalogue tallied by the slot each entry declares.
  *
@@ -1936,6 +1945,49 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     }
                     platformLogMessage(keyMessage);
                 }
+                /* A NAMED entry whose key is not a shape, in full with every
+                   key it holds.
+                 *
+                   That is the shape a brow, an eye or a lip should have: it is
+                   a thing somebody chose and named, and it has no mesh of its
+                   own because it is painted onto a face that is already drawn.
+                   The unnamed ones turned out to be groupings — a tree and a
+                   dozen other catalogue entries — so they are not it. */
+                if (catalogueEntryName[0] != '\0' &&
+                    key->typeIdentifier != (Unsigned32)PACKAGE_TYPE_SHPE &&
+                    catalogueNamedMeshlessShown < 6U)
+                {
+                    char named[512];
+                    Unsigned32 at;
+
+                    catalogueNamedMeshlessShown++;
+                    named[0] = '\0';
+                    stringAppend(named, sizeof(named), "engine:   named but meshless — ");
+                    stringAppend(named, sizeof(named), catalogueEntryName);
+                    stringAppend(named, sizeof(named), ", key ");
+                    appendCount(named, sizeof(named), catalogueShapeIndex);
+                    stringAppend(named, sizeof(named), " of");
+                    for (at = 0U; at < list.storedKeyCount; at++)
+                    {
+                        const char *typeName = resourceTypeGetName(list.keys[at].typeIdentifier);
+
+                        stringAppend(named, sizeof(named), " ");
+                        appendCount(named, sizeof(named), at);
+                        stringAppend(named, sizeof(named), ":");
+                        if (typeName != NULL_POINTER)
+                        {
+                            stringAppend(named, sizeof(named), typeName);
+                        }
+                        else
+                        {
+                            appendHexadecimal(named, sizeof(named),
+                                              list.keys[at].typeIdentifier);
+                        }
+                        stringAppend(named, sizeof(named), ";");
+                    }
+                    platformLogMessage(named);
+                }
+
                 /* A few in full, because a count of successes says the chain
                    closes and nothing about what it closes onto. */
                 if (catalogueShown < 6U)
