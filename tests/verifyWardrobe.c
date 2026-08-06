@@ -45,6 +45,34 @@ int main(void)
     /* The rule table itself, because everything below is read against it and a
        check that agreed with a table it had also written would prove nothing.
        These are the values measured off a retail disc's catalogue. */
+    /* The marks are composed from who the Sim is, not written down per part.
+       An engine whose table said "amhair" could dress exactly one person. */
+    {
+        wardrobeBegin(&wardrobe, "cf", "", "");
+        checkThat(&failureCount, "a part's mark is the archetype and then the part",
+                  stringEquals(wardrobeGetPartMark(&wardrobe, PART_HAIR), "cfhair") &&
+                      stringEquals(wardrobeGetPartMark(&wardrobe, PART_BOTTOM), "cfbottom"));
+        checkThat(&failureCount, "so a child female wears a child female's clothes",
+                  wardrobeOffer(&wardrobe, "cfbodyromper_yellow", 0x08U) == PART_BODY);
+        checkThat(&failureCount, "and an adult male's are refused for her",
+                  wardrobeOffer(&wardrobe, "ambodyparka_green", 0x08U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+    }
+
+    /* No archetype means nobody to dress. An empty mark is contained in every
+       name, so falling back rather than refusing would dress this Sim in the
+       first garment of every slot on the disc. */
+    {
+        wardrobeBegin(&wardrobe, "", "", "");
+        checkThat(&failureCount, "a Sim who is nobody wears nothing",
+                  wardrobeOffer(&wardrobe, "ambodyparka_green", 0x08U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN &&
+                      wardrobeOffer(&wardrobe, "cfbodyromper_yellow", 0x08U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+        checkThat(&failureCount, "and nothing is quietly taken instead",
+                  wardrobeGetChosenCount(&wardrobe) == 0U && wardrobe.refusedByMark == 2U);
+    }
+
     checkThat(&failureCount, "the body is dressed by the whole-body slot",
               (Integer32)wardrobeGetPartOutfit(PART_BODY) == 0x08);
     checkThat(&failureCount, "the face is dressed by the face slot",
@@ -58,7 +86,7 @@ int main(void)
 
     /* Nothing asked for and no tone known: the first of each slot is taken. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "an adult male body outfit dresses the body",
                   wardrobeOffer(&wardrobe, "ambodyswimwear_redtrunks", 0x08U) == PART_BODY);
         checkThat(&failureCount, "an adult male hair dresses the hair",
@@ -75,7 +103,7 @@ int main(void)
        authored for any other skeleton must never be taken — it resolves
        perfectly and comes apart on the first pose. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "a child's body is refused",
                   wardrobeOffer(&wardrobe, "cmbodylongsweaterpants_purplepattern", 0x08U) ==
                       (Unsigned32)WARDROBE_NOT_WORN);
@@ -96,7 +124,7 @@ int main(void)
        cannot be anchored at the front. It was, first time round, and every
        catalogue entry on the disc begins CASIE_. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "a CAS-prefixed name still matches its mark",
                   wardrobeOffer(&wardrobe, "CASIE_ambodytracksuit_blue", 0x08U) == PART_BODY);
     }
@@ -105,7 +133,7 @@ int main(void)
        body together, and there is no answer to which of the two it is — wearing
        either half is worse than not wearing it. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "a top dresses the top",
                   wardrobeOffer(&wardrobe, "amtopjackettshirthang_grey", 0x04U) == PART_TOP);
         checkThat(&failureCount, "a bottom dresses the bottom",
@@ -121,7 +149,7 @@ int main(void)
        body are the same volume of Sim described two ways, and joining both puts
        a pair of trousers through a pair of legs that are already there. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "nothing offered leaves the Sim as it was assembled",
                   wardrobeGetArrangement(&wardrobe) == WARDROBE_ARRANGEMENT_AS_ASSEMBLED);
 
@@ -153,7 +181,7 @@ int main(void)
        worth checking both: the arrangement asks for two things and an && with
        one side dropped still passes half these cases. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         (void)wardrobeOffer(&wardrobe, "ambottomlongshorts_tantan", 0x10U);
         checkThat(&failureCount, "a bottom with no top beside it is not worn",
                   !wardrobeIsWorn(&wardrobe, PART_BOTTOM) &&
@@ -164,7 +192,7 @@ int main(void)
        pair wins whenever both halves turned up, which is nearly always, and
        --wear could never be pointed at a whole-body garment at all. */
     {
-        wardrobeBegin(&wardrobe, "parka", "");
+        wardrobeBegin(&wardrobe, "am", "parka", "");
         offerOneOfEach(&wardrobe);
         checkThat(&failureCount, "asking for a whole body by name wears it whole",
                   wardrobeGetArrangement(&wardrobe) == WARDROBE_ARRANGEMENT_WHOLE &&
@@ -172,7 +200,7 @@ int main(void)
     }
 
     {
-        wardrobeBegin(&wardrobe, "cowboyshirt", "");
+        wardrobeBegin(&wardrobe, "am", "cowboyshirt", "");
         offerOneOfEach(&wardrobe);
         checkThat(&failureCount, "asking for a top by name wears the pair",
                   wardrobeGetArrangement(&wardrobe) == WARDROBE_ARRANGEMENT_PAIR &&
@@ -182,7 +210,7 @@ int main(void)
     /* The unnamed entries are groupings. They carry a slot like everything
        else, so the name is the only thing that tells them apart. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "an unnamed entry dresses nothing",
                   wardrobeOffer(&wardrobe, "", 0x08U) == (Unsigned32)WARDROBE_NOT_WORN);
         checkThat(&failureCount, "counted as unnamed and not as a bad name",
@@ -198,7 +226,7 @@ int main(void)
        topnaked and whose texture is a tank top. Refusing on `naked` refuses most
        of the tops on the disc. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         checkThat(&failureCount, "the naked body the Sim already wears is refused",
                   wardrobeOffer(&wardrobe, "CASIE_ambodynaked_nude_s1", 0x08U) ==
                       (Unsigned32)WARDROBE_NOT_WORN);
@@ -218,7 +246,7 @@ int main(void)
        worn over it, so one tone off is a head that does not belong to its
        neck. */
     {
-        wardrobeBegin(&wardrobe, "", "s3");
+        wardrobeBegin(&wardrobe, "am", "", "s3");
         checkThat(&failureCount, "a face of the wrong tone is taken when nothing better is held",
                   wardrobeOffer(&wardrobe, "CASIE_amface_s1", 0x02U) == PART_FACE);
         checkThat(&failureCount, "and is not recorded as matching the tone",
@@ -237,15 +265,53 @@ int main(void)
                   stringEquals(wardrobeGetChosenName(&wardrobe, PART_FACE), "CASIE_amface_s3"));
     }
 
+    /* A face with no tone at all is not a face of the wrong colour — it is not
+       an ordinary face. An alien and a mannequin sit in the same slot as every
+       real face, and ranking them level with a real face of the wrong tone is
+       how a teenager came out green. */
+    {
+        wardrobeBegin(&wardrobe, "tf", "", "s1");
+        checkThat(&failureCount, "an alien face is never worn, even with nothing else offered",
+                  wardrobeOffer(&wardrobe, "tfface_alien", 0x02U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+        checkThat(&failureCount, "nor a mannequin, which ends in no digits at all",
+                  wardrobeOffer(&wardrobe, "CASIE_tfface_CASmannequin", 0x02U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+        checkThat(&failureCount, "so the Sim keeps the face the assembly gave her",
+                  !wardrobeIsChosen(&wardrobe, PART_FACE) && wardrobe.refusedAsWorn == 2U);
+        checkThat(&failureCount, "a real face of the wrong tone is worn",
+                  wardrobeOffer(&wardrobe, "CASIE_tfface_s4", 0x02U) == PART_FACE &&
+                      wardrobe.toneRank[PART_FACE] == 1U);
+        checkThat(&failureCount, "and the right tone displaces it",
+                  wardrobeOffer(&wardrobe, "CASIE_tfface_s1", 0x02U) == PART_FACE &&
+                      wardrobe.toneRank[PART_FACE] == 2U);
+        checkThat(&failureCount, "after which nothing toneless can win it back",
+                  wardrobeOffer(&wardrobe, "tfface_alien", 0x02U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN &&
+                      stringEquals(wardrobeGetChosenName(&wardrobe, PART_FACE),
+                                   "CASIE_tfface_s1"));
+    }
+
+    /* A garment is not held to that. Its name ends in a colourway, which is not
+       a tone and must not be read as one — a rule about faces applied to bodies
+       would refuse every garment on the disc. */
+    {
+        wardrobeBegin(&wardrobe, "am", "", "s1");
+        checkThat(&failureCount, "a body whose name carries no tone is still worn",
+                  wardrobeOffer(&wardrobe, "ambodyparka_green", 0x08U) == PART_BODY);
+        checkThat(&failureCount, "and so is a hair",
+                  wardrobeOffer(&wardrobe, "amhairshortgel_black", 0x01U) == PART_HAIR);
+    }
+
     /* The tone is a whole trailing component, not a couple of characters that
        happen to be at the end. Matching "s1" loose would match "CASmannequins1"
        and, worse, a garment named for its colour. */
     {
-        wardrobeBegin(&wardrobe, "", "s1");
-        checkThat(&failureCount, "a name merely ending in the tone's letters does not match it",
-                  wardrobeOffer(&wardrobe, "CASIE_amfaces1", 0x02U) == PART_FACE &&
-                      !wardrobe.toneMatched[PART_FACE]);
-        checkThat(&failureCount, "so it is held only until a real one turns up",
+        wardrobeBegin(&wardrobe, "am", "", "s1");
+        checkThat(&failureCount, "a name merely ending in the tone's letters carries no tone",
+                  wardrobeOffer(&wardrobe, "CASIE_amfaces1", 0x02U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+        checkThat(&failureCount, "while the separator makes it one",
                   wardrobeOffer(&wardrobe, "CASIE_amface_s1", 0x02U) == PART_FACE &&
                       wardrobe.toneMatched[PART_FACE]);
     }
@@ -255,7 +321,7 @@ int main(void)
        be chosen on it — if it were, a Sim would end up in whichever garment
        happened to be named after its skin. */
     {
-        wardrobeBegin(&wardrobe, "", "redtrunks");
+        wardrobeBegin(&wardrobe, "am", "", "redtrunks");
         checkThat(&failureCount, "a body is taken whatever its colourway",
                   wardrobeOffer(&wardrobe, "ambodyparka_green", 0x08U) == PART_BODY);
         checkThat(&failureCount, "and nothing named for the tone displaces it",
@@ -270,7 +336,7 @@ int main(void)
        particular, which is the only way to look at more than whatever the walk
        met first. */
     {
-        wardrobeBegin(&wardrobe, "parka", "");
+        wardrobeBegin(&wardrobe, "am", "parka", "");
         checkThat(&failureCount, "something else is worn until the one asked for turns up",
                   wardrobeOffer(&wardrobe, "ambodyswimwear_redtrunks", 0x08U) == PART_BODY);
         checkThat(&failureCount, "the one asked for displaces it",
@@ -288,7 +354,7 @@ int main(void)
        and no face is named after a garment, so both were refused and a Sim
        came out clothed and bald. */
     {
-        wardrobeBegin(&wardrobe, "parka", "s1");
+        wardrobeBegin(&wardrobe, "am", "parka", "s1");
         checkThat(&failureCount, "a hair nobody asked about is still worn",
                   wardrobeOffer(&wardrobe, "amhairshortgel_black", 0x01U) == PART_HAIR);
         checkThat(&failureCount, "a face nobody asked about is still worn",
@@ -302,23 +368,38 @@ int main(void)
        that face whatever tone it turns out to be — and having named it, is not
        then overruled by the tone rule they were working around. */
     {
-        wardrobeBegin(&wardrobe, "alien", "s1");
+        wardrobeBegin(&wardrobe, "am", "s3", "s1");
         checkThat(&failureCount, "a face of the right tone is worn first",
                   wardrobeOffer(&wardrobe, "CASIE_amface_s1", 0x02U) == PART_FACE &&
                       wardrobe.toneMatched[PART_FACE]);
         checkThat(&failureCount, "and the one asked for displaces it despite the tone",
-                  wardrobeOffer(&wardrobe, "amface_alien", 0x02U) == PART_FACE);
+                  wardrobeOffer(&wardrobe, "CASIE_amface_s3", 0x02U) == PART_FACE);
         checkThat(&failureCount, "and the right tone does not win it back",
                   wardrobeOffer(&wardrobe, "CASIE_amface_s1", 0x02U) ==
                       (Unsigned32)WARDROBE_NOT_WORN &&
-                      stringEquals(wardrobeGetChosenName(&wardrobe, PART_FACE), "amface_alien"));
+                      stringEquals(wardrobeGetChosenName(&wardrobe, PART_FACE),
+                                   "CASIE_amface_s3"));
+    }
+
+    /* Asking for an alien by name does not get one either. It is the same rule
+       as a nude body and a bald scalp: what a part already wears is the floor,
+       the flag chooses among the things that clear it, and a run that could be
+       steered under the floor would be a way to make a Sim worse on purpose. */
+    {
+        wardrobeBegin(&wardrobe, "am", "alien", "s1");
+        checkThat(&failureCount, "a toneless face is refused even when asked for by name",
+                  wardrobeOffer(&wardrobe, "amface_alien", 0x02U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
+        checkThat(&failureCount, "as a nude body is",
+                  wardrobeOffer(&wardrobe, "CASIE_ambodynaked_nude_s1", 0x08U) ==
+                      (Unsigned32)WARDROBE_NOT_WORN);
     }
 
     /* A name asked for does not get to override the skeleton guard. Someone
        typing a garment they can see in the log should not be able to hang a
        child's mesh on an adult. */
     {
-        wardrobeBegin(&wardrobe, "sweaterpants", "");
+        wardrobeBegin(&wardrobe, "am", "sweaterpants", "");
         checkThat(&failureCount, "what was asked for is still refused if it is the wrong Sim",
                   wardrobeOffer(&wardrobe, "cmbodylongsweaterpants_purplepattern", 0x08U) ==
                       (Unsigned32)WARDROBE_NOT_WORN);
@@ -330,7 +411,7 @@ int main(void)
        run takes one of these, so a report that counted them and named none
        would leave --wear with nothing to be pointed at. */
     {
-        wardrobeBegin(&wardrobe, "", "");
+        wardrobeBegin(&wardrobe, "am", "", "");
         (void)wardrobeOffer(&wardrobe, "ambodyparka_green", 0x08U);
         (void)wardrobeOffer(&wardrobe, "ambodyswimwear_redtrunks", 0x08U);
         (void)wardrobeOffer(&wardrobe, "afbodyburglar", 0x08U);
@@ -358,7 +439,7 @@ int main(void)
     {
         Unsigned32 accounted;
 
-        wardrobeBegin(&wardrobe, "", "s1");
+        wardrobeBegin(&wardrobe, "am", "", "s1");
         (void)wardrobeOffer(&wardrobe, "", 0x08U);
         (void)wardrobeOffer(&wardrobe, "amtopnaked_babybluetank", 0x04U);
         (void)wardrobeOffer(&wardrobe, "afbodyburglar", 0x08U);

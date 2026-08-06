@@ -5,15 +5,13 @@
 /* What each drawn part demands of a catalogue entry before it will wear it. */
 typedef struct WardrobePartRule
 {
-    /* The age and gender the entry must be authored for, spelled the way the
-     * catalogue spells it — "am" for an adult male, then the part.
+    /* What follows the age and gender in the name — "body", "hair", "top".
      *
-     * This is the guard that matters. A child's body is weighted to a child's
-     * skeleton, and hung on an adult's it does not read as a Sim in the wrong
-     * clothes: the bones resolve to the wrong joints and the model comes apart.
-     * The engine hangs everything on auskel_cres, so everything it wears must
-     * have been authored for one. */
-    const char *mark;
+     * The age and gender come from the Sim, not from here. Together they make
+     * the guard that matters: a child's body is weighted to a child's skeleton,
+     * and hung on an adult's it does not read as a Sim in the wrong clothes —
+     * the bones resolve to the wrong joints and the model comes apart. */
+    const char *suffix;
     /* The outfit slot that dresses this part, measured on this disc rather than
        taken from a reference: 0x01 is hair, 0x02 the face, 0x04 a top, 0x08 a
        whole body, 0x10 a bottom. */
@@ -38,16 +36,16 @@ typedef struct WardrobePartRule
 } WardrobePartRule;
 
 static const WardrobePartRule wardrobeRules[WARDROBE_PART_COUNT] = {
-    { "ambody", 0x08U, "_nude", BOOLEAN_FALSE },
-    { "amface", 0x02U, "", BOOLEAN_TRUE },
-    { "amhair", 0x01U, "hairbald", BOOLEAN_FALSE },
-    { "amtop", 0x04U, "_nude", BOOLEAN_FALSE },
-    { "ambottom", 0x10U, "_nude", BOOLEAN_FALSE }
+    { "body", 0x08U, "_nude", BOOLEAN_FALSE },
+    { "face", 0x02U, "", BOOLEAN_TRUE },
+    { "hair", 0x01U, "hairbald", BOOLEAN_FALSE },
+    { "top", 0x04U, "_nude", BOOLEAN_FALSE },
+    { "bottom", 0x10U, "_nude", BOOLEAN_FALSE }
 };
 
-const char *wardrobeGetPartMark(Unsigned32 part)
+const char *wardrobeGetPartMark(const Wardrobe *wardrobe, Unsigned32 part)
 {
-    return (part < WARDROBE_PART_COUNT) ? wardrobeRules[part].mark : "";
+    return (part < WARDROBE_PART_COUNT) ? wardrobe->marks[part] : "";
 }
 
 Unsigned32 wardrobeGetPartOutfit(Unsigned32 part)
@@ -60,14 +58,29 @@ const char *wardrobeGetPartWorn(Unsigned32 part)
     return (part < WARDROBE_PART_COUNT) ? wardrobeRules[part].worn : "";
 }
 
-void wardrobeBegin(Wardrobe *wardrobe, const char *wanted, const char *tone)
+void wardrobeBegin(Wardrobe *wardrobe, const char *archetype, const char *wanted,
+                   const char *tone)
 {
     Unsigned32 part;
 
+    wardrobe->archetype[0] = '\0';
+    if (archetype != NULL_POINTER)
+    {
+        stringAppend(wardrobe->archetype, (MemorySize)WARDROBE_ARCHETYPE_LIMIT, archetype);
+    }
     for (part = 0U; part < WARDROBE_PART_COUNT; part++)
     {
+        /* An empty archetype leaves an empty mark, and an empty mark matches
+           everything — so it is refused outright in the offer rather than
+           quietly dressing this Sim in the whole catalogue. */
+        wardrobe->marks[part][0] = '\0';
+        stringAppend(wardrobe->marks[part], (MemorySize)WARDROBE_NAME_LIMIT,
+                     wardrobe->archetype);
+        stringAppend(wardrobe->marks[part], (MemorySize)WARDROBE_NAME_LIMIT,
+                     wardrobeRules[part].suffix);
         wardrobe->chosen[part] = BOOLEAN_FALSE;
         wardrobe->toneMatched[part] = BOOLEAN_FALSE;
+        wardrobe->toneRank[part] = 0U;
         wardrobe->nameWanted[part] = BOOLEAN_FALSE;
         wardrobe->names[part][0] = '\0';
         wardrobe->alternativeCount[part] = 0U;
@@ -111,9 +124,48 @@ static Boolean nameCarriesTone(const char *name, const char *tone)
     return stringEndsWithIgnoringCase(name, suffix);
 }
 
+/* Whether a name ends in ANY skin tone — an underscore, an s, and then digits.
+ *
+ * A face that carries no tone at all is not a face of the wrong colour: it is
+ * not an ordinary face. `tfface_alien` and `CASIE_puface_mannequin` are in the
+ * same slot as `CASIE_tmface_s1` and are a green alien and a shop dummy, and a
+ * rule that only asked "is this the right tone" ranked them level with every
+ * real face of the wrong one — so a teenager came out green. */
+static Boolean nameCarriesAnyTone(const char *name)
+{
+    MemorySize length = stringLength(name);
+    MemorySize at = length;
+    MemorySize digits = 0UL;
+
+    while (at > 0UL && name[at - 1UL] >= '0' && name[at - 1UL] <= '9')
+    {
+        at -= 1UL;
+        digits += 1UL;
+    }
+    if (digits == 0UL || at < 2UL)
+    {
+        return BOOLEAN_FALSE;
+    }
+    return (characterToLowerCase(name[at - 1UL]) == 's' && name[at - 2UL] == '_') ? BOOLEAN_TRUE
+                                                                                 : BOOLEAN_FALSE;
+}
+
+/* How well a candidate's tone suits this Sim. Two is the tone asked for, one is
+   some other real tone, nought is no tone at all. Three steps and not two,
+   because "wrong colour" and "not a person" are different answers. */
+static Unsigned32 toneRankOf(const char *name, const char *tone)
+{
+    if (nameCarriesTone(name, tone))
+    {
+        return 2U;
+    }
+    return nameCarriesAnyTone(name) ? 1U : 0U;
+}
+
 Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 outfitSlot)
 {
     Unsigned32 part;
+    Unsigned32 toneRank;
     Boolean tonedRight;
     Boolean wantedRight;
 
@@ -142,7 +194,11 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
         return (Unsigned32)WARDROBE_NOT_WORN;
     }
 
-    if (!stringContainsIgnoringCase(entryName, wardrobeRules[part].mark))
+    /* No archetype means nobody to dress. Refused rather than defaulted: an
+       empty mark is contained in every name, so falling back would dress this
+       Sim in the first garment of every slot the disc holds. */
+    if (wardrobe->archetype[0] == '\0' ||
+        !stringContainsIgnoringCase(entryName, wardrobe->marks[part]))
     {
         wardrobe->refusedByMark++;
         return (Unsigned32)WARDROBE_NOT_WORN;
@@ -171,9 +227,28 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
     {
         wardrobe->matchedWanted++;
     }
-    tonedRight = wardrobeRules[part].wantsTone
-                     ? nameCarriesTone(entryName, wardrobe->tone)
-                     : BOOLEAN_TRUE;
+    /* A part that does not care about the tone sits at the top of the scale, so
+       nothing about a tone can ever displace it. */
+    toneRank = wardrobeRules[part].wantsTone ? toneRankOf(entryName, wardrobe->tone) : 2U;
+    tonedRight = (toneRank >= 2U) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+
+    /* A face carrying no tone at all is never worn.
+     *
+     * The part already has a face — the assembly built one, and the stand-in
+     * paints it in the Sim's own tone — so the wardrobe's job here is to improve
+     * on that, not to replace it. An alien and a shop mannequin sit in the face
+     * slot beside every real face and are neither; taking one because it was the
+     * only thing the sample reached is how a teenager came out green while the
+     * face she already had was correct.
+     *
+     * This is the face's version of the rule that a body will not wear `_nude`
+     * and a scalp will not wear `hairbald`: what a part already wears is the
+     * floor, and something that cannot beat it is not an improvement. */
+    if (wardrobeRules[part].wantsTone && toneRank == 0U)
+    {
+        wardrobe->refusedAsWorn++;
+        return (Unsigned32)WARDROBE_NOT_WORN;
+    }
 
     /* Kept whether it wins or loses: what a part is wearing now is as much an
        alternative to what it wears next as the ones it passed over. */
@@ -193,9 +268,8 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
            them settles rather than changing its mind a thousand times. Asked
            for outranks the right tone: someone who named a face wants that
            face, whatever tone it turns out to be. */
-        Unsigned32 held = (wardrobe->nameWanted[part] ? 2U : 0U) +
-                          (wardrobe->toneMatched[part] ? 1U : 0U);
-        Unsigned32 offer = (wantedRight ? 2U : 0U) + (tonedRight ? 1U : 0U);
+        Unsigned32 held = (wardrobe->nameWanted[part] ? 4U : 0U) + wardrobe->toneRank[part];
+        Unsigned32 offer = (wantedRight ? 4U : 0U) + toneRank;
 
         if (offer <= held)
         {
@@ -211,6 +285,7 @@ Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 o
 
     wardrobe->chosen[part] = BOOLEAN_TRUE;
     wardrobe->toneMatched[part] = tonedRight;
+    wardrobe->toneRank[part] = toneRank;
     wardrobe->nameWanted[part] = wantedRight;
     wardrobe->names[part][0] = '\0';
     stringAppend(wardrobe->names[part], (MemorySize)WARDROBE_NAME_LIMIT, entryName);

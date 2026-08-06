@@ -327,6 +327,7 @@ int main(int argumentCount, char **argumentValues)
     Real32 poseHeldTick = 0.0f;
     Unsigned32 heldMorphChannel = 0U;
     const char *wornName = NULL_POINTER;
+    const char *simArchetype = NULL_POINTER;
     const char *inspectPath = NULL_POINTER;
     MemorySize graphicsMemoryLimitBytes = 0UL;
     const char *discPath = NULL_POINTER;
@@ -359,6 +360,13 @@ int main(int argumentCount, char **argumentValues)
             /* One deformation channel, held at full. The run's own log lists
                the channels and their numbers. */
             heldMorphChannel = (Unsigned32)stringParseUnsigned(argument + stringLength("--morph="));
+        }
+        else if (stringStartsWith(argument, "--sim=") == BOOLEAN_TRUE)
+        {
+            /* An age and a gender — am, af, cm, tf, em. The run says which
+               archetypes the disc actually carries, so a name to try comes out
+               of the last run's output. */
+            simArchetype = argument + stringLength("--sim=");
         }
         else if (stringStartsWith(argument, "--wear=") == BOOLEAN_TRUE)
         {
@@ -434,6 +442,7 @@ int main(int argumentCount, char **argumentValues)
     configuration.poseHeldTick = poseHeldTick;
     configuration.heldMorphChannel = heldMorphChannel;
     configuration.wornName = wornName;
+    configuration.simArchetype = simArchetype;
 
     if (discPath != NULL_POINTER)
     {

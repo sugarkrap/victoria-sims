@@ -74,6 +74,7 @@ Unsigned32 victoriaWebInitialize(Unsigned32 widthInPixels, Unsigned32 heightInPi
     configuration.poseHeldTick = 0.0f;
     configuration.heldMorphChannel = 0U;
     configuration.wornName = NULL_POINTER;
+    configuration.simArchetype = NULL_POINTER;
 
     return (Unsigned32)engineInitialize(&configuration);
 }

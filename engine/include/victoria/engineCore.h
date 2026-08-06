@@ -64,6 +64,18 @@ typedef struct EngineConfiguration
      * and gender the skeleton is: asking for a child's garment on an adult
      * still refuses, and says which rule refused it. */
     const char *wornName;
+
+    /* Which Sim to build: an age and a gender, as the catalogue spells them.
+     * "am" is an adult male, "af" an adult female, "cm" a child male, and so
+     * on through t for teen, e for elder, p for toddler and b for baby.
+     *
+     * Null keeps the adult male the engine has always built. It is not a
+     * cosmetic choice: every one of the four names a Sim is assembled from is
+     * composed from this, the skeleton is chosen by the age half of it, and the
+     * wardrobe refuses anything the disc authored for somebody else — so this
+     * is the difference between reaching a fifth of the catalogue and reaching
+     * the rest of it. */
+    const char *simArchetype;
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);

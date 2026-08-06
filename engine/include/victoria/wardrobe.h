@@ -43,6 +43,10 @@
  * of them, which leaves a run steered by --wear with nothing to steer at. Eight
  * a part is enough to pick from and few enough not to bury the report. */
 #define WARDROBE_ALTERNATIVE_LIMIT 8U
+/* An age and a gender, as the catalogue spells them: "am" is an adult male,
+   "cf" a child female, "tu" a teen of neither. Two characters and a
+   terminator, with room over. */
+#define WARDROBE_ARCHETYPE_LIMIT 8U
 
 /* What the caller must know to hold a choice: which part, and by what name. The
    resource the name resolves to is the caller's business — this decides, it
@@ -54,10 +58,23 @@ typedef struct Wardrobe
        that is nearly the right tone is a face of the wrong colour, so a later
        entry displaces an earlier one when it matches and the earlier did not. */
     Boolean toneMatched[WARDROBE_PART_COUNT];
+    /* Two if it is the tone asked for, one if it is some other real tone, and
+       nought if it carries no tone at all — which is what an alien and a
+       mannequin are, sitting in the same slot as every ordinary face. */
+    Unsigned32 toneRank[WARDROBE_PART_COUNT];
     /* Whether the held choice is one the caller asked for by name. It outranks
        the tone, and nothing outranks it. */
     Boolean nameWanted[WARDROBE_PART_COUNT];
     char names[WARDROBE_PART_COUNT][WARDROBE_NAME_LIMIT];
+
+    /* Who this Sim is, and what each part's name must therefore contain.
+     *
+     * Composed here rather than written down per part, because the age and the
+     * gender are one decision and five hardcoded strings are five places for it
+     * to be made differently. An engine dressing an adult male out of a table
+     * that said "amhair" could not dress anybody else at all. */
+    char archetype[WARDROBE_ARCHETYPE_LIMIT];
+    char marks[WARDROBE_PART_COUNT][WARDROBE_NAME_LIMIT];
 
     /* What was asked for, kept so the report can say what the choices were
        measured against. Empty means "whatever the catalogue offers first".
@@ -90,9 +107,15 @@ typedef struct Wardrobe
     Unsigned32 alternativeCount[WARDROBE_PART_COUNT];
 } Wardrobe;
 
-/* Empties it and records what to look for. Either of wanted and tone may be
-   null or empty. */
-void wardrobeBegin(Wardrobe *wardrobe, const char *wanted, const char *tone);
+/* Empties it and records what to look for.
+ *
+ * `archetype` is the age and gender this Sim is — "am", "cf", "tu" — and every
+ * part's mark is composed from it. Empty or null dresses nobody, which is the
+ * right answer rather than a default: a wardrobe that quietly fell back to an
+ * adult male would dress the wrong Sim rather than refuse. Either of wanted and
+ * tone may be null or empty. */
+void wardrobeBegin(Wardrobe *wardrobe, const char *archetype, const char *wanted,
+                   const char *tone);
 
 /* Offers one catalogue entry. Returns the part it should dress — in which case
    the caller records whatever it holds for that part, replacing what it held
@@ -103,10 +126,10 @@ void wardrobeBegin(Wardrobe *wardrobe, const char *wanted, const char *tone);
  * a wardrobe question. */
 Unsigned32 wardrobeOffer(Wardrobe *wardrobe, const char *entryName, Unsigned32 outfitSlot);
 
-/* Which age and gender a part demands, and which outfit slot dresses it. For
-   the log, and for a check to read the rule out of the same place the rule
-   is applied from. */
-const char *wardrobeGetPartMark(Unsigned32 part);
+/* What a part's name must contain, and which outfit slot dresses it. For the
+   log, and for a check to read the rule out of the same place it is applied
+   from. The mark depends on who the Sim is; the slot does not. */
+const char *wardrobeGetPartMark(const Wardrobe *wardrobe, Unsigned32 part);
 Unsigned32 wardrobeGetPartOutfit(Unsigned32 part);
 /* What the part will not wear whatever else recommends it. */
 const char *wardrobeGetPartWorn(Unsigned32 part);

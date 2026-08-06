@@ -406,14 +406,30 @@ static Real32 poseTick = 0.0f;
  * actually carries these, and what is in them, is the question that decides how
  * a whole Sim gets assembled, and it is not one to answer by assuming. */
 #define SIM_PART_COUNT 4U
-static const char *const simPartNames[SIM_PART_COUNT] = { "auskel_cres", "amBodyNaked_cres",
-                                                          "amFace_cres", "amHairBald_cres" };
+/* Who this Sim is: an age and a gender, as the catalogue spells them. "am" is
+ * an adult male, "cf" a child female, "tu" a teen of neither.
+ *
+ * Every name below is composed from it. They were four string literals, which
+ * is four places for one decision and is why this engine could draw exactly one
+ * Sim — and why 1578 of 1884 catalogue entries were refused for being authored
+ * for somebody else. The disc is full of other people. */
+static char simArchetype[WARDROBE_ARCHETYPE_LIMIT] = "am";
+/* The four names, built rather than written down.
+ *
+ * Case does not matter to any of them: resourceIndexFindNamed hashes a name
+ * through characterToLowerCase, so amBodyNaked_cres and ambodynaked_cres are
+ * the same lookup. They are spelled the way the game spells them anyway,
+ * because a log line is read by people. */
+static char simPartNames[SIM_PART_COUNT][RESOURCE_NAME_LIMIT];
 static ResourceIndex simIndex;
 static ResourceNodeDescription simPartTree;
 static Boolean simIndexBegun = BOOLEAN_FALSE;
 static Boolean simIndexBuilding = BOOLEAN_FALSE;
 static Unsigned32 simPartCursor = 0U;
 static Unsigned32 simPartsFound = 0U;
+/* Of those, how many carry geometry. The skeleton is not one of them, and a Sim
+   with a skeleton and nothing hung on it is nothing to draw. */
+static Unsigned32 simDrawnPartsFound = 0U;
 static Unsigned32 simPartFileIndex = 0U;
 static Boolean saidWhatTheDiscHas = BOOLEAN_FALSE;
 
@@ -487,9 +503,7 @@ static Boolean simHopWearsItsOwn = BOOLEAN_FALSE;
 /* How many of them the base assembly looks up by name. The rest are the
    catalogue's to fill. */
 #define SIM_BASE_PART_COUNT 3U
-static const char *const simDrawnPartNames[SIM_PART_COUNT_DRAWN] = {
-    "amBodyNaked_cres", "amFace_cres", "amHairBald_cres", "a top", "a bottom"
-};
+static char simDrawnPartNames[SIM_PART_COUNT_DRAWN][RESOURCE_NAME_LIMIT];
 static GeometryMesh simParts[SIM_PART_COUNT_DRAWN];
 static Boolean simPartLoaded[SIM_PART_COUNT_DRAWN];
 /* The material each of a part's primitives should be painted with, taken from
@@ -631,8 +645,7 @@ static WardrobeStage simWardrobeStage = WARDROBE_STAGE_SHAPE;
  *
  * A stem that resolves to nothing on the disc leaves the part wearing what its
  * shape bound, and says so. */
-static const char *const simPartTextureStems[SIM_PART_COUNT_DRAWN] = { "", "amface", "", "",
-                                                                      "" };
+static char simPartTextureStems[SIM_PART_COUNT_DRAWN][RESOURCE_NAME_LIMIT];
 /* The tone the body turned out to wear — "s1" out of "ambodynaked-nude-s1". */
 static char simSkinTone[RESOURCE_NAME_LIMIT];
 /* Set once the parts are joined and drawn, which stops the animation search
@@ -1440,6 +1453,191 @@ static void reportDeformationReach(const GeometryMesh *mesh)
 }
 
 /* Decodes whatever level is in hand and gives it to the part, then moves on. */
+/* Which Sims this disc can build, asked of the index rather than assumed.
+ *
+ * Costs no reads at all — the index is already in memory and a name is a hash —
+ * so there is no reason to guess. Which ages and genders a given install
+ * carries is a question about THAT install: a base game, an expansion and a
+ * stuff pack do not agree, and a list taken from a reference is a list about
+ * somebody else's disc.
+ *
+ * Both halves are reported, because they fail differently: a body that is not
+ * there means this age and gender is not on the disc, and a skeleton that is
+ * not there means nothing of that age can be posed at all. */
+static void reportArchetypesOnThisDisc(void)
+{
+    /* Every age the game has, against every gender. Unisex is included because
+       the youngest ages are only spelled that way — a baby is `bu` and there is
+       no `bm`. Meeting none of a row is an answer too. */
+    static const char *const ages[] = { "b", "p", "c", "t", "y", "a", "e" };
+    static const char *const genders[] = { "m", "f", "u" };
+    char message[512];
+    Unsigned32 age;
+
+    for (age = 0U; age < VICTORIA_ARRAY_LENGTH(ages); age++)
+    {
+        char skeleton[RESOURCE_NAME_LIMIT];
+        Unsigned32 gender;
+        Unsigned32 found = 0U;
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine:   ");
+        skeleton[0] = '\0';
+        stringAppend(skeleton, sizeof(skeleton), ages[age]);
+        stringAppend(skeleton, sizeof(skeleton), "uskel_cres");
+        stringAppend(message, sizeof(message), skeleton);
+        stringAppend(message, sizeof(message),
+                     (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, skeleton) !=
+                      NULL_POINTER)
+                         ? " — on this disc, wearing"
+                         : " — NOT on this disc, so nothing of this age can be posed; wearing");
+
+        for (gender = 0U; gender < VICTORIA_ARRAY_LENGTH(genders); gender++)
+        {
+            /* All three parts, not only the body. They are not all there for
+               everybody — which part is missing decides whether an archetype is
+               unbuildable or merely bald. */
+            static const char *const parts[SIM_BASE_PART_COUNT] = { "BodyNaked_cres", "Face_cres",
+                                                                    "HairBald_cres" };
+            Unsigned32 which;
+            Unsigned32 present = 0U;
+            char had[64];
+
+            had[0] = '\0';
+            for (which = 0U; which < (Unsigned32)SIM_BASE_PART_COUNT; which++)
+            {
+                char name[RESOURCE_NAME_LIMIT];
+
+                name[0] = '\0';
+                stringAppend(name, sizeof(name), ages[age]);
+                stringAppend(name, sizeof(name), genders[gender]);
+                stringAppend(name, sizeof(name), parts[which]);
+                if (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, name) !=
+                    NULL_POINTER)
+                {
+                    present++;
+                    stringAppend(had, sizeof(had), (which == 0U) ? "b" : ((which == 1U) ? "f" : "h"));
+                }
+            }
+            if (present > 0U)
+            {
+                found++;
+                stringAppend(message, sizeof(message), " ");
+                stringAppend(message, sizeof(message), ages[age]);
+                stringAppend(message, sizeof(message), genders[gender]);
+                stringAppend(message, sizeof(message), "(");
+                stringAppend(message, sizeof(message), had);
+                stringAppend(message, sizeof(message), ");");
+            }
+        }
+        if (found == 0U)
+        {
+            stringAppend(message, sizeof(message), " nothing");
+        }
+        platformLogMessage(message);
+    }
+}
+
+/* An age with no skeleton of its own borrows the adult's, and says so.
+ *
+ * `<age>uskel` held for every age the disc was asked about except one: it
+ * carries emBodyNaked_cres and efBodyNaked_cres and no euskel_cres at all, so
+ * an elder is an adult skeletally and only differs in the meshes hung on it.
+ * That is the disc's answer and not a rule anybody could have derived — which
+ * is why this substitutes on what the index holds rather than on a list of ages
+ * known to be special, and says out loud when it does.
+ *
+ * A Sim posed by the wrong skeleton does not read as a wrong pose so much as a
+ * body coming apart, so a silent fallback here would be worse than none. */
+static void settleTheSkeleton(void)
+{
+    char message[384];
+
+    if (simPartNames[0][0] == '\0' ||
+        resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, simPartNames[0]) !=
+            NULL_POINTER)
+    {
+        return;
+    }
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), "engine: ");
+    stringAppend(message, sizeof(message), simPartNames[0]);
+    stringAppend(message, sizeof(message), " is not on this disc, so this Sim is hung on ");
+    if (resourceIndexFindNamed(&simIndex, (Unsigned32)PACKAGE_TYPE_CRES, "auskel_cres") !=
+        NULL_POINTER)
+    {
+        simPartNames[0][0] = '\0';
+        stringAppend(simPartNames[0], RESOURCE_NAME_LIMIT, "auskel_cres");
+        stringAppend(message, sizeof(message),
+                     "auskel_cres instead — an age with no skeleton of its own is one whose "
+                     "meshes are weighted to the adult's");
+    }
+    else
+    {
+        stringAppend(message, sizeof(message),
+                     "nothing at all, so it will be drawn in its bind pose");
+    }
+    platformLogMessage(message);
+}
+
+/* Builds the four names, and the labels and stems that go with them, out of
+ * whoever this Sim is.
+ *
+ * The naming is the game's and is not guessed at anywhere else: a part is the
+ * age and gender followed by what it is, and the skeleton is the age followed
+ * by `uskel` — one skeleton per age, shared between genders, which is what
+ * `auskel` being unisex means. Whether the disc actually carries a given one is
+ * a question for the index, and the load asks it by name and says what it
+ * found.
+ *
+ * Called once, before anything looks anything up. */
+static void composeTheArchetype(void)
+{
+    static const char *const partSuffixes[SIM_PART_COUNT_DRAWN] = { "BodyNaked_cres",
+                                                                    "Face_cres",
+                                                                    "HairBald_cres", "", "" };
+    Unsigned32 part;
+
+    /* The skeleton is per AGE and not per gender, so it takes the first
+       character and a `u` for unisex rather than the whole archetype. */
+    simPartNames[0][0] = '\0';
+    if (simArchetype[0] != '\0')
+    {
+        char age[2];
+
+        age[0] = simArchetype[0];
+        age[1] = '\0';
+        stringAppend(simPartNames[0], RESOURCE_NAME_LIMIT, age);
+        stringAppend(simPartNames[0], RESOURCE_NAME_LIMIT, "uskel_cres");
+    }
+
+    for (part = 0U; part < (Unsigned32)SIM_PART_COUNT_DRAWN; part++)
+    {
+        simDrawnPartNames[part][0] = '\0';
+        simPartTextureStems[part][0] = '\0';
+        if (partSuffixes[part][0] == '\0')
+        {
+            /* A top and a bottom have no name to be looked up by — there is no
+               undressed top — so they carry a label for the log and nothing
+               else. */
+            stringAppend(simDrawnPartNames[part], RESOURCE_NAME_LIMIT,
+                         (part == (Unsigned32)SIM_PART_TOP) ? "a top" : "a bottom");
+            continue;
+        }
+        stringAppend(simDrawnPartNames[part], RESOURCE_NAME_LIMIT, simArchetype);
+        stringAppend(simDrawnPartNames[part], RESOURCE_NAME_LIMIT, partSuffixes[part]);
+        /* simPartNames keeps the skeleton at nought and the drawn parts after
+           it, which is the order the load probes them in. */
+        simPartNames[part + 1U][0] = '\0';
+        stringAppend(simPartNames[part + 1U], RESOURCE_NAME_LIMIT, simDrawnPartNames[part]);
+    }
+
+    /* The face's texture stem, which stands in for skin-tone resolution where a
+       catalogue entry has not named its own material. */
+    stringAppend(simPartTextureStems[SIM_PART_FACE], RESOURCE_NAME_LIMIT, simArchetype);
+    stringAppend(simPartTextureStems[SIM_PART_FACE], RESOURCE_NAME_LIMIT, "face");
+}
+
 /* Which material a gathered part wears, taken from the shape that named it.
  *
  * A material binds to a primitive BY NAME, not by position. Both names have to
@@ -2148,7 +2346,7 @@ static void reportWardrobe(void)
                could never have matched anything. */
             stringAppend(message, sizeof(message),
                          "nothing in the sample was named ");
-            stringAppend(message, sizeof(message), wardrobeGetPartMark(part));
+            stringAppend(message, sizeof(message), wardrobeGetPartMark(&simWardrobe, part));
             stringAppend(message, sizeof(message), " in outfit slot ");
             appendHexadecimal(message, sizeof(message), wardrobeGetPartOutfit(part));
             if (wardrobeGetPartWorn(part)[0] != '\0')
@@ -3374,7 +3572,7 @@ static SimAssembly stepThePaint(MemorySize marker)
         /* The tone is known now and not before: it is read off the texture the
            body ended up wearing, so a face cannot be chosen for it until a body
            has been painted. */
-        wardrobeBegin(&simWardrobe, simWardrobeWanted, simSkinTone);
+        wardrobeBegin(&simWardrobe, simArchetype, simWardrobeWanted, simSkinTone);
         simHop = SIM_HOP_CATALOGUE;
         catalogueCursor = 0U;
         catalogueStride = 0U;
@@ -4026,6 +4224,7 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
             simIndexBuilding = BOOLEAN_TRUE;
             simPartCursor = 0U;
             simPartsFound = 0U;
+            simDrawnPartsFound = 0U;
             platformLogMessage("engine: asking the index whether this disc carries the parts a "
                                "whole Sim is built from");
             discPhase = DISC_PHASE_SEEK_SIM;
@@ -4114,6 +4313,8 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
             appendCount(message, sizeof(message), simIndex.filesIndexed);
             stringAppend(message, sizeof(message), " package(s) to look among");
             platformLogMessage(message);
+            reportArchetypesOnThisDisc();
+            settleTheSkeleton();
             return ENGINE_DISC_WORKING;
         }
 
@@ -4135,9 +4336,20 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 saidWhatTheDiscHas = BOOLEAN_TRUE;
                 platformLogMessage(message);
             }
-            /* Every part named a package, and on this disc it was the same one
-               each time, so the whole Sim is one file read. */
-            if (simPartsFound == SIM_PART_COUNT)
+            /* At least one thing to draw, rather than all four.
+             *
+             * Demanding all four meant an elder could not be built at all: this
+             * disc carries emBodyNaked_cres and efBodyNaked_cres and no elder
+             * bald scalp, because an elder is an adult with different meshes and
+             * the scalp is not one of them. Refusing over that costs a whole age
+             * to save a bald head — on a Sim the catalogue is about to put hair
+             * on anyway.
+             *
+             * Each hop already skips a part whose name is not on the disc, and
+             * the skeleton hop already reports its own absence and leaves the
+             * Sim in its bind pose. So the only thing worth refusing over is
+             * having nothing to draw. */
+            if (simDrawnPartsFound > 0U)
             {
                 SimAssembly assembly = stepTheSim();
 
@@ -4200,6 +4412,11 @@ EngineDiscLoadStatus engineStepDiscLoad(void)
                 }
             }
             simPartsFound++;
+            /* The skeleton is simPartNames[0] and carries no geometry. */
+            if (simPartCursor > 0U)
+            {
+                simDrawnPartsFound++;
+            }
             stringAppend(message, sizeof(message), " — ");
             appendCount(message, sizeof(message), simPartTree.storedNodeCount);
             stringAppend(message, sizeof(message), " of ");
@@ -6116,6 +6333,28 @@ Boolean engineInitialize(const EngineConfiguration *configuration)
     }
 
     simMorphHeldChannel = configuration->heldMorphChannel;
+    if (configuration->simArchetype != NULL_POINTER && configuration->simArchetype[0] != '\0')
+    {
+        simArchetype[0] = '\0';
+        stringAppend(simArchetype, sizeof(simArchetype), configuration->simArchetype);
+    }
+    composeTheArchetype();
+    {
+        char message[256];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: building a ");
+        stringAppend(message, sizeof(message), simArchetype);
+        stringAppend(message, sizeof(message), " Sim — ");
+        stringAppend(message, sizeof(message), simPartNames[0]);
+        stringAppend(message, sizeof(message), " and ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_BODY]);
+        stringAppend(message, sizeof(message), ", ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_FACE]);
+        stringAppend(message, sizeof(message), ", ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_HAIR]);
+        platformLogMessage(message);
+    }
     simWardrobeWanted[0] = '\0';
     if (configuration->wornName != NULL_POINTER)
     {
