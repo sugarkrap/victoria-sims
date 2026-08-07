@@ -78,7 +78,23 @@ const context = createContext({
         addEventListener: () => {}
     },
     navigator: {},
-    window: {},
+    /* The page's own window, stubbed down to what the runtime touches at load.
+     *
+     * It was an empty object, which worked only for as long as nothing in the
+     * runtime reached for it while the script was being evaluated. That changed
+     * the moment the page started connecting its keyboard, its pointer and its
+     * resize handling on a document that is already complete — which is the
+     * ordinary case for a deferred script and is exactly what this harness
+     * simulates. An empty stub then throws on the first addEventListener, and
+     * the failure reads as a broken runtime rather than as a missing stub. */
+    window: {
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        devicePixelRatio: 1,
+        location: { search: "" },
+        innerWidth: 1280,
+        innerHeight: 720
+    },
     requestAnimationFrame: () => 0,
     performance: { now: () => 0 },
     TextDecoder,
