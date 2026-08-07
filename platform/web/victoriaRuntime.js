@@ -288,9 +288,9 @@ const importObject = {
             runtimeState.clearColor = { r: red, g: green, b: blue, a: 1 };
         },
 
-        setTriangleTint(tint) {
+        setTriangleTint(tint, aspect) {
             runtimeState.device.queue.writeBuffer(
-                runtimeState.uniformBuffer, 0, new Float32Array([tint, 0, 0, 0]));
+                runtimeState.uniformBuffer, 0, new Float32Array([tint, aspect, 0, 0]));
         },
 
         // Builds the pipeline a mesh is drawn with. Separate from the triangle's

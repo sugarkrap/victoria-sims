@@ -40,10 +40,13 @@ static const char *vertexShaderSource =
     "attribute vec2 vertexPosition;\n"
     "attribute vec3 vertexColor;\n"
     "varying vec3 interpolatedColor;\n"
+    "uniform float triangleAspect;\n"
     "void main()\n"
     "{\n"
     "    interpolatedColor = vertexColor;\n"
-    "    gl_Position = vec4(vertexPosition, 0.0, 1.0);\n"
+    "    vec2 position = vertexPosition;\n"
+    "    position.x = position.x / triangleAspect;\n"
+    "    gl_Position = vec4(position, 0.0, 1.0);\n"
     "}\n";
 
 static const char *fragmentShaderSource =
@@ -173,6 +176,7 @@ static GLuint vertexBuffer = 0;
 static GLint vertexPositionLocation = -1;
 static GLint vertexColorLocation = -1;
 static GLint colorPulseLocation = -1;
+static GLint triangleAspectLocation = -1;
 static Unsigned32 shaderProgramCount = 0;
 static Boolean vertexBufferIsCharged = BOOLEAN_FALSE;
 
@@ -370,6 +374,7 @@ Boolean renderInitialize(MemoryArena *arena, Unsigned32 widthInPixels, Unsigned3
     vertexPositionLocation = glGetAttribLocation(shaderProgram, "vertexPosition");
     vertexColorLocation = glGetAttribLocation(shaderProgram, "vertexColor");
     colorPulseLocation = glGetUniformLocation(shaderProgram, "colorPulse");
+    triangleAspectLocation = glGetUniformLocation(shaderProgram, "triangleAspect");
 
     VICTORIA_PROFILE_ZONE_END();
 
@@ -1007,6 +1012,7 @@ void renderDrawFrame(Real32 elapsedSeconds)
     {
         glUseProgram(shaderProgram);
         glUniform1f(colorPulseLocation, colorPulse);
+        glUniform1f(triangleAspectLocation, viewportAspect);
 
         bindTriangleAttributes();
         glDrawArrays(GL_TRIANGLES, 0, 3);

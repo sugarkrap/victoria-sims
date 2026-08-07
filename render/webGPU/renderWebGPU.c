@@ -41,7 +41,7 @@ WEB_IMPORT("setClearColor")
 extern void hostSetClearColor(Real32 red, Real32 green, Real32 blue);
 
 WEB_IMPORT("setTriangleTint")
-extern void hostSetTriangleTint(Real32 tint);
+extern void hostSetTriangleTint(Real32 tint, Real32 aspect);
 
 WEB_IMPORT("submitFrame")
 extern void hostSubmitFrame(void);
@@ -171,6 +171,10 @@ static const char *triangleShaderSource =
     "    @builtin(position) position : vec4<f32>,\n"
     "    @location(0) color : vec3<f32>,\n"
     "};\n"
+    /* .x is the tint, .y the viewport's width/height: NDC is a square
+       regardless of the viewport's actual shape, so a fixed set of positions
+       drawn into it unmodified stretches with the window instead of holding
+       its shape. */
     "@group(0) @binding(0) var<uniform> triangleTint : vec4<f32>;\n"
     "@vertex\n"
     "fn vertexMain(@builtin(vertex_index) vertexIndex : u32) -> VertexOutput {\n"
@@ -183,7 +187,9 @@ static const char *triangleShaderSource =
     "        vec3<f32>(0.35, 0.75, 1.0),\n"
     "        vec3<f32>(1.0, 0.9, 0.4));\n"
     "    var output : VertexOutput;\n"
-    "    output.position = vec4<f32>(positions[vertexIndex], 0.0, 1.0);\n"
+    "    var position = positions[vertexIndex];\n"
+    "    position.x = position.x / triangleTint.y;\n"
+    "    output.position = vec4<f32>(position, 0.0, 1.0);\n"
     "    output.color = colors[vertexIndex] * triangleTint.x;\n"
     "    return output;\n"
     "}\n"
@@ -465,7 +471,7 @@ void renderDrawFrame(Real32 elapsedSeconds)
     }
     else
     {
-        hostSetTriangleTint(colorPulse);
+        hostSetTriangleTint(colorPulse, viewportAspect);
     }
     hostSubmitFrame();
 
