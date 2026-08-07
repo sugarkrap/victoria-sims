@@ -800,6 +800,18 @@ static char simSkinTone[RESOURCE_NAME_LIMIT];
    next piece of work; until then they are drawn in the bind pose. */
 static Boolean simIsAssembled = BOOLEAN_FALSE;
 
+/* Where the arena stood right before the Sim now on screen was assembled.
+ *
+ * Not valid until the first restart: the very first assembly runs during
+ * initialisation, never through restartTheAssembly, and its mesh is what the
+ * animation index and the font are built on top of — nothing marks a point
+ * before it that would still be safe to rewind to. Every assembly after that
+ * one is the last thing in the arena when its turn to be replaced comes, so
+ * rewinding here and marking fresh below is enough to keep a dozen clothing
+ * changes costing what one costs. */
+static MemorySize simAssemblyMarker = 0UL;
+static Boolean simAssemblyMarkerValid = BOOLEAN_FALSE;
+
 /* Seven types across fourteen hundred packages. The textures alone were twenty
    two thousand on the tested disc, so this is not the geometry search's cap
    with more types hung off it. */
@@ -1610,6 +1622,16 @@ static void reportDeformationReach(const GeometryMesh *mesh)
 static void restartTheAssembly(void)
 {
     Unsigned32 index;
+
+    /* Gives back everything the Sim being replaced took — its joined mesh, its
+       wardrobe textures, everything allocated since the mark below was taken
+       for it — before this one takes its place. */
+    if (simAssemblyMarkerValid)
+    {
+        memoryArenaRewindToMarker(globalArena, simAssemblyMarker);
+    }
+    simAssemblyMarker = memoryArenaGetMarker(globalArena);
+    simAssemblyMarkerValid = BOOLEAN_TRUE;
 
     simHop = SIM_HOP_TREE;
     simHopPart = 0U;
