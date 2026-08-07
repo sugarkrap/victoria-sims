@@ -54,7 +54,12 @@ const runtimeState = {
     // render loop to service any VFS reads that thumbnail loading (driven from
     // C inside victoriaWebRenderFrame) requests between frames.
     disc: null,
-    thumbnailFetchPending: false
+    thumbnailFetchPending: false,
+    // Set once the device is gone or a create call has failed. The render loop
+    // stops calling into the wasm module at that point — otherwise it keeps
+    // submitting frames a broken device can only fail again, silently, which
+    // is what a permanently blank canvas with no explanation turns into.
+    fatalGPUError: false
 };
 
 // Matches the engine's own report refresh interval; sampling faster only costs
@@ -949,6 +954,9 @@ function drawFrameSparkline() {
 }
 
 function renderLoop(timestamp) {
+    if (runtimeState.fatalGPUError) {
+        return;
+    }
     if (runtimeState.paused) {
         requestAnimationFrame(renderLoop);
         return;
@@ -1013,6 +1021,28 @@ async function start() {
     runtimeState.device = await adapter.requestDevice();
     runtimeState.context = runtimeState.canvas.getContext("webgpu");
     runtimeState.canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+
+    // Neither fires as a thrown exception — a create call that fails still
+    // returns an (invalid) object, and everything built from it keeps quietly
+    // failing in turn, which is how this otherwise surfaces as a blank canvas
+    // with nothing in the console pointing at why. Reporting only the first
+    // one is deliberate: the frame that ran out of memory usually fails a
+    // handful of calls in a row, and six copies of the same root cause is
+    // noise, not new information.
+    runtimeState.device.addEventListener("uncapturederror", (event) => {
+        if (runtimeState.fatalGPUError) {
+            return;
+        }
+        runtimeState.fatalGPUError = true;
+        reportStatus(`WebGPU ran out of graphics memory and cannot continue: ${event.error.message}`, true);
+    });
+    runtimeState.device.lost.then((info) => {
+        if (runtimeState.fatalGPUError) {
+            return;
+        }
+        runtimeState.fatalGPUError = true;
+        reportStatus(`WebGPU device was lost: ${info.message}`, true);
+    });
 
     // Sized before the module exists, since the module's own initial size has
     // to be this one rather than whatever the unstyled canvas defaults to.
