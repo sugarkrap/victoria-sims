@@ -38,16 +38,45 @@
         position: relative;
         flex: 1;
         min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
     }
     #victoriaCanvas {
-        width: 100%;
-        height: 100%;
         display: block;
+    }
+    #aspectLabel {
+        position: absolute;
+        left: 0.75rem;
+        bottom: 0.75rem;
+        padding: 0.3rem 0.6rem;
+        background: rgba(9, 11, 15, 0.82);
+        border: 1px solid #262a35;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        color: #8b93a7;
+        pointer-events: none;
+    }
+    #resizePrompt {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        background: rgba(5, 6, 10, 0.88);
+        text-align: center;
+        cursor: pointer;
+    }
+    #resizePrompt p {
+        margin: 0;
+        font-size: 0.95rem;
     }
     #profilerPanel {
         position: absolute;
         top: 0.75rem;
-        left: 0.75rem;
+        right: 0.75rem;
         padding: 0.6rem 0.75rem;
         background: rgba(9, 11, 15, 0.82);
         border: 1px solid #262a35;
@@ -59,19 +88,6 @@
         font-size: 0.7rem;
         line-height: 1.45;
         color: #b9c0d0;
-        white-space: pre;
-        overflow-x: auto;
-    }
-    #menuPanel {
-        margin-top: 0.5rem;
-        padding-top: 0.5rem;
-        border-top: 1px solid #262a35;
-    }
-    #menuText {
-        margin: 0;
-        font-size: 0.7rem;
-        line-height: 1.45;
-        color: #d7dcea;
         white-space: pre;
         overflow-x: auto;
     }
@@ -93,10 +109,10 @@
     <div id="profilerPanel">
         <pre id="profilerReport">profiler: waiting for first frame</pre>
         <canvas id="profilerSparkline"></canvas>
-        <!-- The menu is text, for the same reason it is text on a terminal: the
-             engine formats it and the platform shows it, so nothing has to draw
-             a font on a backend that has no shaders. -->
-        <div id="menuPanel"><pre id="menuText">menu: press m</pre></div>
+    </div>
+    <div id="aspectLabel">aspect ratio: —</div>
+    <div id="resizePrompt">
+        <p>Window resized. Click to fit the closest aspect ratio.</p>
     </div>
 </div>
 <script src="victoriaRuntime.js"></script>

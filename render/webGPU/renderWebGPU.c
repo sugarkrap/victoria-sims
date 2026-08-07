@@ -202,6 +202,10 @@ Boolean renderInitialize(MemoryArena *arena, Unsigned32 widthInPixels, Unsigned3
     (void)arena;
 
     hostConfigureSurface(widthInPixels, heightInPixels);
+    /* Set here rather than left to the first resize event: a window that never
+       resizes from its initial, non-square shape would otherwise be drawn as
+       if it were square for its entire session. */
+    viewportAspect = (heightInPixels > 0U) ? ((Real32)widthInPixels / (Real32)heightInPixels) : 1.0f;
 
     if (graphicsMemoryBudgetRequest(GRAPHICS_MEMORY_CATEGORY_BUFFER, TRIANGLE_UNIFORM_BUFFER_BYTES) ==
         BOOLEAN_FALSE)

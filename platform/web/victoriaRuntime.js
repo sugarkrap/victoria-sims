@@ -43,7 +43,13 @@ const runtimeState = {
     clearColor: { r: 0, g: 0, b: 0, a: 1 },
     startTimestamp: 0,
     lastOverlayTimestamp: 0,
-    frameMicrosecondHistory: []
+    frameMicrosecondHistory: [],
+    // Set the instant a window resize is observed, cleared on the click that
+    // resumes. While true the render loop does not touch the wasm module at
+    // all, so the canvas is never reconfigured while its container might
+    // still be moving.
+    paused: false,
+    pauseStartTimestamp: 0
 };
 
 // Matches the engine's own report refresh interval; sampling faster only costs
@@ -667,13 +673,133 @@ const importObject = {
     }
 };
 
-function resizeToDisplaySize() {
-    const pixelRatio = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.floor(runtimeState.canvas.clientWidth * pixelRatio));
-    const height = Math.max(1, Math.floor(runtimeState.canvas.clientHeight * pixelRatio));
+// A fixed, small set of shapes rather than whatever rectangle the window
+// happens to be: the engine only ever has to project for one of these, and
+// resizing becomes "pick the closest one" instead of a continuous recompute.
+const ASPECT_RATIO_PRESETS = [
+    { name: "16:9", ratio: 16 / 9 },
+    { name: "21:9", ratio: 21 / 9 },
+    { name: "4:3", ratio: 4 / 3 },
+    { name: "3:1", ratio: 3 / 1 },
+    { name: "square", ratio: 1 },
+    // The original Galaxy Fold's main display, unfolded: 2152x1536, the
+    // famously nearly-square shape that breaks assumptions built for phones
+    // and tablets alike.
+    { name: "Galaxy Fold unfolded", ratio: 2152 / 1536 }
+];
 
-    if (runtimeState.canvas.width !== width || runtimeState.canvas.height !== height) {
-        runtimeState.instance.exports.victoriaWebResize(width, height);
+function chooseBestAspectRatio(width, height) {
+    const target = width / height;
+    let best = ASPECT_RATIO_PRESETS[0];
+    let bestDistance = Infinity;
+
+    for (const preset of ASPECT_RATIO_PRESETS) {
+        // Compared in log space, so a preset twice as wide as the target is
+        // considered exactly as far off as one twice as tall — a plain
+        // difference would favour wide presets no matter the target shape.
+        const distance = Math.abs(Math.log(preset.ratio / target));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = preset;
+        }
+    }
+    return best;
+}
+
+// Fits the closest preset inside the space available, so the canvas is
+// letterboxed rather than stretched into whatever rectangle the window is.
+function computeAspectBox(availableWidth, availableHeight) {
+    const preset = chooseBestAspectRatio(availableWidth, availableHeight);
+    const pixelRatio = window.devicePixelRatio || 1;
+    const cssWidth = Math.min(availableWidth, availableHeight * preset.ratio);
+    const cssHeight = cssWidth / preset.ratio;
+
+    return {
+        preset,
+        cssWidth,
+        cssHeight,
+        deviceWidth: Math.max(1, Math.floor(cssWidth * pixelRatio)),
+        deviceHeight: Math.max(1, Math.floor(cssHeight * pixelRatio))
+    };
+}
+
+// Measures the space available for the canvas and picks the shape that fits
+// it best, without touching anything on screen yet.
+function measureAspectBox() {
+    const stage = document.getElementById("stage");
+    return computeAspectBox(stage.clientWidth, stage.clientHeight);
+}
+
+// Puts a box on screen: sizes the canvas in CSS pixels and reports which
+// preset won. Split out from applyAspectRatio() so the very first size, set
+// before the wasm instance exists, can share this without also trying to call
+// into an engine that has not been initialized yet.
+function applyAspectBoxToCanvas(box) {
+    runtimeState.canvas.style.width = `${box.cssWidth}px`;
+    runtimeState.canvas.style.height = `${box.cssHeight}px`;
+
+    const aspectLabel = document.getElementById("aspectLabel");
+    if (aspectLabel) {
+        aspectLabel.textContent = `aspect ratio: ${box.preset.name}`;
+    }
+}
+
+// Re-fits the canvas to the window and tells the running engine to match.
+// Called after every resize's click, never while a resize is still in
+// progress, and never before the engine exists: the very first fit, in
+// start(), goes through measureAspectBox()/applyAspectBoxToCanvas() directly.
+function applyAspectRatio() {
+    const box = measureAspectBox();
+
+    applyAspectBoxToCanvas(box);
+    runtimeState.instance.exports.victoriaWebResize(box.deviceWidth, box.deviceHeight);
+    return box;
+}
+
+function showResizePrompt() {
+    const prompt = document.getElementById("resizePrompt");
+    if (prompt) {
+        prompt.style.display = "flex";
+    }
+}
+
+function hideResizePrompt() {
+    const prompt = document.getElementById("resizePrompt");
+    if (prompt) {
+        prompt.style.display = "none";
+    }
+}
+
+// A resize only ever means the window changed; it says nothing about which
+// fixed ratio the new size should become, so it stops the engine and waits
+// for a click rather than guessing mid-drag.
+function pauseForResize() {
+    if (runtimeState.paused || !runtimeState.instance) {
+        return;
+    }
+    runtimeState.paused = true;
+    runtimeState.pauseStartTimestamp = performance.now();
+    showResizePrompt();
+}
+
+function resumeFromResize() {
+    if (!runtimeState.paused) {
+        return;
+    }
+    applyAspectRatio();
+    // Shifted forward by however long the pause lasted, so elapsed time (and
+    // the camera orbit it drives) picks up where it left off instead of
+    // jumping ahead by however long the click took to arrive.
+    runtimeState.startTimestamp += performance.now() - runtimeState.pauseStartTimestamp;
+    runtimeState.paused = false;
+    hideResizePrompt();
+}
+
+function connectResizeHandling() {
+    window.addEventListener("resize", pauseForResize);
+    const prompt = document.getElementById("resizePrompt");
+    if (prompt) {
+        prompt.addEventListener("click", resumeFromResize);
     }
 }
 
@@ -689,25 +815,7 @@ function updateProfilerOverlay() {
         reportElement.textContent = readUTF8(pointer, length);
     }
 
-    updateMenuOverlay();
     drawFrameSparkline();
-}
-
-// The menu, read the same way and for the same reason: the engine formats it,
-// the page shows it. Nothing about which key does what is known here.
-function updateMenuOverlay() {
-    const exports = runtimeState.instance.exports;
-
-    if (!exports.victoriaWebGetMenuTextPointer) {
-        return;
-    }
-    const pointer = exports.victoriaWebGetMenuTextPointer();
-    const length = exports.victoriaWebGetMenuTextLength();
-    const element = document.getElementById("menuText");
-
-    if (element && length > 0) {
-        element.textContent = readUTF8(pointer, length);
-    }
 }
 
 // One character to the engine, which decides what it means.
@@ -717,7 +825,8 @@ function updateMenuOverlay() {
 // is one character on both.
 function connectMenuKeys() {
     window.addEventListener("keydown", (event) => {
-        if (!runtimeState.instance || event.ctrlKey || event.metaKey || event.altKey) {
+        if (!runtimeState.instance || runtimeState.paused ||
+            event.ctrlKey || event.metaKey || event.altKey) {
             return;
         }
         const exports = runtimeState.instance.exports;
@@ -730,9 +839,6 @@ function connectMenuKeys() {
             return;
         }
         if (exports.victoriaWebHandleMenuKey(key.charCodeAt(0)) === 1) {
-            // Only when something changed, so a page full of typing does not
-            // fight the render loop for the element.
-            updateMenuOverlay();
             event.preventDefault();
         }
     });
@@ -755,7 +861,7 @@ function connectPointer() {
     const send = (action, event) => {
         const exports = runtimeState.instance && runtimeState.instance.exports;
 
-        if (!exports || !exports.victoriaWebHandlePointer) {
+        if (runtimeState.paused || !exports || !exports.victoriaWebHandlePointer) {
             return;
         }
         let x = 0;
@@ -767,9 +873,7 @@ function connectPointer() {
             x = Math.round((event.clientX - box.left) * (canvas.width / box.width));
             y = Math.round((event.clientY - box.top) * (canvas.height / box.height));
         }
-        if (exports.victoriaWebHandlePointer(action, x, y) === 1) {
-            updateMenuOverlay();
-        }
+        exports.victoriaWebHandlePointer(action, x, y);
     };
 
     canvas.addEventListener("mousemove", (event) => send(0, event));
@@ -840,10 +944,13 @@ function drawFrameSparkline() {
 }
 
 function renderLoop(timestamp) {
+    if (runtimeState.paused) {
+        requestAnimationFrame(renderLoop);
+        return;
+    }
     if (runtimeState.startTimestamp === 0) {
         runtimeState.startTimestamp = timestamp;
     }
-    resizeToDisplaySize();
     runtimeState.instance.exports.victoriaWebRenderFrame((timestamp - runtimeState.startTimestamp) / 1000);
 
     runtimeState.frameMicrosecondHistory.push(
@@ -878,15 +985,16 @@ async function start() {
     runtimeState.context = runtimeState.canvas.getContext("webgpu");
     runtimeState.canvasFormat = navigator.gpu.getPreferredCanvasFormat();
 
+    // Sized before the module exists, since the module's own initial size has
+    // to be this one rather than whatever the unstyled canvas defaults to.
+    const initialBox = measureAspectBox();
+    applyAspectBoxToCanvas(initialBox);
+
     const response = await fetch("victoriaSims.wasm");
     const wasm = await WebAssembly.instantiate(await response.arrayBuffer(), importObject);
 
     runtimeState.instance = wasm.instance;
     runtimeState.memory = wasm.instance.exports.memory;
-
-    const pixelRatio = window.devicePixelRatio || 1;
-    const initialWidth = Math.max(1, Math.floor(runtimeState.canvas.clientWidth * pixelRatio));
-    const initialHeight = Math.max(1, Math.floor(runtimeState.canvas.clientHeight * pixelRatio));
 
     // ?graphicsMemoryMebibytes=8 simulates a small-memory device, which is the
     // only practical way to exercise the ceiling from a desktop browser.
@@ -897,7 +1005,7 @@ async function start() {
         : 0;
 
     if (!runtimeState.instance.exports.victoriaWebInitialize(
-            initialWidth, initialHeight, overrideBytes)) {
+            initialBox.deviceWidth, initialBox.deviceHeight, overrideBytes)) {
         reportStatus("Engine failed to initialize.", true);
         return;
     }
@@ -1006,6 +1114,10 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", connectDiscPicker);
     document.addEventListener("DOMContentLoaded", connectMenuKeys);
     document.addEventListener("DOMContentLoaded", connectPointer);
+    document.addEventListener("DOMContentLoaded", connectResizeHandling);
 } else {
     connectDiscPicker();
+    connectMenuKeys();
+    connectPointer();
+    connectResizeHandling();
 }
