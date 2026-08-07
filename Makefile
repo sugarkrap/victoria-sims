@@ -59,6 +59,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/installerReader.c \
                   engine/source/programReader.c \
                   engine/source/archiveReader.c \
+                  engine/source/jpegReader.c \
                   engine/source/engineCore.c \
                   utils/strings.c utils/checksum.c
 
@@ -101,7 +102,7 @@ ARM_LIBRARY := $(ARM_OUTPUT_DIRECTORY)/libVictoriaEngine.a
 # The wasm module owns exactly the reserved budget plus a fixed slack for the
 # shadow stack and static data. Both bounds are pinned so the module can never
 # grow past the ceiling at run time.
-WEB_LINEAR_MEMORY_BYTES ?= 135266304
+WEB_LINEAR_MEMORY_BYTES ?= 136314880
 
 WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebResize \

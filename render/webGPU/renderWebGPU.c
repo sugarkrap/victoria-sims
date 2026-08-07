@@ -24,7 +24,6 @@ void renderSetCameraAngle(Real32 radians)
     cameraStartAngle = radians;
 }
 
-
 /* WebGPU has no C entry point in a bare wasm32 module, so the backend is a
    thin command layer over host functions. Everything that decides what to draw
    stays here in C; the host only executes. */
@@ -249,7 +248,6 @@ void renderResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels)
     hostConfigureSurface(widthInPixels, heightInPixels);
     viewportAspect = (heightInPixels > 0U) ? ((Real32)widthInPixels / (Real32)heightInPixels) : 1.0f;
 }
-
 
 /* Position, normal and texture coordinate, eight floats a vertex, into storage
    the caller owns. Shared by the upload and the per-frame update so the two

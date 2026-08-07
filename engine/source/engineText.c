@@ -1,4 +1,5 @@
 #include "victoria/engineText.h"
+#include "victoria/engineCore.h"
 
 #include "utils/checksum.h"
 #include "utils/strings.h"
@@ -425,12 +426,11 @@ static Boolean thumbnailForRow(void *context, DebugMenuPage page, Unsigned32 row
                                Unsigned32 *height)
 {
     (void)context;
-    (void)page;
-    (void)row;
-    (void)rgbaPixels;
-    (void)width;
-    (void)height;
-    return BOOLEAN_FALSE;
+    if (page != DEBUG_MENU_PAGE_CLOTHING)
+    {
+        return BOOLEAN_FALSE;
+    }
+    return engineGetThumbnailPixels(row, rgbaPixels, width, height);
 }
 
 /* Redraws the interface when what it would show has changed.

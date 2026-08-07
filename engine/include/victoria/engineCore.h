@@ -174,4 +174,17 @@ Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y
 
 MemoryArena *engineGetGlobalArena(void);
 
+/* Thumbnail queries for the clothing page.
+ *
+ * engineGetThumbnailPixels is synchronous: it checks the cache and returns
+ * immediately, making no disc reads. Call from the draw callback.
+ *
+ * engineStepThumbnail drives loading: up to eight disc hops per call on
+ * native (reads complete immediately), or one hop per call on web (a pending
+ * read returns FALSE; the JS must deliver the range before calling again).
+ * Called automatically from engineRenderFrame. */
+Boolean engineGetThumbnailPixels(Unsigned32 row, const Unsigned8 **rgbaPixels,
+                                  Unsigned32 *width, Unsigned32 *height);
+void engineStepThumbnail(void);
+
 #endif

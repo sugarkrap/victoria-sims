@@ -1,6 +1,7 @@
 #include "victoria/discContent.h"
 #include "victoria/discReader.h"
 #include "victoria/engineCore.h"
+#include "victoria/jpegReader.h"
 #include "victoria/freestandingRuntime.h"
 #include "utils/strings.h"
 #include "victoria/graphicsMemoryBudget.h"
@@ -457,6 +458,50 @@ static Unsigned8 menuClothingParts[MENU_CLOTHING_CAPACITY];
    shared prefix comes off it can no longer be both. */
 static char menuClothingNames[MENU_CLOTHING_CAPACITY][WARDROBE_NAME_LIMIT];
 static Unsigned32 menuClothingCount = 0U;
+/* The TXMT entry for each clothing-page row, set by fillTheClothingPage from
+   simWardrobeAlternativeMaterials. NULL means no material is known for this
+   row's garment. Used by thumbnail loading. */
+static const ResourceIndexEntry *menuClothingMaterials[MENU_CLOTHING_CAPACITY];
+
+/* Per-row thumbnail for the clothing page.
+ *
+ * 64 x 64 RGBA (decoded from the prerendered JPEG in BodyShopThumbnails),
+ * up to THUMBNAIL_SLOT_COUNT garments cached at a time.  A slot is free
+ * when its row equals MENU_CLOTHING_CAPACITY. */
+#define THUMBNAIL_SIZE 64U
+#define THUMBNAIL_SLOT_COUNT 64U
+
+typedef struct ThumbnailSlot
+{
+    Unsigned32 row;
+    Boolean ready;
+    Unsigned8 pixels[THUMBNAIL_SIZE * THUMBNAIL_SIZE * 4U];
+} ThumbnailSlot;
+
+static ThumbnailSlot thumbnailSlots[THUMBNAIL_SLOT_COUNT];
+
+typedef enum ThumbnailHop
+{
+    THUMBNAIL_HOP_IDLE = 0,
+    THUMBNAIL_HOP_JPEG  /* load + decode the prerendered JPEG */
+} ThumbnailHop;
+
+static ThumbnailHop thumbnailHop = THUMBNAIL_HOP_IDLE;
+static Unsigned32 thumbnailNextRow = 0U;
+static Unsigned32 thumbnailActiveSlot = 0U;
+static const ResourceIndexEntry *thumbnailLoadEntry = NULL_POINTER;
+
+/* BodyShopThumbnails catalog index.
+ *
+ * The catalog maps (groupIdentifier, instanceIdentifier) of any
+ * SKIN_ENTRY to the JPEG thumbnail instance stored in the same package.
+ * Loaded once from the CATALOG_INDEX resource after simIndex is ready. */
+#define PACKAGE_TYPE_JPEG          0x856DDBACUL
+#define PACKAGE_TYPE_CATALOG_INDEX 0x43494745UL
+
+static const Unsigned8 *bstCatalogData  = NULL_POINTER;
+static Unsigned32        bstCatalogCount = 0U;
+static Boolean           bstCatalogLoading = BOOLEAN_FALSE;
 
 /* The animations the menu can offer, and where each one lives.
  *
@@ -693,6 +738,12 @@ static char simWardrobeOverrideSubsets[WARDROBE_PART_COUNT][CATALOGUE_OVERRIDE_L
 static const ResourceIndexEntry
     *simWardrobeOverrideMaterials[WARDROBE_PART_COUNT][CATALOGUE_OVERRIDE_LIMIT];
 static Unsigned32 simWardrobeOverrideCount[WARDROBE_PART_COUNT];
+/* One TXMT entry per wardrobe alternative, indexed [part][which], parallel to
+   wardrobe.alternatives[][]. Set during the catalogue walk; used by thumbnail
+   loading to find a garment's texture without re-reading the catalogue entry.
+   NULL means no override material was found for this alternative. */
+static const ResourceIndexEntry
+    *simWardrobeAlternativeMaterials[WARDROBE_PART_COUNT][WARDROBE_ALTERNATIVE_LIMIT];
 /* What to dress it in, as asked for on the command line. Empty takes whatever
    the walk meets first, which is one garment out of hundreds — the flag is how
    a run looks at any of the others. */
@@ -2632,6 +2683,25 @@ static void fillTheClothingPage(void)
 
     debugMenuClearPage(&debugMenu, DEBUG_MENU_PAGE_CLOTHING);
     menuClothingCount = 0U;
+    {
+        Unsigned32 r;
+        for (r = 0U; r < (Unsigned32)MENU_CLOTHING_CAPACITY; r++)
+        {
+            menuClothingMaterials[r] = NULL_POINTER;
+        }
+    }
+    /* Reset thumbnail loading so it starts over from the new clothing list. */
+    {
+        Unsigned32 s;
+        for (s = 0U; s < (Unsigned32)THUMBNAIL_SLOT_COUNT; s++)
+        {
+            thumbnailSlots[s].row = (Unsigned32)MENU_CLOTHING_CAPACITY;
+            thumbnailSlots[s].ready = BOOLEAN_FALSE;
+        }
+        thumbnailHop = THUMBNAIL_HOP_IDLE;
+        thumbnailNextRow = 0U;
+        thumbnailLoadEntry = NULL_POINTER;
+    }
     for (part = 0U; part < (Unsigned32)WARDROBE_PART_COUNT; part++)
     {
         Unsigned32 which;
@@ -2656,6 +2726,7 @@ static void fillTheClothingPage(void)
             menuClothingParts[row] = (Unsigned8)part;
             menuClothingNames[row][0] = '\0';
             stringAppend(menuClothingNames[row], (MemorySize)WARDROBE_NAME_LIMIT, name);
+            menuClothingMaterials[row] = simWardrobeAlternativeMaterials[(Unsigned32)part][which];
             menuClothingCount = row + 1U;
             /* What the part is actually wearing, so the page opens showing the
                Sim on screen rather than showing a list with nothing marked. */
@@ -2772,6 +2843,32 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                     {
                         catalogueByOutfit.shapes[catalogueEntryOutfitSlot]++;
                     }
+                    /* The material for thumbnail loading, resolved here while the
+                       key list is still open. The offer below decides winner or
+                       alternative after the fact; the material is stored against
+                       whichever alternative it adds, so both outcomes get it. */
+                    const ResourceIndexEntry *thumbnailFirstMaterial = NULL_POINTER;
+                    Unsigned32 thumbnailPrevCounts[WARDROBE_PART_COUNT];
+                    {
+                        Unsigned32 thumbP;
+                        for (thumbP = 0U; thumbP < (Unsigned32)WARDROBE_PART_COUNT; thumbP++)
+                        {
+                            thumbnailPrevCounts[thumbP] =
+                                wardrobeGetAlternativeCount(&simWardrobe, thumbP);
+                        }
+                    }
+                    if (catalogueOverrideCount > 0U)
+                    {
+                        const ResourceKeyEntry *first =
+                            resourceKeyListGet(&list, catalogueOverrideKeyIndex[0]);
+                        if (first != NULL_POINTER &&
+                            first->typeIdentifier == (Unsigned32)PACKAGE_TYPE_TXMT)
+                        {
+                            thumbnailFirstMaterial = resourceIndexFind(
+                                &simIndex, first->typeIdentifier,
+                                first->instanceIdentifier, first->instanceIdentifierHigh);
+                        }
+                    }
                     /* Offered to the wardrobe, which is the only place in the
                        walk where an entry is looked at as something to wear
                        rather than something to count. Nothing is read here: the
@@ -2875,6 +2972,23 @@ static SimAssembly stepTheSidecar(MemorySize marker)
                                              "colourway");
                             }
                             platformLogMessage(worn);
+                        }
+                    }
+                    /* Record the material for whichever alternative the offer
+                       just added, so thumbnail loading can reach the garment's
+                       texture without re-reading the catalogue entry. */
+                    {
+                        Unsigned32 thumbP;
+                        for (thumbP = 0U; thumbP < (Unsigned32)WARDROBE_PART_COUNT; thumbP++)
+                        {
+                            Unsigned32 after = wardrobeGetAlternativeCount(&simWardrobe, thumbP);
+                            if (after > thumbnailPrevCounts[thumbP] &&
+                                after <= (Unsigned32)WARDROBE_ALTERNATIVE_LIMIT)
+                            {
+                                simWardrobeAlternativeMaterials[thumbP][after - 1U] =
+                                    thumbnailFirstMaterial;
+                                break;
+                            }
                         }
                     }
                     /* Only bodies. A hair or a pair of shoes has nothing to say
@@ -4496,7 +4610,7 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
            found three trees and not one shape. */
         /* Every hop a part needs, so a Sim is one index and not a dependency
            on whichever earlier phase happened to have built one. */
-        static const Unsigned32 wantedTypes[9] = { (Unsigned32)PACKAGE_TYPE_CRES,
+        static const Unsigned32 wantedTypes[11] = { (Unsigned32)PACKAGE_TYPE_CRES,
                                                    (Unsigned32)PACKAGE_TYPE_SHPE,
                                                    (Unsigned32)PACKAGE_TYPE_GMND,
                                                    (Unsigned32)PACKAGE_TYPE_GMDC,
@@ -4510,11 +4624,16 @@ static EngineDiscLoadStatus finishOrSeekSkin(void)
                                                    /* The sidecar an entry's shape index points
                                                       into, without which the index is a number
                                                       and nothing else. */
-                                                   (Unsigned32)PACKAGE_TYPE_RESOURCE_KEY_LIST };
+                                                   (Unsigned32)PACKAGE_TYPE_RESOURCE_KEY_LIST,
+                                                   /* Prerendered clothing thumbnails and the
+                                                      catalogue that maps SKIN_ENTRY keys to them,
+                                                      both in BodyShopThumbnails.package. */
+                                                   (Unsigned32)PACKAGE_TYPE_JPEG,
+                                                   (Unsigned32)PACKAGE_TYPE_CATALOG_INDEX };
 
         simIndexBegun = BOOLEAN_TRUE;
         if (resourceIndexBegin(&simIndex, discFileSystem, globalArena, SIM_INDEX_CAPACITY,
-                               wantedTypes, 9U))
+                               wantedTypes, 11U))
         {
             /* Said out loud, because a type asked for and not taken looks
                exactly like a disc that holds none of it — which cost a run of
@@ -7387,6 +7506,294 @@ static void applyTheChoice(void)
     }
 }
 
+/* Read a little-endian 32-bit value from a byte buffer. */
+static Unsigned32 catalogRead32(const Unsigned8 *p, MemorySize off)
+{
+    return (Unsigned32)p[off]           |
+           ((Unsigned32)p[off + 1U] << 8)  |
+           ((Unsigned32)p[off + 2U] << 16) |
+           ((Unsigned32)p[off + 3U] << 24);
+}
+
+/* Look up a prerendered thumbnail instance for a SKIN_ENTRY key.
+ *
+ * Each catalog entry is 104 bytes (plus 8-byte header):
+ *   bytes  8-11  src_grp
+ *   bytes 12-15  src_inst
+ *   bytes 28-31  thumb_inst  (the JPEG instance to load)
+ *
+ * Returns the JPEG instance ID, or 0 if not found. */
+static Unsigned32 catalogFindThumbInst(Unsigned32 srcGrp, Unsigned32 srcInst)
+{
+    Unsigned32 i;
+    const Unsigned8 *base;
+
+    if (bstCatalogData == NULL_POINTER)
+    {
+        return 0U;
+    }
+    base = bstCatalogData + 8U; /* skip 8-byte header */
+    for (i = 0U; i < bstCatalogCount; i++)
+    {
+        const Unsigned8 *e = base + (MemorySize)i * 104U;
+        if (catalogRead32(e, 8U)  == srcGrp &&
+            catalogRead32(e, 12U) == srcInst)
+        {
+            return catalogRead32(e, 28U);
+        }
+    }
+    return 0U;
+}
+
+/* Nearest-neighbour downscale from an arbitrary RGBA source to the thumbnail
+ * pixel array. Used only during thumbnail decode; not worth a general routine. */
+static void thumbnailScaleNearest(Unsigned8 *dst, Unsigned32 dstW, Unsigned32 dstH,
+                                   const Unsigned8 *src, Unsigned32 srcW, Unsigned32 srcH)
+{
+    Unsigned32 dy;
+    Unsigned32 dx;
+
+    for (dy = 0U; dy < dstH; dy++)
+    {
+        for (dx = 0U; dx < dstW; dx++)
+        {
+            Unsigned32 sx = (dx * srcW) / dstW;
+            Unsigned32 sy = (dy * srcH) / dstH;
+            const Unsigned8 *s = src + ((MemorySize)sy * srcW + sx) * 4U;
+            Unsigned8 *d = dst + ((MemorySize)dy * dstW + dx) * 4U;
+
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+            d[3] = s[3];
+        }
+    }
+}
+
+/* One hop of thumbnail loading.
+ *
+ * Returns TRUE when the hop completed and the caller may try again immediately
+ * (native, where reads never pend). Returns FALSE when either there is nothing
+ * more to load, or a VFS read is pending and the caller must wait for delivery
+ * before calling again (web). */
+static Boolean stepOneThumbnail(void)
+{
+    if (engineIsRunning == BOOLEAN_FALSE || menuClothingCount == 0U)
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    /* One-time: load the BodyShopThumbnails catalog index.
+     *
+     * The allocation is intentionally NOT rewound on success — the catalog
+     * lives permanently in the arena below any per-frame markers. */
+    if (bstCatalogData == NULL_POINTER)
+    {
+        const ResourceIndexEntry *catEntry;
+        Unsigned8 *bytes;
+        MemorySize size;
+        MemorySize catMarker;
+
+        if (!bstCatalogLoading)
+        {
+            catEntry = resourceIndexFind(&simIndex,
+                                         (Unsigned32)PACKAGE_TYPE_CATALOG_INDEX,
+                                         0x00000001U, 0U);
+            if (catEntry == NULL_POINTER)
+            {
+                /* No catalog on this disc — thumbnail loading is unavailable. */
+                bstCatalogLoading = BOOLEAN_TRUE; /* suppress repeated searches */
+                return BOOLEAN_FALSE;
+            }
+            thumbnailLoadEntry = catEntry;
+            bstCatalogLoading  = BOOLEAN_TRUE;
+        }
+
+        if (thumbnailLoadEntry == NULL_POINTER)
+        {
+            return BOOLEAN_FALSE; /* gave up above */
+        }
+
+        catMarker = memoryArenaGetMarker(globalArena);
+        if (!readIndexedResource(thumbnailLoadEntry, &bytes, &size))
+        {
+            /* Pending — rewind the scratch allocation and retry next frame. */
+            memoryArenaRewindToMarker(globalArena, catMarker);
+            return BOOLEAN_FALSE;
+        }
+        if (bytes != NULL_POINTER && size > 8U)
+        {
+            Unsigned32 ver = catalogRead32(bytes, 0U);
+            Unsigned32 cnt = catalogRead32(bytes, 4U);
+            if (ver == 2U && cnt > 0U && cnt <= 65536U)
+            {
+                /* Keep the decompressed catalog in the arena permanently. */
+                bstCatalogData  = bytes;
+                bstCatalogCount = cnt;
+            }
+        }
+        if (bstCatalogData == NULL_POINTER)
+        {
+            /* Parse failed — rewind so the wasted space is reclaimed. */
+            memoryArenaRewindToMarker(globalArena, catMarker);
+        }
+        /* Either way, don't search for the catalog entry again. */
+        thumbnailLoadEntry = NULL_POINTER;
+        return BOOLEAN_TRUE;
+    }
+
+    if (thumbnailHop == THUMBNAIL_HOP_IDLE)
+    {
+        /* Find the next row that has a name and no cache slot yet. */
+        Unsigned32 row;
+
+        for (row = thumbnailNextRow; row < menuClothingCount; row++)
+        {
+            Unsigned32 slot;
+            Boolean found;
+            const ResourceIndexEntry *skinEntry;
+            Unsigned32 thumbInst;
+            const ResourceIndexEntry *jpegEntry;
+
+            if (menuClothingNames[row][0] == '\0')
+            {
+                continue;
+            }
+
+            /* Check whether this row already has a slot. */
+            found = BOOLEAN_FALSE;
+            for (slot = 0U; slot < (Unsigned32)THUMBNAIL_SLOT_COUNT; slot++)
+            {
+                if (thumbnailSlots[slot].row == row)
+                {
+                    found = BOOLEAN_TRUE;
+                    break;
+                }
+            }
+            if (found)
+            {
+                continue;
+            }
+
+            /* Resolve: name → SKIN_ENTRY → catalog → JPEG entry. */
+            skinEntry = resourceIndexFindNamed(&simIndex,
+                                               (Unsigned32)PACKAGE_TYPE_SKIN_ENTRY,
+                                               menuClothingNames[row]);
+            if (skinEntry == NULL_POINTER)
+            {
+                continue;
+            }
+            thumbInst = catalogFindThumbInst(skinEntry->groupIdentifier,
+                                              skinEntry->instanceIdentifier);
+            if (thumbInst == 0U)
+            {
+                continue;
+            }
+            jpegEntry = resourceIndexFind(&simIndex,
+                                           (Unsigned32)PACKAGE_TYPE_JPEG,
+                                           thumbInst, 0U);
+            if (jpegEntry == NULL_POINTER)
+            {
+                continue;
+            }
+
+            /* Assign a free slot and start the load. */
+            for (slot = 0U; slot < (Unsigned32)THUMBNAIL_SLOT_COUNT; slot++)
+            {
+                if (thumbnailSlots[slot].row == (Unsigned32)MENU_CLOTHING_CAPACITY)
+                {
+                    thumbnailActiveSlot            = slot;
+                    thumbnailSlots[slot].row       = row;
+                    thumbnailSlots[slot].ready     = BOOLEAN_FALSE;
+                    thumbnailLoadEntry             = jpegEntry;
+                    thumbnailNextRow               = row + 1U;
+                    thumbnailHop                   = THUMBNAIL_HOP_JPEG;
+                    return BOOLEAN_TRUE;
+                }
+            }
+            return BOOLEAN_FALSE; /* All slots occupied. */
+        }
+        return BOOLEAN_FALSE; /* All loadable rows covered. */
+    }
+
+    /* THUMBNAIL_HOP_JPEG: read the JPEG, decode, scale to slot pixels. */
+    {
+        Unsigned8 *bytes;
+        MemorySize size;
+        MemorySize marker = memoryArenaGetMarker(globalArena);
+
+        if (!readIndexedResource(thumbnailLoadEntry, &bytes, &size))
+        {
+            memoryArenaRewindToMarker(globalArena, marker);
+            return BOOLEAN_FALSE;
+        }
+        thumbnailLoadEntry = NULL_POINTER;
+        if (bytes != NULL_POINTER && size > 0U)
+        {
+            /* 256×256×4 = 262 144 bytes for the decoded RGBA. */
+            MemorySize rgbaBytes = 256U * 256U * 4U;
+            Unsigned8 *rgba = (Unsigned8 *)memoryArenaAllocate(globalArena,
+                                                                rgbaBytes, 4UL);
+            if (rgba != NULL_POINTER)
+            {
+                Unsigned32 w = 0U, h = 0U;
+
+                if (jpegReadToRgba(bytes, size, rgba, rgbaBytes, &w, &h)
+                        == JPEG_READ_OK &&
+                    w > 0U && h > 0U)
+                {
+                    thumbnailScaleNearest(thumbnailSlots[thumbnailActiveSlot].pixels,
+                                          (Unsigned32)THUMBNAIL_SIZE,
+                                          (Unsigned32)THUMBNAIL_SIZE,
+                                          rgba, w, h);
+                    thumbnailSlots[thumbnailActiveSlot].ready = BOOLEAN_TRUE;
+                }
+            }
+        }
+        memoryArenaRewindToMarker(globalArena, marker);
+        if (!thumbnailSlots[thumbnailActiveSlot].ready)
+        {
+            /* Decode failed — free the slot so another row can use it. */
+            thumbnailSlots[thumbnailActiveSlot].row = (Unsigned32)MENU_CLOTHING_CAPACITY;
+        }
+        thumbnailHop = THUMBNAIL_HOP_IDLE;
+        return BOOLEAN_TRUE;
+    }
+}
+
+Boolean engineGetThumbnailPixels(Unsigned32 row, const Unsigned8 **rgbaPixels,
+                                  Unsigned32 *width, Unsigned32 *height)
+{
+    Unsigned32 i;
+
+    for (i = 0U; i < (Unsigned32)THUMBNAIL_SLOT_COUNT; i++)
+    {
+        if (thumbnailSlots[i].row == row && thumbnailSlots[i].ready == BOOLEAN_TRUE)
+        {
+            *rgbaPixels = thumbnailSlots[i].pixels;
+            *width = (Unsigned32)THUMBNAIL_SIZE;
+            *height = (Unsigned32)THUMBNAIL_SIZE;
+            return BOOLEAN_TRUE;
+        }
+    }
+    return BOOLEAN_FALSE;
+}
+
+void engineStepThumbnail(void)
+{
+    /* On native, reads never pend, so loop to complete multiple hops per call.
+       Cap at 8 to bound the worst-case stall per frame. */
+    Unsigned32 iterations;
+
+    for (iterations = 0U; iterations < 8U; iterations++)
+    {
+        if (!stepOneThumbnail())
+        {
+            break;
+        }
+    }
+}
+
 void engineRenderFrame(Real32 elapsedSeconds)
 {
     if (engineIsRunning == BOOLEAN_FALSE)
@@ -7395,6 +7802,7 @@ void engineRenderFrame(Real32 elapsedSeconds)
     }
 
     VICTORIA_PROFILE_ZONE_BEGIN("engineRenderFrame");
+    engineStepThumbnail();
     advanceThePose(elapsedSeconds);
     /* Before the frame rather than after: what the menu says can change on any
        step of the disc load, and composing it afterwards would put it on screen

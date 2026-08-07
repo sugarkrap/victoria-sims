@@ -49,7 +49,12 @@ const runtimeState = {
     // all, so the canvas is never reconfigured while its container might
     // still be moving.
     paused: false,
-    pauseStartTimestamp: 0
+    pauseStartTimestamp: 0,
+    // The currently loaded disc file, set after loadDisc succeeds. Used by the
+    // render loop to service any VFS reads that thumbnail loading (driven from
+    // C inside victoriaWebRenderFrame) requests between frames.
+    disc: null,
+    thumbnailFetchPending: false
 };
 
 // Matches the engine's own report refresh interval; sampling faster only costs
@@ -953,6 +958,30 @@ function renderLoop(timestamp) {
     }
     runtimeState.instance.exports.victoriaWebRenderFrame((timestamp - runtimeState.startTimestamp) / 1000);
 
+    // Service any VFS read that thumbnail loading (driven from C inside
+    // victoriaWebRenderFrame) requested. Disc loading uses the same wantedLength
+    // channel, so only check after the disc is fully loaded (runtimeState.disc set).
+    if (runtimeState.disc !== null && !runtimeState.thumbnailFetchPending) {
+        const exports = runtimeState.instance.exports;
+        const length = exports.victoriaWebGetWantedLength();
+
+        if (length > 0) {
+            runtimeState.thumbnailFetchPending = true;
+            const offset = exports.victoriaWebGetWantedOffset();
+            runtimeState.disc.slice(offset, offset + length).arrayBuffer().then((buffer) => {
+                if (runtimeState.instance !== null) {
+                    new Uint8Array(
+                        runtimeState.instance.exports.memory.buffer,
+                        runtimeState.instance.exports.victoriaWebGetDeliveryPointer(),
+                        length
+                    ).set(new Uint8Array(buffer));
+                    runtimeState.instance.exports.victoriaWebDeliver();
+                }
+                runtimeState.thumbnailFetchPending = false;
+            });
+        }
+    }
+
     runtimeState.frameMicrosecondHistory.push(
         runtimeState.instance.exports.victoriaWebGetFrameIntervalMicroseconds());
     if (runtimeState.frameMicrosecondHistory.length > SPARKLINE_SAMPLE_COUNT) {
@@ -1042,6 +1071,7 @@ const STEPS_BEFORE_YIELDING = 64;
 async function loadDisc(file) {
     const exports = runtimeState.instance.exports;
 
+    runtimeState.disc = null;
     if (!exports.victoriaWebOpenDisc(file.size)) {
         reportDiscMessage(`could not start reading ${file.name}`);
         return;
@@ -1055,6 +1085,9 @@ async function loadDisc(file) {
             reportDiscMessage(status === DISC_STATUS_READY
                 ? `${file.name} loaded`
                 : `nothing on ${file.name} could be drawn — see the log`);
+            if (status === DISC_STATUS_READY) {
+                runtimeState.disc = file;
+            }
             return;
         }
 
