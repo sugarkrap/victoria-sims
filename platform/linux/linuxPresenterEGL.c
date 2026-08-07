@@ -91,6 +91,13 @@ Boolean linuxPresenterCreate(Display *displayConnection, Window windowHandle,
         return BOOLEAN_FALSE;
     }
 
+    /* The render loop presents every frame assuming vertical sync paces it,
+       but that is only true once asked for: the interval EGL starts with is
+       implementation-defined, and left unset some drivers hand back a buffer
+       still in flight, which is what a "not idle" assertion in the platform's
+       own present path further down the stack turns into. */
+    eglSwapInterval(presenterState.displayEGL, 1);
+
     return BOOLEAN_TRUE;
 }
 
