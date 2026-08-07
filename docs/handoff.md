@@ -1015,9 +1015,10 @@ branch got a runner for the **ARMv7 Cortex-A8** job and it passed — which
 retroactively verifies the ARM rasterizer link fix that had been pushed
 untestable, because there was no cross compiler here at the time.
 
-**Tonight's two commits are unbuilt.** Actions was still in `major_outage` when
-they were pushed, so they will queue until it clears. What has been covered
-locally instead:
+Actions recovered, and everything below has since been confirmed by it — the
+branch and the merge to `master` both built all six jobs green, including the
+three ARM tiers. What is covered locally as well, and why that matters when the
+runners are unavailable:
 
 | | |
 | --- | --- |
@@ -1117,3 +1118,18 @@ GCC reproduces it exactly, which makes it a one-liner to check —
 — and the whole engine is clean under it. The ARM jobs in continuous integration
 use GCC, which is why they were the three that went red while the Linux and
 WebAssembly jobs, both clang, stayed green.
+
+
+### One workflow that is still red, and is not the code
+
+`Deploy to Netlify` fails on every push to `master` with
+
+    JSONHTTPError: 403
+    "error": "Account credit usage exceeded — new deploys are blocked
+              until credits are added"
+
+The WebAssembly build inside that job succeeds; only the upload is refused. It
+is a billing state on the Netlify account and there is nothing in this
+repository to fix. Worth writing down so the next session does not spend an hour
+on it: `Build` is the workflow that says whether the code is good, and it is
+green.
