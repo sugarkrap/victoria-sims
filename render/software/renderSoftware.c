@@ -508,6 +508,25 @@ static void drawOverlay(void)
     }
 }
 
+/* The mesh path corrects for aspect itself, in projectMesh's own projection.
+   The placeholder triangle has no projection of its own, so it needs the same
+   correction the shader backends give it in their vertex stage, done here
+   instead since the rasterizer takes plain normalised device coordinates. */
+static void drawPlaceholderTriangle(Real32 colorScale)
+{
+    RasterizerVertex correctedVertices[3];
+    Real32 aspect = (Real32)surface.widthInPixels / (Real32)surface.heightInPixels;
+    Unsigned32 index;
+
+    for (index = 0U; index < 3U; index += 1U)
+    {
+        correctedVertices[index] = triangleVertices[index];
+        correctedVertices[index].positionX = triangleVertices[index].positionX / aspect;
+    }
+
+    rasterizerDrawTriangle(&surface, correctedVertices, colorScale);
+}
+
 void renderDrawFrame(Real32 elapsedSeconds)
 {
     Real32 colorPulse = 0.65f + (0.35f * mathSine(elapsedSeconds * 1.5f));
@@ -532,7 +551,7 @@ void renderDrawFrame(Real32 elapsedSeconds)
     else
     {
         VICTORIA_PROFILE_ZONE_BEGIN("rasterizerDrawTriangle");
-        rasterizerDrawTriangle(&surface, triangleVertices, colorPulse);
+        drawPlaceholderTriangle(colorPulse);
         VICTORIA_PROFILE_ZONE_END();
     }
 

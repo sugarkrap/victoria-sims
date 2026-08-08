@@ -49,7 +49,17 @@ const runtimeState = {
     // all, so the canvas is never reconfigured while its container might
     // still be moving.
     paused: false,
-    pauseStartTimestamp: 0
+    pauseStartTimestamp: 0,
+    // The currently loaded disc file, set after loadDisc succeeds. Used by the
+    // render loop to service any VFS reads that thumbnail loading (driven from
+    // C inside victoriaWebRenderFrame) requests between frames.
+    disc: null,
+    thumbnailFetchPending: false,
+    // Set once the device is gone or a create call has failed. The render loop
+    // stops calling into the wasm module at that point — otherwise it keeps
+    // submitting frames a broken device can only fail again, silently, which
+    // is what a permanently blank canvas with no explanation turns into.
+    fatalGPUError: false
 };
 
 // Matches the engine's own report refresh interval; sampling faster only costs
@@ -288,9 +298,9 @@ const importObject = {
             runtimeState.clearColor = { r: red, g: green, b: blue, a: 1 };
         },
 
-        setTriangleTint(tint) {
+        setTriangleTint(tint, aspect) {
             runtimeState.device.queue.writeBuffer(
-                runtimeState.uniformBuffer, 0, new Float32Array([tint, 0, 0, 0]));
+                runtimeState.uniformBuffer, 0, new Float32Array([tint, aspect, 0, 0]));
         },
 
         // Builds the pipeline a mesh is drawn with. Separate from the triangle's
@@ -944,6 +954,9 @@ function drawFrameSparkline() {
 }
 
 function renderLoop(timestamp) {
+    if (runtimeState.fatalGPUError) {
+        return;
+    }
     if (runtimeState.paused) {
         requestAnimationFrame(renderLoop);
         return;
@@ -952,6 +965,30 @@ function renderLoop(timestamp) {
         runtimeState.startTimestamp = timestamp;
     }
     runtimeState.instance.exports.victoriaWebRenderFrame((timestamp - runtimeState.startTimestamp) / 1000);
+
+    // Service any VFS read that thumbnail loading (driven from C inside
+    // victoriaWebRenderFrame) requested. Disc loading uses the same wantedLength
+    // channel, so only check after the disc is fully loaded (runtimeState.disc set).
+    if (runtimeState.disc !== null && !runtimeState.thumbnailFetchPending) {
+        const exports = runtimeState.instance.exports;
+        const length = exports.victoriaWebGetWantedLength();
+
+        if (length > 0) {
+            runtimeState.thumbnailFetchPending = true;
+            const offset = exports.victoriaWebGetWantedOffset();
+            runtimeState.disc.slice(offset, offset + length).arrayBuffer().then((buffer) => {
+                if (runtimeState.instance !== null) {
+                    new Uint8Array(
+                        runtimeState.instance.exports.memory.buffer,
+                        runtimeState.instance.exports.victoriaWebGetDeliveryPointer(),
+                        length
+                    ).set(new Uint8Array(buffer));
+                    runtimeState.instance.exports.victoriaWebDeliver();
+                }
+                runtimeState.thumbnailFetchPending = false;
+            });
+        }
+    }
 
     runtimeState.frameMicrosecondHistory.push(
         runtimeState.instance.exports.victoriaWebGetFrameIntervalMicroseconds());
@@ -984,6 +1021,28 @@ async function start() {
     runtimeState.device = await adapter.requestDevice();
     runtimeState.context = runtimeState.canvas.getContext("webgpu");
     runtimeState.canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+
+    // Neither fires as a thrown exception — a create call that fails still
+    // returns an (invalid) object, and everything built from it keeps quietly
+    // failing in turn, which is how this otherwise surfaces as a blank canvas
+    // with nothing in the console pointing at why. Reporting only the first
+    // one is deliberate: the frame that ran out of memory usually fails a
+    // handful of calls in a row, and six copies of the same root cause is
+    // noise, not new information.
+    runtimeState.device.addEventListener("uncapturederror", (event) => {
+        if (runtimeState.fatalGPUError) {
+            return;
+        }
+        runtimeState.fatalGPUError = true;
+        reportStatus(`WebGPU ran out of graphics memory and cannot continue: ${event.error.message}`, true);
+    });
+    runtimeState.device.lost.then((info) => {
+        if (runtimeState.fatalGPUError) {
+            return;
+        }
+        runtimeState.fatalGPUError = true;
+        reportStatus(`WebGPU device was lost: ${info.message}`, true);
+    });
 
     // Sized before the module exists, since the module's own initial size has
     // to be this one rather than whatever the unstyled canvas defaults to.
@@ -1042,6 +1101,7 @@ const STEPS_BEFORE_YIELDING = 64;
 async function loadDisc(file) {
     const exports = runtimeState.instance.exports;
 
+    runtimeState.disc = null;
     if (!exports.victoriaWebOpenDisc(file.size)) {
         reportDiscMessage(`could not start reading ${file.name}`);
         return;
@@ -1055,6 +1115,9 @@ async function loadDisc(file) {
             reportDiscMessage(status === DISC_STATUS_READY
                 ? `${file.name} loaded`
                 : `nothing on ${file.name} could be drawn — see the log`);
+            if (status === DISC_STATUS_READY) {
+                runtimeState.disc = file;
+            }
             return;
         }
 
