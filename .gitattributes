@@ -1,0 +1,10 @@
+* text=auto
+
+*.c text
+*.h text
+*.js text
+*.html text
+*.sh text eol=lf
+Makefile text
+
+legacy/** linguist-vendored
