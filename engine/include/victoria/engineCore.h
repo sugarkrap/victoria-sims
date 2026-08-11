@@ -30,6 +30,11 @@ typedef struct EngineConfiguration
 } EngineConfiguration;
 
 Boolean engineInitialize(const EngineConfiguration *configuration);
+Boolean engineInitializeGame(VirtualFileSystem *fileSystem, Unsigned32 widthInPixels,
+                             Unsigned32 heightInPixels, MemorySize graphicsMemoryLimitBytes);
+
+void engineBeginGameLoad(VirtualFileSystem *fileSystem);
+
 void engineResize(Unsigned32 widthInPixels, Unsigned32 heightInPixels);
 void engineShutdown(void);
 
@@ -50,6 +55,7 @@ typedef enum EngineDiscLoadStatus
 void engineBeginDiscLoad(VirtualFileSystem *fileSystem);
 
 EngineDiscLoadStatus engineStepDiscLoad(void);
+EngineDiscLoadStatus engineStepGameLoad(void);
 
 void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
 
@@ -61,10 +67,12 @@ typedef enum EnginePointerAction
 {
     ENGINE_POINTER_MOVED = 0,
     ENGINE_POINTER_PRESSED,
-    ENGINE_POINTER_LEFT
+    ENGINE_POINTER_LEFT,
+    ENGINE_POINTER_RELEASED
 } EnginePointerAction;
 
 Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y);
+Boolean engineHandleGamePointer(EnginePointerAction action, Integer32 x, Integer32 y);
 
 MemoryArena *engineGetGlobalArena(void);
 

@@ -42,14 +42,14 @@ static void buildHuffTable(HuffTable *ht,
                             const Unsigned8 counts[16],
                             const Unsigned8 *syms)
 {
-    int L, code = 0, symIdx = 0, srcIdx = 0;
+    int L, code = 0, symIdx = 0;
     for (L = 1; L <= 16; L++) {
         int n = counts[L - 1];
         ht->minCode[L]  = code;
         ht->maxCode[L]  = (n > 0) ? code + n - 1 : -1;
         ht->firstSym[L] = symIdx;
-        for (; srcIdx < symIdx + n; srcIdx++) ht->values[symIdx++] = syms[srcIdx];
-        code = (code + n) << 1;
+        for (; n > 0; n--) { ht->values[symIdx] = syms[symIdx]; symIdx++; }
+        code = (code + counts[L - 1]) << 1;
     }
     ht->count = symIdx;
 }
@@ -165,6 +165,33 @@ static void ycbcr2rgba(int y, int cb, int cr, Unsigned8 *out)
     out[3] = 255;
 }
 
+static void jpegDecodeAlfaSegment(const Unsigned8 *payload, MemorySize payloadSize,
+                                  Unsigned8 *rgba, MemorySize pixelCount)
+{
+    MemorySize outPos = 0;
+    MemorySize inPos = 0;
+
+    while (inPos < payloadSize && outPos < pixelCount) {
+        Integer8 control = (Integer8)payload[inPos++];
+        MemorySize run;
+
+        if (control < 0) {
+            Unsigned8 value = 255;
+            if (inPos < payloadSize) value = payload[inPos++];
+            run = (MemorySize)((-control) + 1);
+            for (; run > 0 && outPos < pixelCount; run--)
+                rgba[outPos++ * 4 + 3] = value;
+        } else {
+            run = (MemorySize)(control + 1);
+            for (; run > 0 && outPos < pixelCount && inPos < payloadSize; run--)
+                rgba[outPos++ * 4 + 3] = payload[inPos++];
+        }
+    }
+
+    for (; outPos < pixelCount; outPos++)
+        rgba[outPos * 4 + 3] = 255;
+}
+
 JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
                               Unsigned8 *outRgba, MemorySize outCap,
                               Unsigned32 *outW, Unsigned32 *outH)
@@ -180,6 +207,8 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
     MemorySize scanStart = 0;
     int i, k;
     Boolean foundSOS = BOOLEAN_FALSE;
+    const Unsigned8 *alfaPayload = NULL_POINTER;
+    MemorySize alfaPayloadSize = 0;
 
     if (!d || sz < 4 || d[0] != 0xFF || d[1] != 0xD8)
         return JPEG_READ_INVALID;
@@ -215,7 +244,7 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
                 height = ((Unsigned32)d[pos+1] << 8) | d[pos+2];
                 width  = ((Unsigned32)d[pos+3] << 8) | d[pos+4];
                 nComp  = d[pos+5];
-                if (nComp != 3 || width > 512 || height > 512 || width == 0 || height == 0)
+                if (nComp != 3 || width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION || width == 0 || height == 0)
                     return JPEG_READ_UNSUPPORTED;
                 if (outCap < (MemorySize)width * height * 4) return JPEG_READ_INVALID;
                 for (j = 0; j < 3; j++) {
@@ -233,7 +262,7 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
                 while (p + 17 <= segLen) {
                     Unsigned8 tc = (d[pos+p] >> 4) & 1;
                     Unsigned8 th =  d[pos+p] & 1;
-                    int idx = (tc == 0) ? (int)th : 2 + (int)th;
+                    int idx = (int)th * 2 + (int)tc;
                     int nSym = 0, j;
                     Unsigned8 counts[16];
                     p++;
@@ -270,6 +299,12 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
                 foundSOS   = BOOLEAN_TRUE;
                 break;
             }
+            else if (m1 == 0xE0 && segLen >= 4 &&
+                     d[pos] == 'A' && d[pos+1] == 'L' &&
+                     d[pos+2] == 'F' && d[pos+3] == 'A') {
+                alfaPayload = d + pos + 4;
+                alfaPayloadSize = segLen - 4;
+            }
 
             pos += segLen;
         }
@@ -277,6 +312,13 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
 
     if (!foundSOS || width == 0 || height == 0 || maxSfH == 0 || maxSfV == 0)
         return JPEG_READ_INVALID;
+
+    {
+        MemorySize pixel;
+        MemorySize pixelCount = (MemorySize)width * height;
+        for (pixel = 0; pixel < pixelCount; pixel++)
+            outRgba[pixel * 4 + 3] = 255;
+    }
 
     {
         int mcuW    = maxSfH * 8;
@@ -352,7 +394,53 @@ JpegReadResult jpegReadToRgba(const Unsigned8 *d, MemorySize sz,
         }
     }
 
+    if (alfaPayload != NULL_POINTER)
+        jpegDecodeAlfaSegment(alfaPayload, alfaPayloadSize, outRgba,
+                              (MemorySize)width * height);
+
     *outW = width;
     *outH = height;
     return JPEG_READ_OK;
+}
+
+JpegReadResult jpegPeekDimensions(const Unsigned8 *d, MemorySize sz,
+                                  Unsigned32 *outW, Unsigned32 *outH)
+{
+    MemorySize pos;
+
+    if (!d || sz < 4 || d[0] != 0xFF || d[1] != 0xD8)
+        return JPEG_READ_INVALID;
+
+    pos = 2;
+    while (pos + 1 < sz) {
+        MemorySize segLen;
+        Unsigned8 m1;
+
+        if (d[pos] != 0xFF) { pos++; continue; }
+        m1 = d[pos + 1];
+        pos += 2;
+
+        if (m1 == 0xD9) break;
+        if (m1 == 0xD8) continue;
+        if (m1 >= 0xD0 && m1 <= 0xD7) continue;
+        if (pos + 2 > sz) break;
+        segLen = (MemorySize)((d[pos] << 8) | d[pos+1]) - 2U;
+        pos += 2;
+        if (pos + segLen > sz) break;
+
+        if (m1 == 0xC0) {
+            if (segLen < 11 || d[pos] != 8)
+                return JPEG_READ_UNSUPPORTED;
+            *outH = ((Unsigned32)d[pos+1] << 8) | d[pos+2];
+            *outW = ((Unsigned32)d[pos+3] << 8) | d[pos+4];
+            if (*outW == 0 || *outH == 0 ||
+                *outW > JPEG_MAX_DIMENSION || *outH > JPEG_MAX_DIMENSION)
+                return JPEG_READ_UNSUPPORTED;
+            return JPEG_READ_OK;
+        }
+
+        pos += segLen;
+    }
+
+    return JPEG_READ_INVALID;
 }

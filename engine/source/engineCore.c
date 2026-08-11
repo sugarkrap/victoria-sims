@@ -2,6 +2,9 @@
 #include "victoria/discReader.h"
 #include "victoria/engineCore.h"
 #include "victoria/jpegReader.h"
+#include "victoria/pngReader.h"
+#include "victoria/tgaReader.h"
+#include "victoria/uiLayoutReader.h"
 #include "victoria/freestandingRuntime.h"
 #include "utils/strings.h"
 #include "victoria/graphicsMemoryBudget.h"
@@ -30,6 +33,55 @@ static MemoryArena *globalArena = NULL_POINTER;
 static Boolean engineIsRunning = BOOLEAN_FALSE;
 static char *profilerReportText = NULL_POINTER;
 static Unsigned64 lastReportMicroseconds = 0ULL;
+
+#define MAIN_MENU_MAX_FRAMES_PER_IMAGE 64U
+#define MAIN_MENU_SECONDS_PER_FRAME 0.125f
+
+#define MAIN_MENU_SURFACE_WIDTH 1024U
+#define MAIN_MENU_SURFACE_HEIGHT 768U
+#define UI_IMAGE_TYPE_IDENTIFIER 0x856DDBACUL
+
+typedef struct MainMenuImage
+{
+    const Unsigned8 *pixels;
+    Unsigned32 width;
+    Unsigned32 height;
+    Unsigned32 frameCount;
+    Unsigned32 frameWidth;
+    Unsigned32 frameHeight;
+    Unsigned32 currentFrame;
+    const Unsigned8 *framePixels[MAIN_MENU_MAX_FRAMES_PER_IMAGE];
+    Boolean isAnimated;
+    Real32 frameAccumulator;
+} MainMenuImage;
+
+typedef enum MainMenuPhase
+{
+    MAIN_MENU_PHASE_DISC_LOAD = 0,
+    MAIN_MENU_PHASE_BUILD_INDEX,
+    MAIN_MENU_PHASE_LOAD_LAYOUT,
+    MAIN_MENU_PHASE_READ_LAYOUT,
+    MAIN_MENU_PHASE_LOAD_IMAGES,
+    MAIN_MENU_PHASE_RESUME_DISC_LOAD,
+    MAIN_MENU_PHASE_READY
+} MainMenuPhase;
+
+static InterfaceSurface mainMenuSurface;
+static UILayoutDescription mainMenuLayout;
+static MainMenuImage mainMenuImages[UI_LAYOUT_ELEMENT_LIMIT];
+static Unsigned32 mainMenuImageCursor = 0U;
+static Boolean mainMenuScreenDrawn = BOOLEAN_FALSE;
+static Boolean mainMenuPointerIsInside = BOOLEAN_FALSE;
+static Integer32 mainMenuPointerX = 0;
+static Integer32 mainMenuPointerY = 0;
+static Integer32 mainMenuHoveredElementIndex = -1;
+static Integer32 mainMenuPressedElementIndex = -1;
+static Boolean gameModeIsReal = BOOLEAN_FALSE;
+static MainMenuPhase mainMenuPhase = MAIN_MENU_PHASE_DISC_LOAD;
+static ResourceIndex mainMenuIndex;
+static const ResourceIndexEntry *mainMenuLayoutEntry = NULL_POINTER;
+static Unsigned32 mainMenuWindowWidth = 1024U;
+static Unsigned32 mainMenuWindowHeight = 768U;
 
 static void logMemoryBudget(void)
 {
@@ -5719,6 +5771,11 @@ Boolean engineHandlePointer(EnginePointerAction action, Integer32 x, Integer32 y
         return wasOverSomething;
     }
 
+    if (action == ENGINE_POINTER_RELEASED)
+    {
+        return BOOLEAN_FALSE;
+    }
+
     engineTextSetPointer(x, y);
     hit = engineTextHitTest(&debugMenu);
     if (action == ENGINE_POINTER_MOVED)
@@ -6226,6 +6283,778 @@ void engineStepThumbnail(void)
     }
 }
 
+static Boolean mainMenuDecodeImage(const Unsigned8 *bytes, MemorySize size, Unsigned8 **rgba,
+                                   Unsigned32 *width, Unsigned32 *height)
+{
+    Unsigned32 w = 0U;
+    Unsigned32 h = 0U;
+    Unsigned32 decodedWidth = 0U;
+    Unsigned32 decodedHeight = 0U;
+    MemorySize scratchCapacity = 0UL;
+    MemorySize marker = memoryArenaGetMarker(globalArena);
+    Unsigned8 *out = NULL_POINTER;
+    Unsigned8 *scratch = NULL_POINTER;
+
+    *rgba = NULL_POINTER;
+    *width = 0U;
+    *height = 0U;
+
+    if (pngPeekDimensions(bytes, size, &w, &h, &scratchCapacity) == PNG_READ_OK)
+    {
+        out = (Unsigned8 *)memoryArenaAllocate(globalArena, (MemorySize)w * h * 4U, 16UL);
+        scratch = (Unsigned8 *)memoryArenaAllocate(globalArena, scratchCapacity, 16UL);
+
+        if (out != NULL_POINTER && scratch != NULL_POINTER &&
+            pngReadToRgba(bytes, size, out, (MemorySize)w * h * 4U, scratch, scratchCapacity,
+                          &decodedWidth, &decodedHeight) == PNG_READ_OK)
+        {
+            *rgba = out;
+            *width = decodedWidth;
+            *height = decodedHeight;
+            return BOOLEAN_TRUE;
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+
+    if (tgaPeekDimensions(bytes, size, &w, &h) == TGA_READ_OK)
+    {
+        out = (Unsigned8 *)memoryArenaAllocate(globalArena, (MemorySize)w * h * 4U, 16UL);
+
+        if (out != NULL_POINTER &&
+            tgaReadToRgba(bytes, size, out, (MemorySize)w * h * 4U, &decodedWidth, &decodedHeight) ==
+                TGA_READ_OK)
+        {
+            *rgba = out;
+            *width = decodedWidth;
+            *height = decodedHeight;
+            return BOOLEAN_TRUE;
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+
+    if (jpegPeekDimensions(bytes, size, &w, &h) == JPEG_READ_OK)
+    {
+        out = (Unsigned8 *)memoryArenaAllocate(globalArena, (MemorySize)w * h * 4U, 16UL);
+
+        if (out != NULL_POINTER &&
+            jpegReadToRgba(bytes, size, out, (MemorySize)w * h * 4U, &decodedWidth,
+                           &decodedHeight) == JPEG_READ_OK)
+        {
+            *rgba = out;
+            *width = decodedWidth;
+            *height = decodedHeight;
+            return BOOLEAN_TRUE;
+        }
+    }
+    memoryArenaRewindToMarker(globalArena, marker);
+    return BOOLEAN_FALSE;
+}
+
+static Boolean mainMenuStepImages(void)
+{
+    const UIElement *element;
+    Integer32 left;
+    Integer32 top;
+    Integer32 right;
+    Integer32 bottom;
+    Unsigned32 rectWidth;
+    Unsigned32 rectHeight;
+    const ResourceIndexEntry *entry;
+    Unsigned8 *bytes = NULL_POINTER;
+    MemorySize size = 0UL;
+    Unsigned8 *rgba = NULL_POINTER;
+    Unsigned32 width = 0U;
+    Unsigned32 height = 0U;
+    Boolean decoded = BOOLEAN_FALSE;
+    MemorySize marker;
+    Unsigned32 imageType = UI_IMAGE_TYPE_IDENTIFIER;
+    Unsigned32 imageGroup = 0U;
+    Unsigned32 imageInstance = 0U;
+
+    if (mainMenuImageCursor >= mainMenuLayout.elementCount)
+    {
+        return BOOLEAN_TRUE;
+    }
+
+    element = &mainMenuLayout.elements[mainMenuImageCursor];
+    if (element->hasImage == BOOLEAN_FALSE || element->imageNumberCount < 2U)
+    {
+        mainMenuImageCursor++;
+        return BOOLEAN_TRUE;
+    }
+
+    uiLayoutGetAbsoluteArea(&mainMenuLayout, mainMenuImageCursor, &left, &top, &right, &bottom);
+    rectWidth = (Unsigned32)(right - left);
+    rectHeight = (Unsigned32)(bottom - top);
+
+    {
+        if (element->imageNumberCount == 2U)
+        {
+            imageGroup = element->imageNumbers[0];
+            imageInstance = element->imageNumbers[1];
+        }
+        else if (element->imageNumberCount == 3U)
+        {
+            imageType = element->imageNumbers[0];
+            imageGroup = element->imageNumbers[1];
+            imageInstance = element->imageNumbers[2];
+        }
+        else
+        {
+            mainMenuImageCursor++;
+            return BOOLEAN_TRUE;
+        }
+
+        entry = resourceIndexFindInGroup(&mainMenuIndex, imageType, imageGroup, imageInstance, 0U);
+        if (entry == NULL_POINTER)
+        {
+            entry = resourceIndexFind(&mainMenuIndex, imageType, imageInstance, 0U);
+        }
+    }
+
+    if (entry == NULL_POINTER)
+    {
+        mainMenuImageCursor++;
+        return BOOLEAN_TRUE;
+    }
+
+    marker = memoryArenaGetMarker(globalArena);
+    if (!readIndexedResource(entry, &bytes, &size))
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    if (bytes == NULL_POINTER || size == 0UL)
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        mainMenuImageCursor++;
+        return BOOLEAN_TRUE;
+    }
+
+    decoded = mainMenuDecodeImage(bytes, size, &rgba, &width, &height);
+
+    if (decoded == BOOLEAN_FALSE || rgba == NULL_POINTER)
+    {
+        memoryArenaRewindToMarker(globalArena, marker);
+        mainMenuImageCursor++;
+        return BOOLEAN_TRUE;
+    }
+
+    if (rectWidth > 0U && height == rectHeight && width > rectWidth && (width % rectWidth) == 0U)
+    {
+        Unsigned32 frameCount = width / rectWidth;
+        const UIElement *thisElement = &mainMenuLayout.elements[mainMenuImageCursor];
+        MemorySize pointerCapacity = (MemorySize)frameCount * sizeof(Unsigned8 *);
+        Unsigned8 **framePointers =
+            (Unsigned8 **)memoryArenaAllocate(globalArena, pointerCapacity, 16UL);
+
+        if (framePointers != NULL_POINTER && frameCount <= MAIN_MENU_MAX_FRAMES_PER_IMAGE)
+        {
+            Boolean copiedAll = BOOLEAN_TRUE;
+            Unsigned32 frameIndex;
+
+            mainMenuImages[mainMenuImageCursor].frameCount = frameCount;
+            mainMenuImages[mainMenuImageCursor].frameWidth = rectWidth;
+            mainMenuImages[mainMenuImageCursor].frameHeight = rectHeight;
+            mainMenuImages[mainMenuImageCursor].isAnimated =
+                (Boolean)stringEquals(thisElement->className, "0x4d9ccdb1");
+
+            for (frameIndex = 0U; frameIndex < frameCount; frameIndex++)
+            {
+                MemorySize frameCapacity = (MemorySize)rectWidth * (MemorySize)rectHeight *
+                                           (MemorySize)INTERFACE_BYTES_PER_PIXEL;
+                Unsigned8 *frame =
+                    (Unsigned8 *)memoryArenaAllocate(globalArena, frameCapacity, 16UL);
+
+                if (frame != NULL_POINTER)
+                {
+                    Unsigned32 row;
+
+                    for (row = 0U; row < rectHeight; row++)
+                    {
+                        const Unsigned8 *sourceRow =
+                            &rgba[(MemorySize)row * width * INTERFACE_BYTES_PER_PIXEL +
+                                  (MemorySize)frameIndex * rectWidth * INTERFACE_BYTES_PER_PIXEL];
+                        Unsigned8 *destRow =
+                            &frame[(MemorySize)row * rectWidth * INTERFACE_BYTES_PER_PIXEL];
+
+                        memoryCopy(destRow, sourceRow,
+                                   (MemorySize)rectWidth * INTERFACE_BYTES_PER_PIXEL);
+                    }
+                    framePointers[frameIndex] = frame;
+                }
+                else
+                {
+                    copiedAll = BOOLEAN_FALSE;
+                    framePointers[frameIndex] = NULL_POINTER;
+                }
+            }
+
+            if (copiedAll == BOOLEAN_TRUE)
+            {
+                for (frameIndex = 0U; frameIndex < frameCount; frameIndex++)
+                {
+                    mainMenuImages[mainMenuImageCursor].framePixels[frameIndex] =
+                        framePointers[frameIndex];
+                }
+                mainMenuImages[mainMenuImageCursor].pixels = framePointers[0];
+                mainMenuImages[mainMenuImageCursor].width = rectWidth;
+                mainMenuImages[mainMenuImageCursor].height = rectHeight;
+            }
+        }
+    }
+    else
+    {
+        mainMenuImages[mainMenuImageCursor].frameCount = 1U;
+        mainMenuImages[mainMenuImageCursor].frameWidth = width;
+        mainMenuImages[mainMenuImageCursor].frameHeight = height;
+        mainMenuImages[mainMenuImageCursor].framePixels[0] = rgba;
+        mainMenuImages[mainMenuImageCursor].pixels = rgba;
+        mainMenuImages[mainMenuImageCursor].width = width;
+        mainMenuImages[mainMenuImageCursor].height = height;
+    }
+
+    mainMenuImageCursor++;
+    return BOOLEAN_TRUE;
+}
+
+static Unsigned32 mainMenuPickFrame(Unsigned32 elementIndex)
+{
+    const UIElement *element = &mainMenuLayout.elements[elementIndex];
+    MainMenuImage *image = &mainMenuImages[elementIndex];
+
+    if (image->frameCount <= 1U)
+    {
+        return 0U;
+    }
+
+    if (image->isAnimated == BOOLEAN_TRUE)
+    {
+        return image->currentFrame % image->frameCount;
+    }
+
+    if (stringEquals(element->className, "GZWinBtn"))
+    {
+        if (mainMenuPressedElementIndex == (Integer32)elementIndex)
+        {
+            return 2U;
+        }
+        if (mainMenuHoveredElementIndex == (Integer32)elementIndex)
+        {
+            return 3U;
+        }
+        return 1U;
+    }
+
+    return 0U;
+}
+
+static void mainMenuDraw(void)
+{
+    InterfaceColor fillColor;
+    Unsigned32 elementIndex;
+
+    if (interfaceSurfaceBegin(&mainMenuSurface, mainMenuWindowWidth, mainMenuWindowHeight) ==
+        BOOLEAN_FALSE)
+    {
+        return;
+    }
+
+    for (elementIndex = 0U; elementIndex < mainMenuLayout.elementCount; elementIndex++)
+    {
+        const UIElement *element = &mainMenuLayout.elements[elementIndex];
+        Integer32 left;
+        Integer32 top;
+        Integer32 right;
+        Integer32 bottom;
+
+        if (uiLayoutIsVisible(&mainMenuLayout, elementIndex) == BOOLEAN_FALSE)
+        {
+            continue;
+        }
+
+        uiLayoutGetAbsoluteArea(&mainMenuLayout, elementIndex, &left, &top, &right, &bottom);
+
+        if (element->hasFillColor && !element->noFill &&
+            stringEquals(element->className, "GZWinFlatRect"))
+        {
+            fillColor.red = element->fillRed;
+            fillColor.green = element->fillGreen;
+            fillColor.blue = element->fillBlue;
+            fillColor.alpha = 255U;
+            interfaceSurfaceFill(&mainMenuSurface, left, top, (Unsigned32)(right - left),
+                                 (Unsigned32)(bottom - top), fillColor);
+        }
+
+        if (element->hasImage && mainMenuImages[elementIndex].frameCount > 0U)
+        {
+            Unsigned32 frame = mainMenuPickFrame(elementIndex);
+
+            interfaceSurfaceImage(&mainMenuSurface, left, top, (Unsigned32)(right - left),
+                                  (Unsigned32)(bottom - top),
+                                  mainMenuImages[elementIndex].framePixels[frame],
+                                  mainMenuImages[elementIndex].frameWidth,
+                                  mainMenuImages[elementIndex].frameHeight);
+        }
+    }
+
+    interfaceSurfaceEnd(&mainMenuSurface);
+    renderSetOverlay(mainMenuSurface.pixels, mainMenuSurface.width, mainMenuSurface.height);
+}
+
+static Boolean mainMenuPointIsInsideElement(Integer32 x, Integer32 y, Unsigned32 elementIndex)
+{
+    Integer32 left;
+    Integer32 top;
+    Integer32 right;
+    Integer32 bottom;
+
+    uiLayoutGetAbsoluteArea(&mainMenuLayout, elementIndex, &left, &top, &right, &bottom);
+    return (x >= left && x < right && y >= top && y < bottom);
+}
+
+static Integer32 mainMenuHitTest(Integer32 x, Integer32 y)
+{
+    Integer32 hit = -1;
+    Unsigned32 elementIndex;
+
+    for (elementIndex = 0U; elementIndex < mainMenuLayout.elementCount; elementIndex++)
+    {
+        if (uiLayoutIsVisible(&mainMenuLayout, elementIndex) == BOOLEAN_FALSE)
+        {
+            continue;
+        }
+        if (mainMenuPointIsInsideElement(x, y, elementIndex))
+        {
+            hit = (Integer32)elementIndex;
+        }
+    }
+    return hit;
+}
+
+static void mainMenuUpdate(Real32 elapsedSeconds)
+{
+    Unsigned32 elementIndex;
+
+    for (elementIndex = 0U; elementIndex < mainMenuLayout.elementCount; elementIndex++)
+    {
+        MainMenuImage *image = &mainMenuImages[elementIndex];
+
+        if (image->isAnimated == BOOLEAN_TRUE && image->frameCount > 1U)
+        {
+            image->frameAccumulator += elapsedSeconds;
+            while (image->frameAccumulator >= MAIN_MENU_SECONDS_PER_FRAME)
+            {
+                image->frameAccumulator -= MAIN_MENU_SECONDS_PER_FRAME;
+                image->currentFrame++;
+                if (image->currentFrame >= image->frameCount)
+                {
+                    image->currentFrame = 0U;
+                }
+            }
+        }
+    }
+
+    if (mainMenuPointerIsInside == BOOLEAN_TRUE)
+    {
+        mainMenuHoveredElementIndex = mainMenuHitTest(mainMenuPointerX, mainMenuPointerY);
+    }
+    else
+    {
+        mainMenuHoveredElementIndex = -1;
+    }
+}
+
+static void mainMenuStep(void)
+{
+    switch (mainMenuPhase)
+    {
+    case MAIN_MENU_PHASE_DISC_LOAD:
+        {
+            EngineDiscLoadStatus status = engineStepGameLoad();
+
+            if (status == ENGINE_DISC_READY)
+            {
+                mainMenuPhase = MAIN_MENU_PHASE_BUILD_INDEX;
+            }
+            else if (status == ENGINE_DISC_FAILED)
+            {
+                platformLogMessage("main menu: disc load failed");
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+            }
+            else if (discCatalogueIsBuilt == BOOLEAN_TRUE &&
+                     discPhase != DISC_PHASE_PROBE && discPhase != DISC_PHASE_INSTALLER)
+            {
+                mainMenuPhase = MAIN_MENU_PHASE_BUILD_INDEX;
+            }
+        }
+        break;
+
+    case MAIN_MENU_PHASE_BUILD_INDEX:
+        {
+            static const Unsigned32 wantedTypes[] = {
+                UI_LAYOUT_TYPE_IDENTIFIER,
+                0x856DDBACUL,
+                0x2C1FD321UL,
+                0x3C53632CUL
+            };
+            static const Unsigned32 wantedTypeCount =
+                (Unsigned32)(sizeof(wantedTypes) / sizeof(wantedTypes[0]));
+
+            if (mainMenuIndex.fileSystem == NULL_POINTER)
+            {
+                if (!resourceIndexBegin(&mainMenuIndex, discFileSystem, globalArena, 65536U,
+                                        wantedTypes, wantedTypeCount))
+                {
+                    platformLogMessage("main menu: could not begin resource index");
+                    mainMenuPhase = MAIN_MENU_PHASE_READY;
+                    break;
+                }
+            }
+
+            {
+                ResourceIndexStatus status = resourceIndexStep(&mainMenuIndex);
+
+                if (status == RESOURCE_INDEX_COMPLETE)
+                {
+                    char report[256];
+
+                    Unsigned32 rank;
+
+                    report[0] = '\0';
+                    stringAppend(report, sizeof(report), "main menu: indexed ");
+                    appendCount(report, sizeof(report), mainMenuIndex.count);
+                    stringAppend(report, sizeof(report), " resource(s) across ");
+                    appendCount(report, sizeof(report), mainMenuIndex.filesIndexed);
+                    stringAppend(report, sizeof(report), " package(s)");
+                    platformLogMessage(report);
+                    for (rank = 0U; rank < mainMenuIndex.censusCount && rank < 8U; rank++)
+                    {
+                        Unsigned32 typeIdentifier;
+                        Unsigned32 howMany;
+
+                        if (resourceIndexGetCensusRank(&mainMenuIndex, rank, &typeIdentifier, &howMany))
+                        {
+                            report[0] = '\0';
+                            stringAppend(report, sizeof(report), "main menu:   type ");
+                            appendHexadecimal(report, sizeof(report), typeIdentifier);
+                            stringAppend(report, sizeof(report), " x");
+                            appendCount(report, sizeof(report), howMany);
+                            platformLogMessage(report);
+                        }
+                    }
+                    mainMenuPhase = MAIN_MENU_PHASE_LOAD_LAYOUT;
+                }
+                else if (status == RESOURCE_INDEX_OUT_OF_ROOM)
+                {
+                    platformLogMessage("main menu: resource index out of room");
+                    mainMenuPhase = MAIN_MENU_PHASE_READY;
+                }
+            }
+        }
+        break;
+
+    case MAIN_MENU_PHASE_LOAD_LAYOUT:
+        {
+            const ResourceIndexEntry *entry;
+
+            entry = resourceIndexFindInGroup(&mainMenuIndex, UI_LAYOUT_TYPE_IDENTIFIER,
+                                             UI_LAYOUT_GROUP_IDENTIFIER, 0x49001017U, 0U);
+            if (entry == NULL_POINTER)
+            {
+                entry = resourceIndexFindInGroup(&mainMenuIndex, UI_LAYOUT_TYPE_IDENTIFIER,
+                                                 UI_LAYOUT_GROUP_IDENTIFIER, 0U, 0U);
+            }
+            if (entry == NULL_POINTER)
+            {
+                entry = resourceIndexFind(&mainMenuIndex, UI_LAYOUT_TYPE_IDENTIFIER, 0U, 0U);
+            }
+            if (entry == NULL_POINTER)
+            {
+                platformLogMessage("main menu: no UI layout found, continuing with full disc load");
+                mainMenuPhase = MAIN_MENU_PHASE_RESUME_DISC_LOAD;
+                break;
+            }
+            mainMenuLayoutEntry = entry;
+            mainMenuPhase = MAIN_MENU_PHASE_READ_LAYOUT;
+        }
+
+    case MAIN_MENU_PHASE_READ_LAYOUT:
+        {
+            Unsigned8 *bytes = NULL_POINTER;
+            MemorySize size = 0UL;
+            MemorySize marker;
+            UILayoutReadResult layoutResult;
+
+            if (mainMenuLayoutEntry == NULL_POINTER)
+            {
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+                break;
+            }
+
+            marker = memoryArenaGetMarker(globalArena);
+            if (!readIndexedResource(mainMenuLayoutEntry, &bytes, &size))
+            {
+                break;
+            }
+
+            if (bytes == NULL_POINTER)
+            {
+                memoryArenaRewindToMarker(globalArena, marker);
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+                break;
+            }
+
+            layoutResult = uiLayoutRead(&mainMenuLayout, bytes, size);
+            if (layoutResult != UI_LAYOUT_READ_OK)
+            {
+                char message[128];
+
+                message[0] = '\0';
+                stringAppend(message, sizeof(message), "main menu: could not read UI layout: ");
+                stringAppend(message, sizeof(message), uiLayoutReadResultGetName(layoutResult));
+                platformLogMessage(message);
+                memoryArenaRewindToMarker(globalArena, marker);
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+                break;
+            }
+
+            memoryArenaRewindToMarker(globalArena, marker);
+            mainMenuImageCursor = 0U;
+            mainMenuPhase = MAIN_MENU_PHASE_LOAD_IMAGES;
+        }
+        break;
+
+    case MAIN_MENU_PHASE_LOAD_IMAGES:
+        if (mainMenuImageCursor >= mainMenuLayout.elementCount)
+        {
+            mainMenuScreenDrawn = BOOLEAN_TRUE;
+            mainMenuPhase = MAIN_MENU_PHASE_READY;
+            break;
+        }
+        (void)mainMenuStepImages();
+        break;
+
+    case MAIN_MENU_PHASE_RESUME_DISC_LOAD:
+        {
+            EngineDiscLoadStatus status = engineStepGameLoad();
+
+            if (status == ENGINE_DISC_READY)
+            {
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+            }
+            else if (status == ENGINE_DISC_FAILED)
+            {
+                platformLogMessage("main menu: full disc load failed");
+                mainMenuPhase = MAIN_MENU_PHASE_READY;
+            }
+        }
+        break;
+
+    case MAIN_MENU_PHASE_READY:
+    default:
+        break;
+    }
+}
+
+Boolean engineInitializeGame(VirtualFileSystem *fileSystem, Unsigned32 widthInPixels,
+                             Unsigned32 heightInPixels, MemorySize graphicsMemoryLimitBytes)
+{
+    Unsigned8 *menuPixels;
+
+    if (engineIsRunning == BOOLEAN_TRUE)
+    {
+        return BOOLEAN_TRUE;
+    }
+
+    globalArena = memoryBudgetGetGlobalArena();
+
+    if (profilerInitialize(globalArena) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("engine: profiler unavailable, continuing without it");
+    }
+
+    profilerReportText = (char *)memoryArenaAllocate(globalArena, VICTORIA_PROFILER_REPORT_CAPACITY,
+                                                       16UL);
+    if (profilerReportText != NULL_POINTER)
+    {
+        profilerReportText[0] = '\0';
+    }
+
+    establishGraphicsMemoryLimit(graphicsMemoryLimitBytes);
+
+    profilerBeginFrame();
+    if (renderInitialize(globalArena, widthInPixels, heightInPixels) == BOOLEAN_FALSE)
+    {
+        profilerEndFrame();
+        platformLogMessage("engine: renderer failed to initialize");
+        return BOOLEAN_FALSE;
+    }
+    profilerEndFrame();
+
+    engineTextSetWindowSize(widthInPixels, heightInPixels);
+    mainMenuWindowWidth = widthInPixels;
+    mainMenuWindowHeight = heightInPixels;
+
+    if (engineTextInitialize(globalArena) == BOOLEAN_FALSE)
+    {
+        platformLogMessage("engine: nothing will be drawn in words this run");
+    }
+
+    menuPixels = (Unsigned8 *)memoryArenaAllocate(
+        globalArena,
+        (MemorySize)MAIN_MENU_SURFACE_WIDTH * (MemorySize)MAIN_MENU_SURFACE_HEIGHT *
+            (MemorySize)INTERFACE_BYTES_PER_PIXEL,
+        16UL);
+    interfaceSurfaceBind(&mainMenuSurface, menuPixels, MAIN_MENU_SURFACE_WIDTH,
+                         MAIN_MENU_SURFACE_HEIGHT);
+
+    if (!resourceCacheBegin(&resourceCache, globalArena, 64U, 64UL * 1024UL))
+    {
+        platformLogMessage("engine: no room for a resource cache, so every read goes to the "
+                           "disc — slower, and correct");
+    }
+
+    debugMenuInitialize(&debugMenu);
+    debugMenuSetOpen(&debugMenu, BOOLEAN_FALSE);
+    (void)debugMenuSetPage(&debugMenu, DEBUG_MENU_PAGE_BODY);
+    {
+        Unsigned8 *block = (Unsigned8 *)memoryArenaAllocate(globalArena, ANIMATION_ARENA_BYTES, 16UL);
+
+        if (block != NULL_POINTER)
+        {
+            memoryArenaInitialize(&animationArena, block, ANIMATION_ARENA_BYTES);
+            animationArenaReady = BOOLEAN_TRUE;
+        }
+        else
+        {
+            platformLogMessage("engine: no room for an animation of its own, so changing one "
+                               "will grow the arena instead of replacing what is there");
+        }
+    }
+    debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_BODY, menuBodyRows, MENU_BODY_CAPACITY);
+    {
+        char (*rows)[DEBUG_MENU_NAME_LIMIT] = (char (*)[DEBUG_MENU_NAME_LIMIT])
+            memoryArenaAllocate(globalArena,
+                                (MemorySize)MENU_ANIMATION_CAPACITY *
+                                    (MemorySize)DEBUG_MENU_NAME_LIMIT, 1UL);
+
+        if (rows != NULL_POINTER)
+        {
+            debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_ANIMATION, rows, MENU_ANIMATION_CAPACITY);
+        }
+    }
+    {
+        char (*rows)[DEBUG_MENU_NAME_LIMIT] = (char (*)[DEBUG_MENU_NAME_LIMIT])
+            memoryArenaAllocate(globalArena,
+                                (MemorySize)MENU_CLOTHING_CAPACITY *
+                                    (MemorySize)DEBUG_MENU_NAME_LIMIT, 1UL);
+
+        if (rows != NULL_POINTER)
+        {
+            debugMenuBindPage(&debugMenu, DEBUG_MENU_PAGE_CLOTHING, rows, MENU_CLOTHING_CAPACITY);
+        }
+    }
+    composeTheArchetype();
+    {
+        char message[256];
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "engine: building a ");
+        stringAppend(message, sizeof(message), simArchetype);
+        stringAppend(message, sizeof(message), " Sim — ");
+        stringAppend(message, sizeof(message), simPartNames[0]);
+        stringAppend(message, sizeof(message), " and ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_BODY]);
+        stringAppend(message, sizeof(message), ", ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_FACE]);
+        stringAppend(message, sizeof(message), ", ");
+        stringAppend(message, sizeof(message), simDrawnPartNames[SIM_PART_HAIR]);
+        platformLogMessage(message);
+    }
+    simWardrobeWanted[0] = '\0';
+    poseIsHeldStill = BOOLEAN_FALSE;
+    poseHeldTick = 0.0f;
+
+    if (fileSystem != NULL_POINTER)
+    {
+        Unsigned32 remaining = 1000000U;
+
+        engineBeginGameLoad(fileSystem);
+        while (engineStepGameLoad() == ENGINE_DISC_WORKING && remaining > 0U &&
+               (discCatalogueIsBuilt == BOOLEAN_FALSE || discPhase == DISC_PHASE_PROBE ||
+                discPhase == DISC_PHASE_INSTALLER))
+        {
+            remaining--;
+        }
+
+        while (mainMenuPhase != MAIN_MENU_PHASE_READY &&
+               mainMenuPhase != MAIN_MENU_PHASE_RESUME_DISC_LOAD && remaining > 0U)
+        {
+            mainMenuStep();
+            remaining--;
+        }
+    }
+
+    gameModeIsReal = BOOLEAN_TRUE;
+    engineIsRunning = BOOLEAN_TRUE;
+    platformLogMessage("engine: initialized");
+    logMemoryBudget();
+    return BOOLEAN_TRUE;
+}
+
+void engineBeginGameLoad(VirtualFileSystem *fileSystem)
+{
+    engineBeginDiscLoad(fileSystem);
+}
+
+EngineDiscLoadStatus engineStepGameLoad(void)
+{
+    return engineStepDiscLoad();
+}
+
+Boolean engineHandleGamePointer(EnginePointerAction action, Integer32 x, Integer32 y)
+{
+    if (engineIsRunning == BOOLEAN_FALSE || gameModeIsReal == BOOLEAN_FALSE)
+    {
+        return BOOLEAN_FALSE;
+    }
+
+    if (action == ENGINE_POINTER_LEFT)
+    {
+        mainMenuPointerIsInside = BOOLEAN_FALSE;
+        mainMenuPressedElementIndex = -1;
+        return BOOLEAN_TRUE;
+    }
+
+    mainMenuPointerIsInside = BOOLEAN_TRUE;
+    mainMenuPointerX = x;
+    mainMenuPointerY = y;
+
+    if (action == ENGINE_POINTER_MOVED)
+    {
+        return BOOLEAN_TRUE;
+    }
+
+    if (action == ENGINE_POINTER_PRESSED)
+    {
+        Integer32 hit = mainMenuHitTest(x, y);
+
+        mainMenuPressedElementIndex = hit;
+        return (hit >= 0) ? BOOLEAN_TRUE : BOOLEAN_FALSE;
+    }
+
+    if (action == ENGINE_POINTER_RELEASED)
+    {
+        Boolean wasPressed = (Boolean)(mainMenuPressedElementIndex >= 0);
+
+        mainMenuPressedElementIndex = -1;
+        return wasPressed;
+    }
+
+    return BOOLEAN_FALSE;
+}
+
 void engineRenderFrame(Real32 elapsedSeconds)
 {
     if (engineIsRunning == BOOLEAN_FALSE)
@@ -6234,9 +7063,21 @@ void engineRenderFrame(Real32 elapsedSeconds)
     }
 
     VICTORIA_PROFILE_ZONE_BEGIN("engineRenderFrame");
-    engineStepThumbnail();
-    advanceThePose(elapsedSeconds);
-    engineTextDraw(&debugMenu, engineGetMenuText());
+    if (gameModeIsReal == BOOLEAN_TRUE)
+    {
+        mainMenuStep();
+        if (mainMenuScreenDrawn == BOOLEAN_TRUE)
+        {
+            mainMenuUpdate(elapsedSeconds);
+            mainMenuDraw();
+        }
+    }
+    else
+    {
+        engineStepThumbnail();
+        advanceThePose(elapsedSeconds);
+        engineTextDraw(&debugMenu, engineGetMenuText());
+    }
     renderDrawFrame(elapsedSeconds);
     VICTORIA_PROFILE_ZONE_END();
 }

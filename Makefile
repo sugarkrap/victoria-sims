@@ -38,6 +38,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/interfaceSurface.c \
                   engine/source/interfaceMenu.c \
                   engine/source/engineText.c \
+                  engine/source/uiLayoutReader.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
@@ -47,6 +48,8 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/programReader.c \
                   engine/source/archiveReader.c \
                   engine/source/jpegReader.c \
+                  engine/source/tgaReader.c \
+                  engine/source/pngReader.c \
                   engine/source/engineCore.c \
                   utils/strings.c utils/checksum.c
 
@@ -66,18 +69,30 @@ endif
 
 LINUX_SOURCES := $(ENGINE_SOURCES) \
                  $(LINUX_RENDER_SOURCES) \
-                 platform/linux/linuxDiscStore.c platform/linux/linuxEntryPoint.c
+                 platform/linux/linuxDiscStore.c platform/linux/linuxGameEntryPoint.c
+
+DEBUG_LINUX_SOURCES := $(ENGINE_SOURCES) \
+                       $(LINUX_RENDER_SOURCES) \
+                       platform/linux/linuxDiscStore.c platform/linux/linuxEntryPoint.c
 
 WEB_SOURCES := $(ENGINE_SOURCES) \
                render/webGPU/renderWebGPU.c render/meshCamera.c \
-               platform/web/webDiscStore.c platform/web/webEntryPoint.c
+               platform/web/webDiscStore.c platform/web/webGameEntryPoint.c
+
+DEBUG_WEB_SOURCES := $(ENGINE_SOURCES) \
+                     render/webGPU/renderWebGPU.c render/meshCamera.c \
+                     platform/web/webDiscStore.c platform/web/webEntryPoint.c
 
 LINUX_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/linux
+DEBUG_LINUX_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/linux/debug
 WEB_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/web
+DEBUG_WEB_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/web/debug
 ARM_OUTPUT_DIRECTORY := $(BUILD_DIRECTORY)/armv5
 
 LINUX_EXECUTABLE := $(LINUX_OUTPUT_DIRECTORY)/victoriaSims
+DEBUG_LINUX_EXECUTABLE := $(DEBUG_LINUX_OUTPUT_DIRECTORY)/victoriaSims
 WEB_MODULE := $(WEB_OUTPUT_DIRECTORY)/victoriaSims.wasm
+DEBUG_WEB_MODULE := $(DEBUG_WEB_OUTPUT_DIRECTORY)/victoriaSims.wasm
 ARM_LIBRARY := $(ARM_OUTPUT_DIRECTORY)/libVictoriaEngine.a
 
 WEB_LINEAR_MEMORY_BYTES ?= 136314880
@@ -89,19 +104,26 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetBudgetTotalBytes \
                -Wl,--export=victoriaWebGetBudgetUsedBytes \
                -Wl,--export=victoriaWebGetProfilerReportPointer \
-               -Wl,--export=victoriaWebGetProfilerReportLength -Wl,--export=victoriaWebGetMenuTextPointer -Wl,--export=victoriaWebGetMenuTextLength -Wl,--export=victoriaWebHandleMenuKey -Wl,--export=victoriaWebHandlePointer \
+               -Wl,--export=victoriaWebGetProfilerReportLength \
                -Wl,--export=victoriaWebGetFrameMicroseconds \
                -Wl,--export=victoriaWebGetAverageFrameMicroseconds \
                -Wl,--export=victoriaWebGetWorstFrameMicroseconds \
                -Wl,--export=victoriaWebGetFrameIntervalMicroseconds \
                -Wl,--export=victoriaWebGetGraphicsMemoryLimitBytes \
+               -Wl,--export=victoriaWebGetGraphicsMemoryUsedBytes \
                -Wl,--export=victoriaWebOpenDisc \
                -Wl,--export=victoriaWebStepDiscLoad \
                -Wl,--export=victoriaWebGetWantedOffset \
                -Wl,--export=victoriaWebGetWantedLength \
                -Wl,--export=victoriaWebGetDeliveryPointer \
                -Wl,--export=victoriaWebDeliver \
-               -Wl,--export=victoriaWebGetGraphicsMemoryUsedBytes
+               -Wl,--export=victoriaWebHandleGamePointer
+
+DEBUG_WEB_EXPORTS := $(WEB_EXPORTS) \
+               -Wl,--export=victoriaWebGetMenuTextPointer \
+               -Wl,--export=victoriaWebGetMenuTextLength \
+               -Wl,--export=victoriaWebHandleMenuKey \
+               -Wl,--export=victoriaWebHandlePointer
 
 WEB_FLAGS := --target=wasm32 -ffreestanding -nostdlib -fno-builtin \
              -DVICTORIA_FREESTANDING_BUILTINS=1
@@ -109,6 +131,10 @@ WEB_LINK_FLAGS := -Wl,--no-entry -Wl,--allow-undefined \
                   -Wl,--initial-memory=$(WEB_LINEAR_MEMORY_BYTES) \
                   -Wl,--max-memory=$(WEB_LINEAR_MEMORY_BYTES) \
                   $(WEB_EXPORTS)
+DEBUG_WEB_LINK_FLAGS := -Wl,--no-entry -Wl,--allow-undefined \
+                  -Wl,--initial-memory=$(WEB_LINEAR_MEMORY_BYTES) \
+                  -Wl,--max-memory=$(WEB_LINEAR_MEMORY_BYTES) \
+                  $(DEBUG_WEB_EXPORTS)
 
 ARM_LIBRARY_SOURCES := $(ENGINE_SOURCES) \
                        render/software/renderSoftware.c \
@@ -145,7 +171,7 @@ done
 $(ARCHIVER) rcs $(4) $(2)/*.o
 endef
 
-.PHONY: all linux web armv5 armv7 oabi verify verifyWeb check clean
+.PHONY: all linux debug_linux web debug_web armv5 armv7 oabi verify verifyWeb check clean
 
 all: linux
 
@@ -155,12 +181,25 @@ $(LINUX_EXECUTABLE): $(LINUX_SOURCES)
 	@mkdir -p $(LINUX_OUTPUT_DIRECTORY)
 	$(HOST_COMPILER) $(COMMON_FLAGS) $(LINUX_SOURCES) $(LINUX_LIBRARIES) -o $@
 
+debug_linux: $(DEBUG_LINUX_EXECUTABLE)
+
+$(DEBUG_LINUX_EXECUTABLE): $(DEBUG_LINUX_SOURCES)
+	@mkdir -p $(DEBUG_LINUX_OUTPUT_DIRECTORY)
+	$(HOST_COMPILER) $(COMMON_FLAGS) $(DEBUG_LINUX_SOURCES) $(LINUX_LIBRARIES) -o $@
+
 web: $(WEB_MODULE)
 
 $(WEB_MODULE): $(WEB_SOURCES) platform/web/index.html platform/web/victoriaRuntime.js
 	@mkdir -p $(WEB_OUTPUT_DIRECTORY)
 	$(WEB_COMPILER) $(COMMON_FLAGS) $(WEB_FLAGS) $(WEB_LINK_FLAGS) $(WEB_SOURCES) -o $@
 	cp platform/web/index.html platform/web/victoriaRuntime.js $(WEB_OUTPUT_DIRECTORY)/
+
+debug_web: $(DEBUG_WEB_MODULE)
+
+$(DEBUG_WEB_MODULE): $(DEBUG_WEB_SOURCES) platform/web/index.html platform/web/victoriaRuntime.js
+	@mkdir -p $(DEBUG_WEB_OUTPUT_DIRECTORY)
+	$(WEB_COMPILER) $(COMMON_FLAGS) $(WEB_FLAGS) $(DEBUG_WEB_LINK_FLAGS) $(DEBUG_WEB_SOURCES) -o $@
+	cp platform/web/index.html platform/web/victoriaRuntime.js $(DEBUG_WEB_OUTPUT_DIRECTORY)/
 
 armv5: $(ARM_LIBRARY)
 
@@ -213,6 +252,10 @@ FONT_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontReader
 GLYPH_RASTER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyGlyphRaster
 FONT_ATLAS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyFontAtlas
 INTERFACE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInterface
+UI_LAYOUT_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyUiLayoutReader
+JPEG_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyJpegReader
+PNG_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyPngReader
+TGA_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTgaReader
 
 verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIER) $(DISC_READER_VERIFIER) \
 		$(GEOMETRY_READER_VERIFIER) $(MESH_CAMERA_VERIFIER) \
@@ -222,7 +265,8 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
 		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
 		$(RESOURCE_CACHE_VERIFIER) $(FONT_READER_VERIFIER) $(GLYPH_RASTER_VERIFIER) \
-		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER)
+		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER) $(UI_LAYOUT_READER_VERIFIER) \
+		$(JPEG_READER_VERIFIER) $(PNG_READER_VERIFIER) $(TGA_READER_VERIFIER)
 	@$(FREESTANDING_VERIFIER)
 	@$(RASTERIZER_VERIFIER)
 	@$(PACKAGE_READER_VERIFIER)
@@ -248,8 +292,12 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(GLYPH_RASTER_VERIFIER)
 	@$(FONT_ATLAS_VERIFIER)
 	@$(INTERFACE_VERIFIER)
+	@$(UI_LAYOUT_READER_VERIFIER)
+	@$(JPEG_READER_VERIFIER)
+	@$(PNG_READER_VERIFIER)
+	@$(TGA_READER_VERIFIER)
 
-verifyWeb: $(WEB_MODULE)
+verifyWeb: $(WEB_MODULE) $(DEBUG_WEB_MODULE)
 	@node tests/verifyRuntimeUpload.mjs
 	@node tests/verifyWebModule.mjs
 
@@ -416,6 +464,28 @@ $(FONT_ATLAS_VERIFIER): tests/verifyFontAtlas.c $(FONT_SOURCES) utils/strings.c 
 $(INTERFACE_VERIFIER): tests/verifyInterface.c $(INTERFACE_SOURCES) $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyInterface.c $(INTERFACE_SOURCES) \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(UI_LAYOUT_READER_VERIFIER): tests/verifyUiLayoutReader.c engine/source/uiLayoutReader.c \
+		utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyUiLayoutReader.c engine/source/uiLayoutReader.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(JPEG_READER_VERIFIER): tests/verifyJpegReader.c engine/source/jpegReader.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyJpegReader.c engine/source/jpegReader.c \
+		$(VERIFIER_SUPPORT) -o $@
+
+$(PNG_READER_VERIFIER): tests/verifyPngReader.c engine/source/pngReader.c \
+		engine/source/freestandingRuntime.c utils/checksum.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyPngReader.c engine/source/pngReader.c \
+		engine/source/freestandingRuntime.c utils/checksum.c $(VERIFIER_SUPPORT) -o $@
+
+$(TGA_READER_VERIFIER): tests/verifyTgaReader.c engine/source/tgaReader.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyTgaReader.c engine/source/tgaReader.c \
 		$(VERIFIER_SUPPORT) -o $@
 
 testAssets/fonts/fixture.mxf: scripts/makeFontFixture.ts scripts/src/truetype/*.ts

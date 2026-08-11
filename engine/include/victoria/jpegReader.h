@@ -10,10 +10,13 @@ typedef enum JpegReadResult
     JPEG_READ_UNSUPPORTED
 } JpegReadResult;
 
-#define JPEG_SCRATCH_BYTES 4096U
+#define JPEG_MAX_DIMENSION 2048U
 
 JpegReadResult jpegReadToRgba(const Unsigned8 *jpegData, MemorySize jpegSize,
                               Unsigned8 *outRgba, MemorySize outRgbaCapacity,
                               Unsigned32 *outWidth, Unsigned32 *outHeight);
+
+JpegReadResult jpegPeekDimensions(const Unsigned8 *jpegData, MemorySize jpegSize,
+                                  Unsigned32 *outWidth, Unsigned32 *outHeight);
 
 #endif
