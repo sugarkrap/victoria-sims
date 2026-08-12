@@ -706,8 +706,10 @@ function connectPointer() {
     }
     const send = (action, event) => {
         const exports = runtimeState.instance && runtimeState.instance.exports;
+        const handlePointer = exports &&
+            (exports.victoriaWebHandlePointer || exports.victoriaWebHandleGamePointer);
 
-        if (runtimeState.paused || !exports || !exports.victoriaWebHandlePointer) {
+        if (runtimeState.paused || !handlePointer) {
             return;
         }
         let x = 0;
@@ -719,7 +721,7 @@ function connectPointer() {
             x = Math.round((event.clientX - box.left) * (canvas.width / box.width));
             y = Math.round((event.clientY - box.top) * (canvas.height / box.height));
         }
-        exports.victoriaWebHandlePointer(action, x, y);
+        handlePointer(action, x, y);
     };
 
     canvas.addEventListener("mousemove", (event) => send(0, event));
@@ -727,6 +729,11 @@ function connectPointer() {
         if (event.button === 0) {
             send(1, event);
             event.preventDefault();
+        }
+    });
+    window.addEventListener("mouseup", (event) => {
+        if (event.button === 0) {
+            send(3, event);
         }
     });
     canvas.addEventListener("mouseleave", () => send(2, null));
