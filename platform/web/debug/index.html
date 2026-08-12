@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Victoria Sims</title>
+<title>Victoria Sims — debug</title>
 <style>
     html, body {
         margin: 0;
@@ -85,18 +85,46 @@
         margin: 0;
         font-size: 0.95rem;
     }
+    #profilerPanel {
+        position: absolute;
+        top: 0.75rem;
+        right: 0.75rem;
+        padding: 0.6rem 0.75rem;
+        background: rgba(9, 11, 15, 0.82);
+        border: 1px solid #262a35;
+        border-radius: 4px;
+        pointer-events: none;
+    }
+    #profilerReport {
+        margin: 0;
+        font-size: 0.7rem;
+        line-height: 1.45;
+        color: #b9c0d0;
+        white-space: pre;
+        overflow-x: auto;
+    }
+    #profilerSparkline {
+        display: block;
+        width: 100%;
+        height: 34px;
+        margin-top: 0.5rem;
+    }
 </style>
 </head>
 <body>
 <header>
     <div>
-        <h1>Victoria Sims</h1>
+        <h1>Victoria Sims — debug build</h1>
         <p id="statusLine">Starting WebGPU&hellip;</p>
     </div>
-    <a href="debug/">debug build &rarr;</a>
+    <a href="../">&larr; back to the game</a>
 </header>
 <div id="stage">
     <canvas id="victoriaCanvas"></canvas>
+    <div id="profilerPanel">
+        <pre id="profilerReport">profiler: waiting for first frame</pre>
+        <canvas id="profilerSparkline"></canvas>
+    </div>
     <div id="aspectLabel">aspect ratio: —</div>
     <div id="resizePrompt">
         <p>Window resized. Click to fit the closest aspect ratio.</p>
@@ -104,12 +132,12 @@
 </div>
 <script src="victoriaRuntime.js"></script>
 <div id="discZone">
-    <p>Drop a Sims&nbsp;2 disc image here to play.</p>
+    <p>Drop a Sims&nbsp;2 disc image here to draw something off it.</p>
     <label class="fileButton">
         Choose an ISO
         <input type="file" id="discInput" accept=".iso,application/x-iso9660-image">
     </label>
-    <p id="discStatus">No disc loaded yet.</p>
+    <p id="discStatus">No disc. Showing the placeholder.</p>
 </div>
 <style>
     #discZone {
