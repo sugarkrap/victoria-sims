@@ -57,6 +57,8 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem);
 EngineDiscLoadStatus engineStepDiscLoad(void);
 EngineDiscLoadStatus engineStepGameLoad(void);
 
+EngineDiscLoadStatus engineStepSurvey(void);
+
 void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
 
 const char *engineGetMenuText(void);
