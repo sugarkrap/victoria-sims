@@ -29,7 +29,8 @@ import { CheckReport, commandExists, run, runMain } from "./lib/checkReport.ts";
 // Every module between a font on the disc and pixels on the screen. Not the
 // renderers: renderSoftware projects a camera and shades a triangle, which
 // is floating point on purpose and is charged for elsewhere.
-const MODULES = ["fontReader", "glyphRaster", "fontAtlas", "builtinFont", "interfaceSurface", "interfaceMenu"];
+const MODULES = ["fontReader", "glyphRaster", "fontAtlas", "builtinFont", "interfaceSurface", "interfaceMenu",
+    "simanticsTree", "simanticsMachine", "simanticsNames", "simanticsRehearsal"];
 
 // The names the ARM EABI gives its soft-float helpers, plus the older libgcc
 // spellings. A call to any of them from a module above is the bug.

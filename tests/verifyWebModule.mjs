@@ -411,6 +411,25 @@ calls.length = 0;
             instance.exports.victoriaWebRenderFrame(1 / 60);
         }
     }
+    let rehearsalStatus = 0;
+    let rehearsalSteps = 0;
+    for (rehearsalSteps = 0; rehearsalSteps < 200000; rehearsalSteps += 1) {
+        rehearsalStatus = instance.exports.victoriaWebStepRehearsal();
+        if (rehearsalStatus !== 1) {
+            break;
+        }
+        const length = instance.exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = instance.exports.victoriaWebGetWantedOffset();
+            const pointer = instance.exports.victoriaWebGetDeliveryPointer();
+            new Uint8Array(instance.exports.memory.buffer, pointer, length)
+                .set(image.subarray(offset, offset + length));
+            instance.exports.victoriaWebDeliver();
+        }
+    }
+    check(`the rehearsal finishes (${rehearsalSteps} steps)`, rehearsalStatus === 2);
+    check("and logs its report", loggedMessages.includes("rehearsal: done"));
+
     const surveySaid = (fragment) => loggedMessages.some((text) => text.includes(fragment));
     check(`the survey finishes (${surveySteps} steps)`, surveyStatus === 2);
     check("and logs its report", surveySaid("survey: done"));

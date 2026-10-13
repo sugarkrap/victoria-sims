@@ -41,6 +41,8 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/uiLayoutReader.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
                   engine/source/discSurvey.c \
+                  engine/source/simanticsTree.c engine/source/simanticsMachine.c \
+                  engine/source/simanticsNames.c engine/source/simanticsRehearsal.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -119,7 +121,8 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetDeliveryPointer \
                -Wl,--export=victoriaWebDeliver \
                -Wl,--export=victoriaWebHandleGamePointer \
-               -Wl,--export=victoriaWebStepSurvey
+               -Wl,--export=victoriaWebStepSurvey \
+               -Wl,--export=victoriaWebStepRehearsal
 
 DEBUG_WEB_EXPORTS := $(WEB_EXPORTS) \
                -Wl,--export=victoriaWebGetMenuTextPointer \
@@ -243,6 +246,8 @@ ANIMATION_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyAnimationReader
 TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
 RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
 DISC_SURVEY_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscSurvey
+SIMANTICS_VERIFIER := $(BUILD_DIRECTORY)/tests/verifySimantics
+SIMANTICS_REHEARSAL_VERIFIER := $(BUILD_DIRECTORY)/tests/verifySimanticsRehearsal
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
@@ -266,6 +271,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
 		$(RESOURCE_INDEX_VERIFIER) $(DISC_SURVEY_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
+		$(RESOURCE_INDEX_VERIFIER) $(SIMANTICS_VERIFIER) $(SIMANTICS_REHEARSAL_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
 		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
 		$(RESOURCE_CACHE_VERIFIER) $(FONT_READER_VERIFIER) $(GLYPH_RASTER_VERIFIER) \
 		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER) $(UI_LAYOUT_READER_VERIFIER) \
@@ -284,6 +290,8 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(TEXTURE_VERIFIER)
 	@$(RESOURCE_INDEX_VERIFIER)
 	@$(DISC_SURVEY_VERIFIER)
+	@$(SIMANTICS_VERIFIER)
+	@$(SIMANTICS_REHEARSAL_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
@@ -339,13 +347,28 @@ $(RESOURCE_INDEX_VERIFIER): tests/verifyResourceIndex.c engine/source/resourceIn
 		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
 		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT) -o $@
 
-$(DISC_SURVEY_VERIFIER): tests/verifyDiscSurvey.c engine/source/discSurvey.c \
+$(DISC_SURVEY_VERIFIER): tests/verifyDiscSurvey.c engine/source/discSurvey.c engine/source/simanticsNames.c \
 		engine/source/compression.c engine/source/virtualFileSystem.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
 	@mkdir -p $(BUILD_DIRECTORY)/tests
-	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscSurvey.c engine/source/discSurvey.c \
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscSurvey.c engine/source/discSurvey.c engine/source/simanticsNames.c \
 		engine/source/compression.c engine/source/virtualFileSystem.c \
 		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+$(SIMANTICS_VERIFIER): tests/verifySimantics.c engine/source/simanticsTree.c \
+		engine/source/simanticsMachine.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifySimantics.c engine/source/simanticsTree.c \
+		engine/source/simanticsMachine.c engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
+
+$(SIMANTICS_REHEARSAL_VERIFIER): tests/verifySimanticsRehearsal.c engine/source/simanticsRehearsal.c \
+		engine/source/simanticsMachine.c engine/source/simanticsTree.c engine/source/simanticsNames.c \
+		engine/source/compression.c engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifySimanticsRehearsal.c engine/source/simanticsRehearsal.c \
+		engine/source/simanticsMachine.c engine/source/simanticsTree.c engine/source/simanticsNames.c \
+		engine/source/compression.c engine/source/virtualFileSystem.c engine/source/memoryArena.c \
+		utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
 		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \

@@ -1,5 +1,6 @@
 #include "victoria/discContent.h"
 #include "victoria/discSurvey.h"
+#include "victoria/simanticsRehearsal.h"
 #include "victoria/discReader.h"
 #include "victoria/engineCore.h"
 #include "victoria/jpegReader.h"
@@ -681,11 +682,11 @@ static void reportDiscFailure(const char *what)
     discLoadStatus = ENGINE_DISC_FAILED;
 }
 
-static void forgetTheSurvey(void);
+static void forgetTheDiscPasses(void);
 
 void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
 {
-    forgetTheSurvey();
+    forgetTheDiscPasses();
     discFileSystem = fileSystem;
     discLoadStatus = ENGINE_DISC_IDLE;
     discCatalogueIsBuilt = BOOLEAN_FALSE;
@@ -7160,76 +7161,68 @@ MemoryArena *engineGetGlobalArena(void)
 }
 
 
-typedef enum SurveyState
+typedef enum DiscPassState
 {
-    SURVEY_STATE_IDLE = 0,
-    SURVEY_STATE_RUNNING,
-    SURVEY_STATE_DONE
-} SurveyState;
+    DISC_PASS_IDLE = 0,
+    DISC_PASS_RUNNING,
+    DISC_PASS_DONE
+} DiscPassState;
 
-static const MemorySize surveyScratchSizes[] = { 16UL * 1024UL * 1024UL, 8UL * 1024UL * 1024UL,
-                                                 4UL * 1024UL * 1024UL };
-
-static DiscSurvey discSurvey;
-static MemoryArena surveyScratch;
-static SurveyState surveyState = SURVEY_STATE_IDLE;
-static MemorySize surveyMarkerBefore = 0UL;
-static MemorySize surveyMarkerAfter = 0UL;
-static Boolean surveyHoldsScratch = BOOLEAN_FALSE;
-
-static void releaseSurveyScratch(void)
+typedef struct BorrowedMemory
 {
-    if (surveyHoldsScratch && globalArena != NULL_POINTER &&
-        memoryArenaGetMarker(globalArena) == surveyMarkerAfter)
-    {
-        memoryArenaRewindToMarker(globalArena, surveyMarkerBefore);
-    }
-    surveyHoldsScratch = BOOLEAN_FALSE;
-}
+    Unsigned8 *bytes;
+    MemorySize size;
+    MemorySize markerBefore;
+    MemorySize markerAfter;
+    Boolean held;
+} BorrowedMemory;
 
-static void forgetTheSurvey(void)
-{
-    releaseSurveyScratch();
-    surveyState = SURVEY_STATE_IDLE;
-}
+static const MemorySize discPassMemorySizes[] = { 16UL * 1024UL * 1024UL, 8UL * 1024UL * 1024UL,
+                                                  4UL * 1024UL * 1024UL };
 
-static Boolean beginTheSurvey(void)
+static Boolean borrowMemory(BorrowedMemory *borrowed, const char *who)
 {
     MemorySize attempt;
     char message[128];
 
-    for (attempt = 0UL; attempt < VICTORIA_ARRAY_LENGTH(surveyScratchSizes); attempt++)
+    for (attempt = 0UL; attempt < VICTORIA_ARRAY_LENGTH(discPassMemorySizes); attempt++)
     {
-        Unsigned8 *scratch;
-
-        surveyMarkerBefore = memoryArenaGetMarker(globalArena);
-        scratch = (Unsigned8 *)memoryArenaAllocate(globalArena, surveyScratchSizes[attempt], 8UL);
-        if (scratch == NULL_POINTER)
+        borrowed->markerBefore = memoryArenaGetMarker(globalArena);
+        borrowed->bytes = (Unsigned8 *)memoryArenaAllocate(globalArena, discPassMemorySizes[attempt], 8UL);
+        if (borrowed->bytes == NULL_POINTER)
         {
             continue;
         }
-        surveyMarkerAfter = memoryArenaGetMarker(globalArena);
-        surveyHoldsScratch = BOOLEAN_TRUE;
-        memoryArenaInitialize(&surveyScratch, scratch, surveyScratchSizes[attempt]);
-        discSurveyBegin(&discSurvey, discFileSystem, &surveyScratch);
+        borrowed->size = discPassMemorySizes[attempt];
+        borrowed->markerAfter = memoryArenaGetMarker(globalArena);
+        borrowed->held = BOOLEAN_TRUE;
 
         message[0] = '\0';
-        stringAppend(message, sizeof(message), "survey: surveying the disc with ");
-        appendByteSize(message, sizeof(message), (Unsigned64)surveyScratchSizes[attempt]);
-        stringAppend(message, sizeof(message), " of scratch");
+        stringAppend(message, sizeof(message), who);
+        stringAppend(message, sizeof(message), ": working in ");
+        appendByteSize(message, sizeof(message), (Unsigned64)borrowed->size);
+        stringAppend(message, sizeof(message), " of borrowed arena");
         platformLogMessage(message);
         return BOOLEAN_TRUE;
     }
-    platformLogMessage("survey: not enough arena left for the survey's scratch memory");
+    message[0] = '\0';
+    stringAppend(message, sizeof(message), who);
+    stringAppend(message, sizeof(message), ": not enough arena left to work in");
+    platformLogMessage(message);
     return BOOLEAN_FALSE;
 }
 
-EngineDiscLoadStatus engineStepSurvey(void)
+static void giveBackMemory(BorrowedMemory *borrowed)
 {
-    if (surveyState == SURVEY_STATE_DONE)
+    if (borrowed->held && globalArena != NULL_POINTER && memoryArenaGetMarker(globalArena) == borrowed->markerAfter)
     {
-        return ENGINE_DISC_READY;
+        memoryArenaRewindToMarker(globalArena, borrowed->markerBefore);
     }
+    borrowed->held = BOOLEAN_FALSE;
+}
+
+static EngineDiscLoadStatus discPassMayRead(void)
+{
     if (globalArena == NULL_POINTER || discFileSystem == NULL_POINTER || !discCatalogueIsBuilt)
     {
         return ENGINE_DISC_FAILED;
@@ -7239,15 +7232,52 @@ EngineDiscLoadStatus engineStepSurvey(void)
     {
         return ENGINE_DISC_WORKING;
     }
+    return ENGINE_DISC_READY;
+}
 
-    if (surveyState == SURVEY_STATE_IDLE)
+static DiscSurvey discSurvey;
+static MemoryArena surveyScratch;
+static BorrowedMemory surveyMemory;
+static DiscPassState surveyState = DISC_PASS_IDLE;
+
+static SimanticsRehearsal simanticsRehearsal;
+static MemoryArena rehearsalKeep;
+static MemoryArena rehearsalScratch;
+static BorrowedMemory rehearsalMemory;
+static DiscPassState rehearsalState = DISC_PASS_IDLE;
+
+static void forgetTheDiscPasses(void)
+{
+    giveBackMemory(&rehearsalMemory);
+    giveBackMemory(&surveyMemory);
+    surveyState = DISC_PASS_IDLE;
+    rehearsalState = DISC_PASS_IDLE;
+}
+
+EngineDiscLoadStatus engineStepSurvey(void)
+{
+    EngineDiscLoadStatus mayRead;
+
+    if (surveyState == DISC_PASS_DONE)
     {
-        if (!beginTheSurvey())
+        return ENGINE_DISC_READY;
+    }
+    mayRead = discPassMayRead();
+    if (mayRead != ENGINE_DISC_READY)
+    {
+        return mayRead;
+    }
+
+    if (surveyState == DISC_PASS_IDLE)
+    {
+        if (!borrowMemory(&surveyMemory, "survey"))
         {
-            surveyState = SURVEY_STATE_DONE;
+            surveyState = DISC_PASS_DONE;
             return ENGINE_DISC_FAILED;
         }
-        surveyState = SURVEY_STATE_RUNNING;
+        memoryArenaInitialize(&surveyScratch, surveyMemory.bytes, surveyMemory.size);
+        discSurveyBegin(&discSurvey, discFileSystem, &surveyScratch);
+        surveyState = DISC_PASS_RUNNING;
     }
 
     if (discSurveyStep(&discSurvey) == DISC_SURVEY_WORKING)
@@ -7270,7 +7300,54 @@ EngineDiscLoadStatus engineStepSurvey(void)
         stringAppend(message, sizeof(message), " of them Objects.package");
         platformLogMessage(message);
     }
-    releaseSurveyScratch();
-    surveyState = SURVEY_STATE_DONE;
+    giveBackMemory(&surveyMemory);
+    surveyState = DISC_PASS_DONE;
+    return ENGINE_DISC_READY;
+}
+
+EngineDiscLoadStatus engineStepRehearsal(void)
+{
+    EngineDiscLoadStatus mayRead;
+
+    if (rehearsalState == DISC_PASS_DONE)
+    {
+        return ENGINE_DISC_READY;
+    }
+    mayRead = discPassMayRead();
+    if (mayRead != ENGINE_DISC_READY)
+    {
+        return mayRead;
+    }
+
+    if (rehearsalState == DISC_PASS_IDLE)
+    {
+        MemorySize keepSize;
+
+        if (!borrowMemory(&rehearsalMemory, "rehearsal"))
+        {
+            rehearsalState = DISC_PASS_DONE;
+            return ENGINE_DISC_FAILED;
+        }
+        keepSize = rehearsalMemory.size / 4UL;
+        memoryArenaInitialize(&rehearsalKeep, rehearsalMemory.bytes, keepSize);
+        memoryArenaInitialize(&rehearsalScratch, rehearsalMemory.bytes + keepSize, rehearsalMemory.size - keepSize);
+        if (!simanticsRehearsalBegin(&simanticsRehearsal, discFileSystem, &rehearsalKeep, &rehearsalScratch))
+        {
+            platformLogMessage("rehearsal: not enough room for its tables");
+            giveBackMemory(&rehearsalMemory);
+            rehearsalState = DISC_PASS_DONE;
+            return ENGINE_DISC_FAILED;
+        }
+        rehearsalState = DISC_PASS_RUNNING;
+    }
+
+    if (simanticsRehearsalStep(&simanticsRehearsal) == SIMANTICS_REHEARSAL_WORKING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    simanticsRehearsalReport(&simanticsRehearsal, platformLogMessage);
+    giveBackMemory(&rehearsalMemory);
+    rehearsalState = DISC_PASS_DONE;
     return ENGINE_DISC_READY;
 }
