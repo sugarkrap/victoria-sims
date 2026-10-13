@@ -392,6 +392,34 @@ calls.length = 0;
     }
 
     console.log(`  ${steps} steps, ${rangesFetched} ranges, ${bytesFetched} bytes`);
+
+    // The gap survey runs after the load, as the page runs it: stepping it
+    // and drawing frames in turn, handing over whatever range it asks for.
+    let surveyStatus = 0;
+    let surveySteps = 0;
+    for (surveySteps = 0; surveySteps < 200000; surveySteps += 1) {
+        surveyStatus = instance.exports.victoriaWebStepSurvey();
+        if (surveyStatus !== 1) {
+            break;
+        }
+        const length = instance.exports.victoriaWebGetWantedLength();
+        if (length > 0) {
+            const offset = instance.exports.victoriaWebGetWantedOffset();
+            const pointer = instance.exports.victoriaWebGetDeliveryPointer();
+            new Uint8Array(instance.exports.memory.buffer, pointer, length)
+                .set(image.subarray(offset, offset + length));
+            instance.exports.victoriaWebDeliver();
+        } else if (surveySteps % 64 === 0) {
+            instance.exports.victoriaWebRenderFrame(1 / 60);
+        }
+    }
+    const surveySaid = (fragment) => loggedMessages.some((text) => text.includes(fragment));
+    check(`the survey finishes (${surveySteps} steps)`, surveyStatus === 2);
+    check("and logs its report", surveySaid("survey: done"));
+    check("having surveyed the packages on the disc", surveySaid("survey: surveyed "));
+    check("stepping it again does not report twice",
+          instance.exports.victoriaWebStepSurvey() === 2 &&
+              loggedMessages.filter((text) => text === "survey: done").length === 1);
 }
 
 if (failureCount > 0) {

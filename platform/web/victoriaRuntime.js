@@ -931,19 +931,48 @@ async function loadDisc(file) {
             if (status === DISC_STATUS_READY) {
                 runtimeState.disc = file;
             }
+            await surveyDisc(file);
             return;
         }
 
-        const length = exports.victoriaWebGetWantedLength();
-        if (length > 0) {
-            const offset = exports.victoriaWebGetWantedOffset();
-            const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
-            new Uint8Array(exports.memory.buffer,
-                           exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
-            exports.victoriaWebDeliver();
-        } else if (step % STEPS_BEFORE_YIELDING === 0) {
-            await new Promise((resolve) => setTimeout(resolve, 0));
+        await deliverWantedBytes(exports, file, step);
+    }
+}
+
+// Hands the engine whatever stretch of the disc it last asked for, or yields
+// to the browser now and then when it asked for nothing.
+async function deliverWantedBytes(exports, file, step) {
+    const length = exports.victoriaWebGetWantedLength();
+    if (length > 0) {
+        const offset = exports.victoriaWebGetWantedOffset();
+        const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+        new Uint8Array(exports.memory.buffer,
+                       exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
+        exports.victoriaWebDeliver();
+    } else if (step % STEPS_BEFORE_YIELDING === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+}
+
+// The gap survey: a research pass over every package on the disc, run after
+// the load so it never delays the menu. Its findings go to the console only,
+// as lines starting "survey:".
+async function surveyDisc(file) {
+    const exports = runtimeState.instance.exports;
+
+    if (!exports.victoriaWebStepSurvey) {
+        return;
+    }
+    console.log("survey: starting — this reads every package index on the disc, give it a moment");
+    const started = performance.now();
+    for (let step = 1; ; step += 1) {
+        const status = exports.victoriaWebStepSurvey();
+
+        if (status !== DISC_STATUS_WORKING) {
+            console.log(`survey: finished in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+            return;
         }
+        await deliverWantedBytes(exports, file, step);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "victoria/discContent.h"
+#include "victoria/discSurvey.h"
 #include "victoria/discReader.h"
 #include "victoria/engineCore.h"
 #include "victoria/jpegReader.h"
@@ -548,6 +549,9 @@ static Unsigned64 archiveBlockOffset = 0ULL;
 static Unsigned32 archiveEntriesWalked = 0U;
 static Unsigned32 archiveStoredCount = 0U;
 static Unsigned32 archivePackedCount = 0U;
+static Unsigned32 archivePackedPackages = 0U;
+static Unsigned32 archivePackedNeighborhoods = 0U;
+static Unsigned32 archivePackedObjects = 0U;
 static Unsigned64 archiveStoredBytes = 0ULL;
 static Unsigned32 archiveMountedCount = 0U;
 static Unsigned32 archiveUnmountableCount = 0U;
@@ -677,8 +681,11 @@ static void reportDiscFailure(const char *what)
     discLoadStatus = ENGINE_DISC_FAILED;
 }
 
+static void forgetTheSurvey(void);
+
 void engineBeginDiscLoad(VirtualFileSystem *fileSystem)
 {
+    forgetTheSurvey();
     discFileSystem = fileSystem;
     discLoadStatus = ENGINE_DISC_IDLE;
     discCatalogueIsBuilt = BOOLEAN_FALSE;
@@ -4665,6 +4672,9 @@ static EngineDiscLoadStatus openTheInstaller(void)
             archiveEntriesWalked = 0U;
             archiveStoredCount = 0U;
             archivePackedCount = 0U;
+            archivePackedPackages = 0U;
+            archivePackedNeighborhoods = 0U;
+            archivePackedObjects = 0U;
             archiveStoredBytes = 0ULL;
             installerStage = 6U;
             return ENGINE_DISC_WORKING;
@@ -4758,6 +4768,18 @@ static EngineDiscLoadStatus openTheInstaller(void)
             else
             {
                 archivePackedCount++;
+                if (stringEndsWithIgnoringCase(archiveEntry.name, ".package"))
+                {
+                    archivePackedPackages++;
+                    if (stringContainsIgnoringCase(archiveEntry.name, "neighborhood"))
+                    {
+                        archivePackedNeighborhoods++;
+                    }
+                    if (stringContainsIgnoringCase(archiveEntry.name, "objects.package"))
+                    {
+                        archivePackedObjects++;
+                    }
+                }
             }
             if (archiveEntriesWalked <= ARCHIVE_NAME_LIMIT_IN_LOG)
             {
@@ -7135,4 +7157,130 @@ void engineShutdown(void)
 MemoryArena *engineGetGlobalArena(void)
 {
     return globalArena;
+}
+
+/* The gap survey: a research pass over the whole disc, logged once, that runs
+ * after the disc load has finished. See discSurvey.h for what it counts. */
+
+typedef enum SurveyState
+{
+    SURVEY_STATE_IDLE = 0,
+    SURVEY_STATE_RUNNING,
+    SURVEY_STATE_DONE
+} SurveyState;
+
+static const MemorySize surveyScratchSizes[] = { 16UL * 1024UL * 1024UL, 8UL * 1024UL * 1024UL,
+                                                 4UL * 1024UL * 1024UL };
+
+static DiscSurvey discSurvey;
+static MemoryArena surveyScratch;
+static SurveyState surveyState = SURVEY_STATE_IDLE;
+static MemorySize surveyMarkerBefore = 0UL;
+static MemorySize surveyMarkerAfter = 0UL;
+static Boolean surveyHoldsScratch = BOOLEAN_FALSE;
+
+/* The scratch comes off the top of the global arena. It can only be given
+ * back if nothing has been allocated above it since; otherwise it is left
+ * where it is rather than rewinding under somebody else's memory. */
+static void releaseSurveyScratch(void)
+{
+    if (surveyHoldsScratch && globalArena != NULL_POINTER &&
+        memoryArenaGetMarker(globalArena) == surveyMarkerAfter)
+    {
+        memoryArenaRewindToMarker(globalArena, surveyMarkerBefore);
+    }
+    surveyHoldsScratch = BOOLEAN_FALSE;
+}
+
+static void forgetTheSurvey(void)
+{
+    releaseSurveyScratch();
+    surveyState = SURVEY_STATE_IDLE;
+}
+
+static Boolean beginTheSurvey(void)
+{
+    MemorySize attempt;
+    char message[128];
+
+    for (attempt = 0UL; attempt < VICTORIA_ARRAY_LENGTH(surveyScratchSizes); attempt++)
+    {
+        Unsigned8 *scratch;
+
+        surveyMarkerBefore = memoryArenaGetMarker(globalArena);
+        scratch = (Unsigned8 *)memoryArenaAllocate(globalArena, surveyScratchSizes[attempt], 8UL);
+        if (scratch == NULL_POINTER)
+        {
+            continue;
+        }
+        surveyMarkerAfter = memoryArenaGetMarker(globalArena);
+        surveyHoldsScratch = BOOLEAN_TRUE;
+        memoryArenaInitialize(&surveyScratch, scratch, surveyScratchSizes[attempt]);
+        discSurveyBegin(&discSurvey, discFileSystem, &surveyScratch);
+
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "survey: surveying the disc with ");
+        appendByteSize(message, sizeof(message), (Unsigned64)surveyScratchSizes[attempt]);
+        stringAppend(message, sizeof(message), " of scratch");
+        platformLogMessage(message);
+        return BOOLEAN_TRUE;
+    }
+    platformLogMessage("survey: not enough arena left for the survey's scratch memory");
+    return BOOLEAN_FALSE;
+}
+
+EngineDiscLoadStatus engineStepSurvey(void)
+{
+    if (surveyState == SURVEY_STATE_DONE)
+    {
+        return ENGINE_DISC_READY;
+    }
+    if (globalArena == NULL_POINTER || discFileSystem == NULL_POINTER || !discCatalogueIsBuilt)
+    {
+        return ENGINE_DISC_FAILED;
+    }
+    /* The disc delivers one read at a time. While the main menu is still
+     * reading its own resources, the survey waits rather than compete. A
+     * stopped engine steps no menu, so there is nothing to wait for. */
+    if (engineIsRunning == BOOLEAN_TRUE && gameModeIsReal == BOOLEAN_TRUE &&
+        mainMenuPhase != MAIN_MENU_PHASE_READY)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    if (surveyState == SURVEY_STATE_IDLE)
+    {
+        if (!beginTheSurvey())
+        {
+            surveyState = SURVEY_STATE_DONE;
+            return ENGINE_DISC_FAILED;
+        }
+        surveyState = SURVEY_STATE_RUNNING;
+    }
+
+    if (discSurveyStep(&discSurvey) == DISC_SURVEY_WORKING)
+    {
+        return ENGINE_DISC_WORKING;
+    }
+
+    discSurveyReport(&discSurvey, platformLogMessage);
+    if (archivePackedPackages > 0U)
+    {
+        char message[256];
+
+        /* What the survey could not see: packages the installer compressed,
+         * which are not mounted until the archive can be unpacked. */
+        message[0] = '\0';
+        stringAppend(message, sizeof(message), "survey: not surveyed — ");
+        appendCount(message, sizeof(message), archivePackedPackages);
+        stringAppend(message, sizeof(message), " package(s) still compressed inside the installer, ");
+        appendCount(message, sizeof(message), archivePackedNeighborhoods);
+        stringAppend(message, sizeof(message), " of them neighborhood, ");
+        appendCount(message, sizeof(message), archivePackedObjects);
+        stringAppend(message, sizeof(message), " of them Objects.package");
+        platformLogMessage(message);
+    }
+    releaseSurveyScratch();
+    surveyState = SURVEY_STATE_DONE;
+    return ENGINE_DISC_READY;
 }

@@ -57,6 +57,10 @@ void engineBeginDiscLoad(VirtualFileSystem *fileSystem);
 EngineDiscLoadStatus engineStepDiscLoad(void);
 EngineDiscLoadStatus engineStepGameLoad(void);
 
+/* Steps the gap survey (discSurvey.h) once the disc is loaded. WORKING until
+ * its report has been logged, then READY; FAILED when there is no disc. */
+EngineDiscLoadStatus engineStepSurvey(void);
+
 void engineReportDiscCatalogue(const VirtualFileSystem *fileSystem);
 
 const char *engineGetMenuText(void);
