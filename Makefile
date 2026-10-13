@@ -40,6 +40,7 @@ ENGINE_SOURCES := engine/source/memoryArena.c \
                   engine/source/engineText.c \
                   engine/source/uiLayoutReader.c \
                   utils/resourceHash.c engine/source/resourceIndex.c \
+                  engine/source/discSurvey.c \
                   engine/source/compression.c \
                   engine/source/discReader.c \
                   engine/source/virtualFileSystem.c \
@@ -117,7 +118,8 @@ WEB_EXPORTS := -Wl,--export=victoriaWebInitialize \
                -Wl,--export=victoriaWebGetWantedLength \
                -Wl,--export=victoriaWebGetDeliveryPointer \
                -Wl,--export=victoriaWebDeliver \
-               -Wl,--export=victoriaWebHandleGamePointer
+               -Wl,--export=victoriaWebHandleGamePointer \
+               -Wl,--export=victoriaWebStepSurvey
 
 DEBUG_WEB_EXPORTS := $(WEB_EXPORTS) \
                -Wl,--export=victoriaWebGetMenuTextPointer \
@@ -240,6 +242,7 @@ RESOURCE_NODE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceNode
 ANIMATION_READER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyAnimationReader
 TEXTURE_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyTexture
 RESOURCE_INDEX_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceIndex
+DISC_SURVEY_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyDiscSurvey
 RESOURCE_COLLECTION_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyResourceCollection
 INSTALLER_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyInstaller
 PROGRAM_VERIFIER := $(BUILD_DIRECTORY)/tests/verifyProgram
@@ -262,7 +265,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 		$(COMPRESSION_VERIFIER) $(STRINGS_VERIFIER) $(RESOURCE_COLLECTION_VERIFIER) \
 		$(SCENEGRAPH_VERIFIER) $(RESOURCE_NODE_VERIFIER) $(ANIMATION_READER_VERIFIER) \
 		$(TEXTURE_VERIFIER) \
-		$(RESOURCE_INDEX_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
+		$(RESOURCE_INDEX_VERIFIER) $(DISC_SURVEY_VERIFIER) $(INSTALLER_VERIFIER) $(PROGRAM_VERIFIER) $(ARCHIVE_VERIFIER) \
 		$(PROPERTY_SET_VERIFIER) $(WARDROBE_VERIFIER) $(DEBUG_MENU_VERIFIER) \
 		$(RESOURCE_CACHE_VERIFIER) $(FONT_READER_VERIFIER) $(GLYPH_RASTER_VERIFIER) \
 		$(FONT_ATLAS_VERIFIER) $(INTERFACE_VERIFIER) $(UI_LAYOUT_READER_VERIFIER) \
@@ -280,6 +283,7 @@ verify: $(FREESTANDING_VERIFIER) $(RASTERIZER_VERIFIER) $(PACKAGE_READER_VERIFIE
 	@$(ANIMATION_READER_VERIFIER)
 	@$(TEXTURE_VERIFIER)
 	@$(RESOURCE_INDEX_VERIFIER)
+	@$(DISC_SURVEY_VERIFIER)
 	@$(RESOURCE_COLLECTION_VERIFIER)
 	@$(INSTALLER_VERIFIER)
 	@$(PROGRAM_VERIFIER)
@@ -334,6 +338,14 @@ $(RESOURCE_INDEX_VERIFIER): tests/verifyResourceIndex.c engine/source/resourceIn
 	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyResourceIndex.c engine/source/resourceIndex.c \
 		engine/source/virtualFileSystem.c engine/source/memoryArena.c \
 		utils/strings.c utils/resourceHash.c $(VERIFIER_SUPPORT) -o $@
+
+$(DISC_SURVEY_VERIFIER): tests/verifyDiscSurvey.c engine/source/discSurvey.c \
+		engine/source/compression.c engine/source/virtualFileSystem.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT)
+	@mkdir -p $(BUILD_DIRECTORY)/tests
+	$(HOST_COMPILER) $(COMMON_FLAGS) tests/verifyDiscSurvey.c engine/source/discSurvey.c \
+		engine/source/compression.c engine/source/virtualFileSystem.c \
+		engine/source/memoryArena.c utils/strings.c $(VERIFIER_SUPPORT) -o $@
 
 $(TEXTURE_VERIFIER): tests/verifyTexture.c engine/source/textureReader.c \
 		engine/source/textureDecode.c engine/source/material.c engine/source/resourceCollection.c \

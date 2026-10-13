@@ -30,6 +30,7 @@ Unsigned32 victoriaWebGetWorstFrameMicroseconds(void);
 Unsigned32 victoriaWebGetFrameIntervalMicroseconds(void);
 Unsigned32 victoriaWebOpenDisc(double sizeInBytes);
 Unsigned32 victoriaWebStepDiscLoad(void);
+Unsigned32 victoriaWebStepSurvey(void);
 double victoriaWebGetWantedOffset(void);
 Unsigned32 victoriaWebGetWantedLength(void);
 Unsigned32 victoriaWebGetDeliveryPointer(void);
@@ -186,6 +187,12 @@ WEB_EXPORT("victoriaWebStepDiscLoad")
 Unsigned32 victoriaWebStepDiscLoad(void)
 {
     return (Unsigned32)engineStepGameLoad();
+}
+
+WEB_EXPORT("victoriaWebStepSurvey")
+Unsigned32 victoriaWebStepSurvey(void)
+{
+    return (Unsigned32)engineStepSurvey();
 }
 
 WEB_EXPORT("victoriaWebGetWantedOffset")

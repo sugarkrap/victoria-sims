@@ -931,19 +931,43 @@ async function loadDisc(file) {
             if (status === DISC_STATUS_READY) {
                 runtimeState.disc = file;
             }
+            await surveyDisc(file);
             return;
         }
 
-        const length = exports.victoriaWebGetWantedLength();
-        if (length > 0) {
-            const offset = exports.victoriaWebGetWantedOffset();
-            const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
-            new Uint8Array(exports.memory.buffer,
-                           exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
-            exports.victoriaWebDeliver();
-        } else if (step % STEPS_BEFORE_YIELDING === 0) {
-            await new Promise((resolve) => setTimeout(resolve, 0));
+        await deliverWantedBytes(exports, file, step);
+    }
+}
+
+async function deliverWantedBytes(exports, file, step) {
+    const length = exports.victoriaWebGetWantedLength();
+    if (length > 0) {
+        const offset = exports.victoriaWebGetWantedOffset();
+        const bytes = new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+        new Uint8Array(exports.memory.buffer,
+                       exports.victoriaWebGetDeliveryPointer(), length).set(bytes);
+        exports.victoriaWebDeliver();
+    } else if (step % STEPS_BEFORE_YIELDING === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+}
+
+async function surveyDisc(file) {
+    const exports = runtimeState.instance.exports;
+
+    if (!exports.victoriaWebStepSurvey) {
+        return;
+    }
+    console.log("survey: starting — this reads every package index on the disc, give it a moment");
+    const started = performance.now();
+    for (let step = 1; ; step += 1) {
+        const status = exports.victoriaWebStepSurvey();
+
+        if (status !== DISC_STATUS_WORKING) {
+            console.log(`survey: finished in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+            return;
         }
+        await deliverWantedBytes(exports, file, step);
     }
 }
 
