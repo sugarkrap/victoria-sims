@@ -931,7 +931,9 @@ async function loadDisc(file) {
             if (status === DISC_STATUS_READY) {
                 runtimeState.disc = file;
             }
-            await surveyDisc(file);
+            await runDiscPass(file, "victoriaWebStepRehearsal", "rehearsal",
+                              "running every global behaviour tree once");
+            await runDiscPass(file, "victoriaWebStepSurvey", "survey", "reading every package index on the disc");
             return;
         }
 
@@ -952,19 +954,19 @@ async function deliverWantedBytes(exports, file, step) {
     }
 }
 
-async function surveyDisc(file) {
+async function runDiscPass(file, exportName, label, what) {
     const exports = runtimeState.instance.exports;
 
-    if (!exports.victoriaWebStepSurvey) {
+    if (!exports[exportName]) {
         return;
     }
-    console.log("survey: starting — this reads every package index on the disc, give it a moment");
+    console.log(`${label}: starting — ${what}, give it a moment`);
     const started = performance.now();
     for (let step = 1; ; step += 1) {
-        const status = exports.victoriaWebStepSurvey();
+        const status = exports[exportName]();
 
         if (status !== DISC_STATUS_WORKING) {
-            console.log(`survey: finished in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+            console.log(`${label}: finished in ${((performance.now() - started) / 1000).toFixed(1)} s`);
             return;
         }
         await deliverWantedBytes(exports, file, step);

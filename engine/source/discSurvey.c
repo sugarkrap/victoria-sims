@@ -2,6 +2,7 @@
 
 #include "utils/strings.h"
 #include "victoria/compression.h"
+#include "victoria/simanticsNames.h"
 
 #define HEADER_SIZE 96UL
 #define OFFSET_INDEX_ENTRY_COUNT 36UL
@@ -106,21 +107,6 @@ static const ScriptFamilyMember scriptFamily[] = {
     { 0x53545223UL, "STR# string tables" },
     { 0x9012468AUL, "Lua global scripts" },
     { 0x9012468BUL, "Lua object scripts" }
-};
-
-static const char *const primitiveNames[] = {
-    "Sleep", "Generic Sim Call", "Expression", "Find Best Interaction", "Grab", "Drop",
-    "Change Suit or Accessory", "Refresh", "Random Number", "Burn", "Tutorial",
-    "Get Distance To", "Get Direction To", "Push Interaction", "Find Best Object For Function",
-    "Breakpoint", "Find Location For", "Idle For Input", "Remove Object Instance",
-    "Make New Character", "Run Functional Tree", "Show String", "Look Towards",
-    "Play Sound Event", "Old Relationship", "Alter Budget", "Relationship",
-    "Go To Relative Position", "Run Tree By Name", "Set Motive Change", "Gosub Found Action",
-    "Set To Next", "Test Object Type", "Find Five Worst Motives", "UI Effect", "Special Effect",
-    "Dialog (private strings)", "Test Sim Interacting With", "Dialog (global strings)",
-    "Dialog (semi-global strings)", "Online Jobs Call", "Set Balloon or Headline",
-    "Create New Object Instance", "Drop Onto", "Animate Sim", "Go To Routing Slot", "Snap",
-    "Reach", "Stop All Sounds", "Notify Stack Object Out Of Idle", "Add or Change Action String"
 };
 
 static Unsigned32 readUnsigned32(const Unsigned8 *bytes, MemorySize offset)
@@ -967,8 +953,7 @@ static void reportScripts(const DiscSurvey *survey, DiscSurveyLog log)
     stringAppend(line, sizeof(line), "survey: ");
     appendNumber(line, distinct);
     stringAppend(line, sizeof(line),
-                 " distinct primitive(s) in use, most used first. Names are The Sims 1's "
-                 "numbering — leads, not facts, for The Sims 2.");
+                 " distinct primitive(s) in use, most used first, named as PJSE names them.");
     log(line);
     log("survey:   opcode  uses  share  in-trees  cumulative  name");
 
@@ -1015,9 +1000,7 @@ static void reportScripts(const DiscSurvey *survey, DiscSurveyLog log)
             stringAppend(line, sizeof(line), "  ");
             appendPercent(line, cumulative, primitiveTotal);
             stringAppend(line, sizeof(line), "  ");
-            stringAppend(line, sizeof(line),
-                         (best < VICTORIA_ARRAY_LENGTH(primitiveNames)) ? primitiveNames[best]
-                                                                        : "(no name known)");
+            stringAppend(line, sizeof(line), simanticsPrimitiveGetName(best));
             log(line);
         }
     }

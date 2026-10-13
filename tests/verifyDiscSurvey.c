@@ -407,8 +407,8 @@ int main(void)
                   someLineSays("0x12345678", "UNKNOWN"));
         checkThat(&failureCount, "the most used primitive is reported with its name",
                   someLineSays("0x02  x3", "Expression"));
-        checkThat(&failureCount, "a primitive beyond the named ones says so",
-                  someLineSays("0x7E", "no name known"));
+        checkThat(&failureCount, "the later primitives are named too",
+                  someLineSays("0x7E", "Lua"));
         checkThat(&failureCount, "and the report says it is done", someLineSays("survey: done", ""));
     }
 
