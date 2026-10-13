@@ -22,7 +22,9 @@ jobs:
           sudo apt-get install -y clang lld
 
       - name: Build
-        run: make web EXTRA_FLAGS=-Werror
+        run: |
+          make web EXTRA_FLAGS=-Werror
+          make debug_web EXTRA_FLAGS=-Werror
 
       - name: Verify the module before publishing
         run: |
@@ -36,6 +38,9 @@ jobs:
             Cross-Origin-Opener-Policy: same-origin
             Cross-Origin-Embedder-Policy: require-corp
           /*.wasm
+            Content-Type: application/wasm
+            Cache-Control: public, max-age=0, must-revalidate
+          /debug/*.wasm
             Content-Type: application/wasm
             Cache-Control: public, max-age=0, must-revalidate
           HEADERS

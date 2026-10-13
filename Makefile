@@ -196,10 +196,10 @@ $(WEB_MODULE): $(WEB_SOURCES) platform/web/index.html platform/web/victoriaRunti
 
 debug_web: $(DEBUG_WEB_MODULE)
 
-$(DEBUG_WEB_MODULE): $(DEBUG_WEB_SOURCES) platform/web/index.html platform/web/victoriaRuntime.js
+$(DEBUG_WEB_MODULE): $(DEBUG_WEB_SOURCES) platform/web/debug/index.html platform/web/victoriaRuntime.js
 	@mkdir -p $(DEBUG_WEB_OUTPUT_DIRECTORY)
 	$(WEB_COMPILER) $(COMMON_FLAGS) $(WEB_FLAGS) $(DEBUG_WEB_LINK_FLAGS) $(DEBUG_WEB_SOURCES) -o $@
-	cp platform/web/index.html platform/web/victoriaRuntime.js $(DEBUG_WEB_OUTPUT_DIRECTORY)/
+	cp platform/web/debug/index.html platform/web/victoriaRuntime.js $(DEBUG_WEB_OUTPUT_DIRECTORY)/
 
 armv5: $(ARM_LIBRARY)
 
